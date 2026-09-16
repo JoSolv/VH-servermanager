@@ -1,0 +1,11 @@
+{# Action buttons for one instance. Re-fetched whenever the status changes. #}
+<div class="row" data-controls hx-target="this" hx-swap="outerHTML">
+  {% set active = record.supervisor.status.value in ('starting', 'running', 'stopping') %}
+  <button class="primary" hx-post="/instances/{{ record.config.id }}/start"
+          {{ 'disabled' if active }}>Start</button>
+  <button hx-post="/instances/{{ record.config.id }}/stop"
+          {{ 'disabled' if not active }}>Stop</button>
+  <button hx-post="/instances/{{ record.config.id }}/restart"
+          {{ 'disabled' if not active }}>Restart</button>
+  <span class="spinner">working…</span>
+</div>

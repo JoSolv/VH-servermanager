@@ -1,0 +1,67 @@
+{# Installed mod list. Every mod mutation re-renders this block. #}
+<div id="installed-mods" class="panel">
+  {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <div class="row spread" style="margin-bottom:14px">
+    <h2 style="margin:0">Installed ({{ mods.count }})</h2>
+    <div class="row" hx-target="#installed-mods" hx-swap="outerHTML">
+      {% if mods.updates %}
+        <button class="primary small" hx-post="/api/instances/{{ record.config.id }}/mods/update-all">
+          Update {{ mods.updates | length }}
+        </button>
+      {% endif %}
+      {% if orphans %}
+        <button class="small" hx-post="/api/instances/{{ record.config.id }}/mods/prune"
+                hx-confirm="Remove {{ orphans | length }} unused dependency package(s)?">
+          Prune unused
+        </button>
+      {% endif %}
+      <a class="btn small" href="/api/instances/{{ record.config.id }}/mods/export">Export</a>
+    </div>
+  </div>
+
+  {% if not mods.bepinex_installed and mods.count %}
+    <div class="alert info">BepInEx is not installed, so these mods will not load. Installing any mod pulls it in automatically.</div>
+  {% endif %}
+  {% if mods.count and not record.config.mods_enabled %}
+    <div class="alert info">This instance is set to launch <strong>without</strong> BepInEx. Enable “Launch with BepInEx” in its configuration.</div>
+  {% endif %}
+
+  {% if mods.mods %}
+    {% set update_map = {} %}
+    {% for entry in mods.updates %}{% set _ = update_map.update({entry.package_full_name: entry.latest}) %}{% endfor %}
+    <div class="modlist">
+      {% for mod in mods.mods %}
+        <div class="mod {{ 'disabled' if not mod.enabled }}">
+          {% if mod.icon %}
+            <img src="{{ mod.icon }}" alt="" loading="lazy" referrerpolicy="no-referrer">
+          {% else %}<div class="mod-icon-blank" style="width:40px;height:40px"></div>{% endif %}
+          <div class="info">
+            <div class="name">
+              {{ mod.name }}
+              <span class="muted" style="font-weight:400">{{ mod.version }}</span>
+              {% if mod.dependency_only %}<span class="tag dep">dependency</span>{% endif %}
+              {% if update_map.get(mod.package_full_name) %}
+                <span class="tag upd">&rarr; {{ update_map[mod.package_full_name] }}</span>
+              {% endif %}
+              {% if not mod.enabled %}<span class="tag">disabled</span>{% endif %}
+            </div>
+            <div class="desc">{{ mod.description or mod.namespace }}</div>
+          </div>
+          <div class="row" hx-target="#installed-mods" hx-swap="outerHTML">
+            <button class="small"
+                    hx-post="/api/instances/{{ record.config.id }}/mods/{{ mod.package_full_name }}/toggle">
+              {{ 'Disable' if mod.enabled else 'Enable' }}
+            </button>
+            <button class="small danger"
+                    hx-post="/api/instances/{{ record.config.id }}/mods/{{ mod.package_full_name }}/uninstall"
+                    hx-confirm="Remove {{ mod.name }}?">Remove</button>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty">No mods installed. Search the catalogue to add some.</div>
+  {% endif %}
+</div>

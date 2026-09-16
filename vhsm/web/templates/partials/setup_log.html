@@ -1,0 +1,7 @@
+<div id="setup-log"
+     {% if task.running %}hx-get="/settings/log" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  {% if task.lines %}
+    <div class="console" style="height:260px">{% for line in task.lines %}<div class="line {{ 'mgr' if '[manager]' in line }} {{ 'err' if '[error]' in line }}">{{ line }}</div>{% endfor %}</div>
+    {% if task.running %}<p class="subtle">Running…</p>{% endif %}
+  {% endif %}
+</div>

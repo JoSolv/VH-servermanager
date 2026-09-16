@@ -1,0 +1,47 @@
+<div id="search-results">
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+  <p class="subtle">
+    {{ total }} package(s){% if query %} matching “{{ query }}”{% endif %}{% if category %} in {{ category }}{% endif %}
+  </p>
+  <div class="modlist">
+    {% for package in packages %}
+      {% set current = installed.get(package.full_name | lower) %}
+      <div class="mod">
+        {% if package.icon %}
+          <img src="{{ package.icon }}" alt="" loading="lazy" referrerpolicy="no-referrer">
+        {% endif %}
+        <div class="info">
+          <div class="name">
+            <a href="{{ package.package_url }}" target="_blank" rel="noopener noreferrer">{{ package.name }}</a>
+            <span class="muted" style="font-weight:400">{{ package.latest_version }} by {{ package.owner }}</span>
+            {% if package.is_deprecated %}<span class="tag">deprecated</span>{% endif %}
+            {% if current %}<span class="tag dep">installed {{ current }}</span>{% endif %}
+          </div>
+          <div class="desc">{{ package.description }}</div>
+        </div>
+        <form hx-post="/api/instances/{{ instance_id }}/mods/install"
+              hx-target="#installed-mods" hx-swap="outerHTML" hx-indicator="closest .mod">
+          <input type="hidden" name="package_full_name" value="{{ package.full_name }}">
+          <button class="small {{ '' if current else 'primary' }}" type="submit">
+            {% if current and current != package.latest_version %}Update{% elif current %}Reinstall{% else %}Install{% endif %}
+          </button>
+          <span class="spinner">…</span>
+        </form>
+      </div>
+    {% else %}
+      <div class="empty">Nothing matched.</div>
+    {% endfor %}
+  </div>
+
+  {% if total > limit %}
+    <div class="row spread" style="margin-top:14px">
+      <button class="small" {{ 'disabled' if offset <= 0 }}
+              hx-get="/api/mods/search?instance_id={{ instance_id }}&q={{ query | urlencode }}&category={{ category | urlencode }}&offset={{ [offset - limit, 0] | max }}&limit={{ limit }}"
+              hx-target="#search-results" hx-swap="outerHTML">&larr; Previous</button>
+      <span class="subtle">{{ offset + 1 }}&ndash;{{ [offset + limit, total] | min }} of {{ total }}</span>
+      <button class="small" {{ 'disabled' if offset + limit >= total }}
+              hx-get="/api/mods/search?instance_id={{ instance_id }}&q={{ query | urlencode }}&category={{ category | urlencode }}&offset={{ offset + limit }}&limit={{ limit }}"
+              hx-target="#search-results" hx-swap="outerHTML">Next &rarr;</button>
+    </div>
+  {% endif %}
+</div>

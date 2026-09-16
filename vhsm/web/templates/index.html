@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% set nav = 'dashboard' %}
+{% block content %}
+
+{% if not status.server_installed and not status.fake_server %}
+  <div class="alert info">
+    The Valheim dedicated server is not installed yet.
+    <a href="/settings">Install it from the Settings page</a> before starting an instance.
+  </div>
+{% endif %}
+{% if status.fake_server %}
+  <div class="alert info">
+    Running in <strong>development mode</strong> (VHSM_FAKE_SERVER=1): instances launch a
+    simulated server, not the real Valheim binary.
+  </div>
+{% endif %}
+{% if not net_available %}
+  <div class="alert info">
+    Per-instance network accounting is off &mdash; {{ net_reason or 'nftables is unavailable' }}.
+    Host-wide traffic is still shown below.
+  </div>
+{% endif %}
+
+<div class="panel" data-host>
+  <div class="hoststrip">
+    <div class="stat">
+      <div class="k">Host CPU</div>
+      <div class="v" data-f="host-cpu">--</div>
+      <div class="meter" data-meter="host-cpu"><span></span></div>
+    </div>
+    <div class="stat">
+      <div class="k">Host memory</div>
+      <div class="v" style="font-size:15px" data-f="host-mem">--</div>
+      <div class="meter" data-meter="host-mem"><span></span></div>
+    </div>
+    <div class="stat">
+      <div class="k">Load average</div>
+      <div class="v" style="font-size:16px" data-f="host-load">--</div>
+    </div>
+    <div class="stat">
+      <div class="k">Host network</div>
+      <div class="v" style="font-size:14px" data-f="host-net">--</div>
+    </div>
+    <div class="stat">
+      <div class="k">Instances</div>
+      <div class="v">{{ records | length }}</div>
+      <div class="sub">{{ status.install_size | human_bytes }} of server files</div>
+    </div>
+  </div>
+</div>
+
+<div class="page-head">
+  <h1>Instances</h1>
+  <a class="btn primary" href="/instances/new">+ New instance</a>
+</div>
+
+{% if records %}
+  <div class="grid">
+    {% for record in records %}{% include "partials/instance_card.html" %}{% endfor %}
+  </div>
+{% else %}
+  <div class="panel empty">
+    <p>No server instances yet.</p>
+    <a class="btn primary" href="/instances/new">Create your first instance</a>
+  </div>
+{% endif %}
+
+{% endblock %}

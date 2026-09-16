@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% set nav = 'settings' %}
+{% block title %}Settings &middot; Valheim Server Manager{% endblock %}
+{% block content %}
+<div class="page-head"><h1>Settings</h1></div>
+
+<div class="panel">
+  <h2>Dedicated server files</h2>
+  <table>
+    <tr><th>steamcmd</th><td>{% if status.steamcmd_installed %}installed{% else %}<span class="muted">not installed</span>{% endif %} &middot; <code>{{ status.steamcmd_path }}</code></td></tr>
+    <tr><th>Server</th><td>{% if status.server_installed %}installed ({{ status.install_size | human_bytes }}){% else %}<span class="muted">not installed</span>{% endif %} &middot; <code>{{ status.server_path }}</code></td></tr>
+    <tr><th>Disk free</th><td>{{ status.disk_free | human_bytes }}</td></tr>
+    <tr><th>Mode</th><td>{% if status.fake_server %}<strong>development</strong> (simulated server){% else %}production{% endif %}</td></tr>
+  </table>
+
+  <form hx-post="/settings/install" hx-target="#setup-log" hx-swap="outerHTML" style="margin-top:14px">
+    <div class="check">
+      <input type="checkbox" id="validate" name="validate_files" value="1">
+      <label for="validate">Validate files (slower, repairs a broken install)</label>
+    </div>
+    <button class="primary" type="submit">
+      {% if status.server_installed %}Update server{% else %}Install server{% endif %}
+    </button>
+    <span class="subtle">Downloads roughly 2 GB on a first install.</span>
+  </form>
+  {% include "partials/setup_log.html" %}
+</div>
+
+<div class="panel">
+  <h2>Mod cache</h2>
+  <p class="subtle">
+    Downloaded Thunderstore packages are cached once and reused by every instance, so a second
+    server installs the same mod without downloading it again.
+  </p>
+  <table>
+    <tr><th>Cache size</th><td>{{ cache_bytes | human_bytes }}</td></tr>
+    <tr><th>Catalogue</th><td>{{ index_count }} packages</td></tr>
+    <tr><th>Location</th><td><code>{{ settings.cache_dir }}</code></td></tr>
+  </table>
+</div>
+
+<div class="panel">
+  <h2>Monitoring</h2>
+  <table>
+    <tr>
+      <th>Per-instance network</th>
+      <td>
+        {% if net_available %}nftables counters active{% else %}
+          <span class="muted">unavailable &mdash; {{ net_reason }}</span>
+        {% endif %}
+      </td>
+    </tr>
+    <tr><th>Sample interval</th><td>{{ settings.sample_interval }}s</td></tr>
+    <tr><th>Data root</th><td><code>{{ settings.data_root }}</code></td></tr>
+    <tr><th>Bind address</th><td><code>{{ settings.host }}:{{ settings.port }}</code></td></tr>
+  </table>
+  {% if settings.host not in ('127.0.0.1', 'localhost') %}
+    <div class="alert error" style="margin-top:12px">
+      This manager has <strong>no authentication</strong> and is bound to {{ settings.host }}.
+      Anyone who can reach this port can start processes on the host. Put it behind a
+      reverse proxy with authentication, or bind it to 127.0.0.1 and use an SSH tunnel.
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

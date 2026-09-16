@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Mods &middot; {{ config.name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Mods &middot; {{ config.name }}</h1>
+    <div class="subtle">
+      Packages install into this instance's own BepInEx profile, downloaded once and cached for every server.
+    </div>
+  </div>
+  <a class="btn" href="/instances/{{ config.id }}">&larr; Back to instance</a>
+</div>
+
+{% if index_error %}
+  <div class="alert error">Could not reach Thunderstore: {{ index_error }}</div>
+{% endif %}
+
+<div class="two-col">
+  {% include "partials/installed_mods.html" %}
+
+  <div class="panel">
+    <div class="row spread" style="margin-bottom:12px">
+      <h2 style="margin:0">Thunderstore</h2>
+      <span class="subtle">{{ index_count }} packages</span>
+    </div>
+
+    <form hx-get="/api/mods/search" hx-target="#search-results" hx-swap="outerHTML"
+          hx-trigger="submit, keyup changed delay:400ms from:#q, change from:#category">
+      <input type="hidden" name="instance_id" value="{{ config.id }}">
+      <div class="row" style="margin-bottom:12px">
+        <input type="text" id="q" name="q" placeholder="Search mods…" style="flex:2;min-width:180px">
+        <select id="category" name="category" style="flex:1;min-width:140px">
+          <option value="">All categories</option>
+          {% for value in categories %}<option value="{{ value }}">{{ value }}</option>{% endfor %}
+        </select>
+        <button class="primary" type="submit">Search</button>
+      </div>
+    </form>
+
+    <div class="toolbar">
+      <button class="small" hx-post="/api/mods/refresh" hx-target="#refresh-note" hx-swap="innerHTML">
+        Refresh catalogue
+      </button>
+      <form hx-post="/api/instances/{{ config.id }}/mods/upload" hx-target="#installed-mods"
+            hx-swap="outerHTML" hx-encoding="multipart/form-data">
+        <label for="upload-zip">Install a package zip</label>
+        <div class="row">
+          <input type="file" id="upload-zip" name="file" accept=".zip" required>
+          <button class="small" type="submit">Upload</button>
+        </div>
+      </form>
+      <form hx-post="/api/instances/{{ config.id }}/mods/import" hx-target="#installed-mods"
+            hx-swap="outerHTML" hx-encoding="multipart/form-data">
+        <label for="import-profile">Import an exported profile</label>
+        <div class="row">
+          <input type="file" id="import-profile" name="file" accept=".json" required>
+          <button class="small" type="submit">Import</button>
+        </div>
+      </form>
+    </div>
+    <div id="refresh-note"></div>
+
+    <div id="search-results"
+         hx-get="/api/mods/search?instance_id={{ config.id }}&limit=20"
+         hx-trigger="load" hx-swap="outerHTML">
+      <div class="empty">Loading catalogue…</div>
+    </div>
+  </div>
+</div>
+{% endblock %}

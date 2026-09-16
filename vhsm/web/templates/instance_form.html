@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% set nav = 'new' %}
+{% block title %}New instance &middot; Valheim Server Manager{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>New instance</h1>
+  <a class="btn" href="/">Cancel</a>
+</div>
+
+<form class="panel" method="post" action="/instances">
+  {% include "partials/config_fields.html" %}
+  <div class="row">
+    <button class="primary" type="submit">Create instance</button>
+    <span class="subtle">The world is generated the first time the server starts.</span>
+  </div>
+</form>
+{% endblock %}

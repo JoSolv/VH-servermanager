@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}{{ config.name }} &middot; Valheim Server Manager{% endblock %}
+{% block content %}
+{% set status = record.supervisor.status.value %}
+
+<div class="page-head">
+  <div>
+    <h1>{{ config.name }}</h1>
+    <div class="subtle">
+      World <strong>{{ config.world }}</strong> &middot; UDP {{ config.port }}&ndash;{{ config.port + 2 }}
+      &middot; query {{ config.query_port }}
+    </div>
+  </div>
+  <div class="row">
+    <span class="pill {{ status }}" data-f="status">{{ status }}</span>
+    <a class="btn" href="/instances/{{ config.id }}/mods">Manage mods ({{ mods.count }})</a>
+  </div>
+</div>
+
+{% if record.supervisor.last_error %}
+  <div class="alert error">{{ record.supervisor.last_error }}</div>
+{% endif %}
+
+<div data-instance="{{ config.id }}">
+  <div class="panel">
+    {% include "partials/controls.html" %}
+    <div class="metrics" style="grid-template-columns: repeat(auto-fit, minmax(130px,1fr)); margin-top:14px">
+      <div class="metric"><div class="k">Players</div><div class="v" data-f="players">{{ record.players.count }}</div></div>
+      <div class="metric"><div class="k">Uptime</div><div class="v" data-f="uptime">--</div></div>
+      <div class="metric">
+        <div class="k">CPU</div><div class="v" data-f="cpu">--</div>
+        <div class="meter" data-meter="cpu"><span></span></div>
+      </div>
+      <div class="metric">
+        <div class="k">Memory</div><div class="v" data-f="mem">--</div>
+        <div class="meter" data-meter="mem"><span></span></div>
+      </div>
+      <div class="metric"><div class="k">Threads</div><div class="v" data-f="threads">--</div></div>
+      <div class="metric"><div class="k">PID</div><div class="v" data-f="pid">--</div></div>
+    </div>
+    <div class="metric" style="margin-top:10px">
+      <div class="k">Network</div>
+      <div class="v" style="font-size:15px" data-f="net">--</div>
+    </div>
+    <svg class="spark" data-spark="cpu" viewBox="0 0 100 30" preserveAspectRatio="none" style="margin-top:10px">
+      <polyline points=""></polyline>
+    </svg>
+  </div>
+
+  <div class="two-col">
+    <div class="panel">
+      <h2>Console</h2>
+      <div class="console" id="console" data-instance-id="{{ config.id }}"></div>
+    </div>
+    <div class="panel">
+      <h2>Connected players</h2>
+      <ul data-players-list style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px">
+        <li class="muted">Nobody connected</li>
+      </ul>
+      <p class="subtle" style="margin-top:16px">
+        Counts come from the Steam query port; names are read from the server console.
+      </p>
+    </div>
+  </div>
+</div>
+
+<form class="panel" method="post" action="/instances/{{ config.id }}/edit">
+  <h2>Configuration</h2>
+  {% if status in ('running', 'starting', 'stopping') %}
+    <div class="alert info">The server is running. Most changes apply after a restart, and the port cannot be changed.</div>
+  {% endif %}
+  {% include "partials/config_fields.html" %}
+  <button class="primary" type="submit">Save changes</button>
+</form>
+
+<div class="panel">
+  <h2>Danger zone</h2>
+  <form hx-post="/instances/{{ config.id }}/delete"
+        hx-confirm="Delete {{ config.name }}? This stops the server first."
+        hx-target="body">
+    <div class="check">
+      <input type="checkbox" id="remove_files" name="remove_files">
+      <label for="remove_files">Also delete world saves and installed mods from disk</label>
+    </div>
+    <button class="danger" type="submit">Delete instance</button>
+  </form>
+</div>
+{% endblock %}

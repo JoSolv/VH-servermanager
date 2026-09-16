@@ -1,0 +1,96 @@
+{# Shared by the create and edit forms. Expects: config, presets, modifier_keys #}
+<div class="form-grid">
+  <div class="field">
+    <label for="name">Server name</label>
+    <input type="text" id="name" name="name" value="{{ config.name }}" required
+           maxlength="64" placeholder="Midgard">
+    <div class="hint">Shown in the Valheim server browser.</div>
+  </div>
+  <div class="field">
+    <label for="world">World name</label>
+    <input type="text" id="world" name="world" value="{{ config.world }}" required
+           maxlength="64" placeholder="Dedicated">
+    <div class="hint">Creates <code>&lt;world&gt;.db</code> on first launch.</div>
+  </div>
+  <div class="field">
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" value="{{ config.password }}"
+           minlength="5" placeholder="at least 5 characters">
+    <div class="hint">Required for public servers. Must not appear in the server or world name.</div>
+  </div>
+  <div class="field">
+    <label for="port">Game port</label>
+    <input type="number" id="port" name="port" value="{{ config.port }}" min="1024" max="65530">
+    <div class="hint">Uses UDP {{ config.port }}&ndash;{{ config.port + 2 }}; queries answer on {{ config.port + 1 }}.</div>
+  </div>
+</div>
+
+<div class="row" style="gap:24px; margin-bottom:14px">
+  <div class="check">
+    <input type="checkbox" id="public" name="public" {{ 'checked' if config.public }}>
+    <label for="public">List publicly</label>
+  </div>
+  <div class="check">
+    <input type="checkbox" id="crossplay" name="crossplay" {{ 'checked' if config.crossplay }}>
+    <label for="crossplay">Enable crossplay</label>
+  </div>
+  <div class="check">
+    <input type="checkbox" id="autostart" name="autostart" {{ 'checked' if config.autostart }}>
+    <label for="autostart">Start with the manager</label>
+  </div>
+  <div class="check">
+    <input type="checkbox" id="mods_enabled" name="mods_enabled" {{ 'checked' if config.mods_enabled }}>
+    <label for="mods_enabled">Launch with BepInEx</label>
+  </div>
+</div>
+
+<h3>World rules</h3>
+<div class="form-grid">
+  <div class="field">
+    <label for="preset">Preset</label>
+    <select id="preset" name="preset">
+      <option value="">(default)</option>
+      {% for value in presets %}
+        <option value="{{ value }}" {{ 'selected' if config.preset == value }}>{{ value }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  {% for key, values in modifier_keys.items() %}
+    <div class="field">
+      <label for="modifier_{{ key }}">{{ key | capitalize }}</label>
+      <select id="modifier_{{ key }}" name="modifier_{{ key }}">
+        <option value="">(default)</option>
+        {% for value in values %}
+          <option value="{{ value }}" {{ 'selected' if config.modifiers.get(key) == value }}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  {% endfor %}
+</div>
+
+<h3>Saving &amp; backups</h3>
+<div class="form-grid">
+  <div class="field">
+    <label for="save_interval">Autosave interval (s)</label>
+    <input type="number" id="save_interval" name="save_interval" value="{{ config.save_interval }}" min="60">
+  </div>
+  <div class="field">
+    <label for="backups">Backups to keep</label>
+    <input type="number" id="backups" name="backups" value="{{ config.backups }}" min="0" max="64">
+  </div>
+  <div class="field">
+    <label for="backup_short">Short backup interval (s)</label>
+    <input type="number" id="backup_short" name="backup_short" value="{{ config.backup_short }}" min="60">
+  </div>
+  <div class="field">
+    <label for="backup_long">Long backup interval (s)</label>
+    <input type="number" id="backup_long" name="backup_long" value="{{ config.backup_long }}" min="60">
+  </div>
+</div>
+
+<div class="field">
+  <label for="extra_args">Extra launch arguments</label>
+  <input type="text" id="extra_args" name="extra_args" value="{{ config.extra_args }}"
+         placeholder="-instanceid 1">
+  <div class="hint">Appended verbatim to the server command line.</div>
+</div>

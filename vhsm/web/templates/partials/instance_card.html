@@ -1,0 +1,52 @@
+{% set config = record.config %}
+{% set status = record.supervisor.status.value %}
+<article class="card" data-instance="{{ config.id }}">
+  <div class="row spread">
+    <h3><a href="/instances/{{ config.id }}">{{ config.name }}</a></h3>
+    <span class="pill {{ status }}" data-f="status">{{ status }}</span>
+  </div>
+
+  <div class="meta">
+    World <strong>{{ config.world }}</strong> &middot; port {{ config.port }}
+    {% if config.public %}&middot; <span class="tag">public</span>{% endif %}
+    {% if config.crossplay %}&middot; <span class="tag">crossplay</span>{% endif %}
+    {% if config.mods_enabled %}&middot; <span class="tag dep">modded</span>{% endif %}
+  </div>
+
+  <svg class="spark" data-spark="cpu" viewBox="0 0 100 30" preserveAspectRatio="none">
+    <polyline points=""></polyline>
+  </svg>
+
+  <div class="metrics">
+    <div class="metric">
+      <div class="k">Players</div>
+      <div class="v" data-f="players">{{ record.players.count }}</div>
+    </div>
+    <div class="metric">
+      <div class="k">Uptime</div>
+      <div class="v" data-f="uptime">--</div>
+    </div>
+    <div class="metric">
+      <div class="k">CPU</div>
+      <div class="v" data-f="cpu">--</div>
+      <div class="meter" data-meter="cpu"><span></span></div>
+    </div>
+    <div class="metric">
+      <div class="k">Memory</div>
+      <div class="v" data-f="mem">--</div>
+      <div class="meter" data-meter="mem"><span></span></div>
+    </div>
+  </div>
+
+  <div class="metric">
+    <div class="k">Network</div>
+    <div class="v" data-f="net" style="font-size:14px">--</div>
+  </div>
+
+  {% include "partials/controls.html" %}
+
+  <div class="row">
+    <a class="btn small" href="/instances/{{ config.id }}">Details</a>
+    <a class="btn small" href="/instances/{{ config.id }}/mods">Mods</a>
+  </div>
+</article>
