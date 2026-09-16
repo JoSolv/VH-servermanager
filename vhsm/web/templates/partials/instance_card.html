@@ -8,6 +8,7 @@
 
   <div class="meta">
     World <strong>{{ config.world }}</strong> &middot; port {{ config.port }}
+    &middot; <span data-f="version" title="Version reported by the running server">{{ record.version or '—' }}</span>
     {% if config.public %}&middot; <span class="tag">public</span>{% endif %}
     {% if config.crossplay %}&middot; <span class="tag">crossplay</span>{% endif %}
     {% if config.mods_enabled %}&middot; <span class="tag dep">modded</span>{% endif %}
@@ -29,6 +30,7 @@
     <div class="metric">
       <div class="k">CPU</div>
       <div class="v" data-f="cpu">--</div>
+      <div class="sub muted" data-f="cpu-cores">&nbsp;</div>
       <div class="meter" data-meter="cpu"><span></span></div>
     </div>
     <div class="metric">

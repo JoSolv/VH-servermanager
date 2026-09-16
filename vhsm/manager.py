@@ -1,4 +1,4 @@
-"""The manager: owns every instance and the background sampling loop."""
+"""The manager: owns every instance, the sampling loop and scheduled updates."""
 
 from __future__ import annotations
 
@@ -7,8 +7,10 @@ import contextlib
 import json
 import logging
 import shutil
+import time
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import datetime
+from typing import Any, Awaitable, Callable
 
 from .config import Settings, settings as default_settings
 from .instance import InstanceConfig, InstanceLayout, ValidationError
@@ -18,8 +20,17 @@ from .monitor.a2s import A2SError, query as a2s_query
 from .monitor.metrics import ProcMetrics, ProcessSampler, host_metrics
 from .monitor.net import NetworkMonitor, NetSample
 from .monitor.players import PlayerTracker
+from .playerlists import PlayerLists
+from .steam import (
+    SteamError,
+    install_steamcmd,
+    installed_build_id,
+    latest_build_id,
+    update_server,
+    write_steam_appid,
+)
 from .supervisor import Status, Supervisor
-from .util import read_json
+from .util import read_json, write_json
 
 log = logging.getLogger("vhsm.manager")
 
@@ -27,10 +38,81 @@ log = logging.getLogger("vhsm.manager")
 #: round-trips are not.
 QUERY_EVERY_N_TICKS = 3
 A2S_TIMEOUT = 1.5
+#: Don't re-ask Steam for the newest build more often than this.
+BUILD_CHECK_TTL = 900.0
 
 
 class ManagerError(RuntimeError):
     pass
+
+
+class JobLog:
+    """Output of one long-running job (install, update), pollable by the UI."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self.running = False
+        self.title = ""
+
+    def log(self, message: str) -> None:
+        self.lines.append(message)
+        del self.lines[:-400]
+
+    async def run(self, title: str, body: Callable[[], Awaitable[None]]) -> bool:
+        if self.running:
+            self.log("[manager] another job is already running")
+            return False
+        self.running, self.title = True, title
+        self.lines.clear()
+        try:
+            await body()
+            return True
+        except SteamError as exc:
+            self.log(f"[error] {exc}")
+        except asyncio.CancelledError:
+            self.log("[error] cancelled")
+            raise
+        except Exception as exc:  # noqa: BLE001 - surfaced in the UI
+            self.log(f"[error] unexpected: {exc}")
+            log.exception("job %s failed", title)
+        finally:
+            self.running = False
+            self.log("[manager] done")
+        return False
+
+
+@dataclass(slots=True)
+class AutoUpdate:
+    """Scheduled update settings, persisted in the data root."""
+
+    enabled: bool = False
+    #: Local time of day, ``HH:MM``.
+    at: str = "04:00"
+    restart_instances: bool = True
+    validate: bool = False
+    #: ``YYYY-MM-DD`` of the last run, so a restart cannot double-fire.
+    last_run_date: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "at": self.at,
+            "restart_instances": self.restart_instances,
+            "validate": self.validate,
+            "last_run_date": self.last_run_date,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "AutoUpdate":
+        known = {f for f in cls.__dataclass_fields__}
+        return cls(**{k: v for k, v in (payload or {}).items() if k in known})
+
+    def due(self, now: datetime) -> bool:
+        return (
+            self.enabled
+            and now.strftime("%H:%M") == self.at
+            and self.last_run_date != now.strftime("%Y-%m-%d")
+        )
 
 
 @dataclass(slots=True)
@@ -40,9 +122,24 @@ class InstanceRecord:
     config: InstanceConfig
     layout: InstanceLayout
     supervisor: Supervisor
+    lists: PlayerLists
     players: PlayerTracker = field(default_factory=PlayerTracker)
     metrics: ProcMetrics = field(default_factory=ProcMetrics)
     net: NetSample = field(default_factory=NetSample)
+    #: Version reported by the Steam query socket, when it answers.
+    query_version: str = ""
+    #: In-flight lifecycle operation, owned by the manager rather than by an
+    #: HTTP request, so a browser navigating away cannot abandon it half-done.
+    operation: asyncio.Task | None = None
+    operation_name: str = ""
+
+    @property
+    def busy(self) -> bool:
+        return self.operation is not None and not self.operation.done()
+
+    @property
+    def version(self) -> str:
+        return self.supervisor.server_version or self.query_version
 
     def snapshot(self) -> dict[str, Any]:
         config, supervisor = self.config, self.supervisor
@@ -57,11 +154,13 @@ class InstanceRecord:
             "mods_enabled": config.mods_enabled,
             "autostart": config.autostart,
             "status": supervisor.status.value,
+            "operation": self.operation_name if self.busy else "",
             "pid": supervisor.pid,
             "uptime": round(supervisor.uptime),
             "exit_code": supervisor.exit_code,
             "last_error": supervisor.last_error,
-            "players": self.players.to_dict(),
+            "version": self.version,
+            "players": self.players.to_dict(self.lists),
             "metrics": self.metrics.to_dict(),
             "net": self.net.to_dict(),
         }
@@ -106,10 +205,31 @@ class InstanceManager:
         self.index = ThunderstoreIndex(self.settings.cache_dir, self.settings.index_ttl)
         self.hub = Hub()
         self.net = NetworkMonitor()
+        self.job = JobLog()
         self._proc_sampler = ProcessSampler()
         self._records: dict[str, InstanceRecord] = {}
         self._sampler_task: asyncio.Task[None] | None = None
+        self._scheduler_task: asyncio.Task[None] | None = None
         self._tick = 0
+
+        self._state_file = self.settings.data_root / "manager.json"
+        state = read_json(self._state_file, {}) or {}
+        self.auto_update = AutoUpdate.from_dict(state.get("auto_update", {}))
+        self._latest_build: str = str(state.get("latest_build", ""))
+        self._latest_checked: float = float(state.get("latest_checked", 0) or 0)
+
+    # ------------------------------------------------------------------ #
+    # persisted manager state
+    # ------------------------------------------------------------------ #
+    def save_state(self) -> None:
+        write_json(
+            self._state_file,
+            {
+                "auto_update": self.auto_update.to_dict(),
+                "latest_build": self._latest_build,
+                "latest_checked": self._latest_checked,
+            },
+        )
 
     # ------------------------------------------------------------------ #
     # registry
@@ -141,7 +261,12 @@ class InstanceManager:
     def _register(self, config: InstanceConfig) -> InstanceRecord:
         layout = InstanceLayout.for_instance(self.settings, config.id)
         supervisor = Supervisor(config, layout, self.settings)
-        record = InstanceRecord(config=config, layout=layout, supervisor=supervisor)
+        record = InstanceRecord(
+            config=config,
+            layout=layout,
+            supervisor=supervisor,
+            lists=PlayerLists(layout.savedir, layout.root),
+        )
         supervisor.add_log_hook(record.players.observe_log)
         self._records[config.id] = record
         self.net.watch(config.port)
@@ -190,8 +315,6 @@ class InstanceManager:
 
     def save(self, instance_id: str) -> None:
         record = self.get(instance_id)
-        from .util import write_json
-
         write_json(record.layout.config_file, record.config.to_dict())
 
     def update(self, instance_id: str, changes: dict[str, Any]) -> InstanceRecord:
@@ -219,6 +342,7 @@ class InstanceManager:
 
     async def delete(self, instance_id: str, *, remove_files: bool = False) -> None:
         record = self.get(instance_id)
+        await self._cancel_operation(record)
         if record.supervisor.status.is_active:
             await record.supervisor.stop()
         self.net.unwatch(record.config.port)
@@ -235,7 +359,9 @@ class InstanceManager:
     async def start(self, instance_id: str) -> None:
         record = self.get(instance_id)
         record.players.reset()
+        record.query_version = ""
         self.net.watch(record.config.port)
+        write_steam_appid(self.settings)
         await record.supervisor.start()
 
     async def stop(self, instance_id: str) -> None:
@@ -248,6 +374,58 @@ class InstanceManager:
         await self.stop(instance_id)
         await self.start(instance_id)
 
+    def submit(self, instance_id: str, action: str) -> InstanceRecord:
+        """Run a lifecycle action as a manager-owned background task.
+
+        Stopping a real server takes as long as saving the world does, which
+        is far longer than a browser will hold a request open. Tying the work
+        to the request meant an aborted XHR cancelled the handler mid-way --
+        a restart would stop the server and never start it again. The task is
+        owned here instead, so the outcome no longer depends on the client.
+        """
+        record = self.get(instance_id)
+        if record.busy:
+            raise ManagerError(f"{record.config.name} is already {record.operation_name}.")
+
+        operations = {"start": self.start, "stop": self.stop, "restart": self.restart}
+        operation = operations.get(action)
+        if operation is None:
+            raise ManagerError(f"unknown action {action!r}")
+
+        # Fail fast on problems we can see before committing to a background
+        # task, so the button click reports them directly.
+        if action in ("start", "restart"):
+            record.config.validate()
+            if not self.settings.server_binary.exists():
+                raise ManagerError(
+                    f"Server binary missing at {self.settings.server_binary}. "
+                    "Install the dedicated server from Settings first."
+                )
+            if action == "start" and record.supervisor.status.is_active:
+                raise ManagerError(f"{record.config.name} is already running.")
+
+        async def run() -> None:
+            try:
+                await operation(instance_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - surfaced on the card
+                record.supervisor.last_error = str(exc)
+                log.warning("%s failed for %s: %s", action, record.config.name, exc)
+            finally:
+                record.operation_name = ""
+
+        record.operation_name = action + "ing" if action != "stop" else "stopping"
+        record.operation = asyncio.create_task(run())
+        return record
+
+    async def _cancel_operation(self, record: InstanceRecord) -> None:
+        if record.operation and not record.operation.done():
+            record.operation.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await record.operation
+        record.operation_name = ""
+
     async def start_autostart(self) -> None:
         for record in self.records:
             if not record.config.autostart:
@@ -258,12 +436,95 @@ class InstanceManager:
                 log.warning("autostart failed for %s: %s", record.config.name, exc)
 
     async def shutdown_all(self) -> None:
+        for record in self.records:
+            await self._cancel_operation(record)
         active = [r for r in self.records if r.supervisor.status.is_active]
         if active:
             log.info("stopping %d running instance(s)", len(active))
         await asyncio.gather(
             *(r.supervisor.stop() for r in active), return_exceptions=True
         )
+
+    # ------------------------------------------------------------------ #
+    # updates
+    # ------------------------------------------------------------------ #
+    async def check_update(self, force: bool = False) -> dict[str, Any]:
+        """Compare the installed build against the newest published one."""
+        installed = installed_build_id(self.settings)
+        stale = time.time() - self._latest_checked > BUILD_CHECK_TTL
+        if (force or stale or not self._latest_build) and self.settings.steamcmd_bin.is_file():
+            try:
+                self._latest_build = await latest_build_id(self.settings)
+                self._latest_checked = time.time()
+                self.save_state()
+            except SteamError as exc:
+                log.warning("build check failed: %s", exc)
+
+        return {
+            "installed": installed,
+            "latest": self._latest_build,
+            "checked_at": self._latest_checked,
+            # Only claim an update when both ids are known and differ.
+            "available": bool(installed and self._latest_build and installed != self._latest_build),
+        }
+
+    async def run_update(self, *, validate: bool = False, restart: bool = True) -> None:
+        """Install or update server files, restarting instances around it."""
+        job = self.job
+
+        async def body() -> None:
+            running = [r for r in self.records if r.supervisor.status.is_active]
+            if running and restart:
+                job.log(f"[manager] stopping {len(running)} running instance(s)")
+                for record in running:
+                    job.log(f"[manager] stopping {record.config.name}")
+                    await self.stop(record.config.id)
+            elif running:
+                raise SteamError(
+                    "Instances are running and automatic restart is disabled. "
+                    "Stop them first, or enable restarting."
+                )
+
+            await install_steamcmd(self.settings, job.log)
+            job.log("[manager] running steamcmd app_update 896660")
+            async for line in update_server(self.settings, validate=validate):
+                job.log(line)
+            write_steam_appid(self.settings)
+
+            self._latest_build = installed_build_id(self.settings) or self._latest_build
+            self._latest_checked = time.time()
+            self.save_state()
+            job.log(f"[manager] installed build {self._latest_build or 'unknown'}")
+
+            if restart:
+                for record in running:
+                    job.log(f"[manager] starting {record.config.name}")
+                    try:
+                        await self.start(record.config.id)
+                    except Exception as exc:  # noqa: BLE001
+                        job.log(f"[error] could not restart {record.config.name}: {exc}")
+
+        await job.run("update", body)
+
+    async def _scheduler_loop(self) -> None:
+        """Fire the scheduled update when its minute comes around."""
+        while True:
+            try:
+                now = datetime.now()
+                if self.auto_update.due(now) and not self.job.running:
+                    log.info("scheduled update starting (%s)", self.auto_update.at)
+                    self.auto_update.last_run_date = now.strftime("%Y-%m-%d")
+                    self.save_state()
+                    await self.run_update(
+                        validate=self.auto_update.validate,
+                        restart=self.auto_update.restart_instances,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("scheduled update failed")
+            # Re-check well inside the one-minute window the schedule matches.
+            await asyncio.sleep(20)
 
     # ------------------------------------------------------------------ #
     # sampling
@@ -274,7 +535,10 @@ class InstanceManager:
         except A2SError:
             # Normal while the world is still generating; keep log-derived state.
             return
-        record.players.observe_query(info.players, info.max_players, info.player_names)
+        record.query_version = info.version
+        record.players.observe_query(
+            info.players, info.max_players, info.player_names, info.player_durations
+        )
 
     async def sample_once(self) -> dict[str, Any]:
         """Take one sample across every instance and return the broadcast payload."""
@@ -299,6 +563,13 @@ class InstanceManager:
                 if record.players.count:
                     record.players.reset()
 
+            # Lift kick bans whose time is up.
+            try:
+                for player_id in record.lists.reconcile_temp_bans():
+                    log.info("kick ban expired for %s on %s", player_id, record.config.name)
+            except OSError as exc:
+                log.warning("could not reconcile bans for %s: %s", record.config.name, exc)
+
         return {
             "type": "snapshot",
             "host": host_metrics(),
@@ -322,13 +593,17 @@ class InstanceManager:
                 log.exception("sampler tick failed")
             await asyncio.sleep(interval)
 
-    def start_sampler(self) -> None:
+    def start_background(self) -> None:
         if self._sampler_task is None or self._sampler_task.done():
             self._sampler_task = asyncio.create_task(self._sampler_loop())
+        if self._scheduler_task is None or self._scheduler_task.done():
+            self._scheduler_task = asyncio.create_task(self._scheduler_loop())
 
-    async def stop_sampler(self) -> None:
-        if self._sampler_task is not None:
-            self._sampler_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._sampler_task
-            self._sampler_task = None
+    async def stop_background(self) -> None:
+        for attr in ("_sampler_task", "_scheduler_task"):
+            task = getattr(self, attr)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                setattr(self, attr, None)

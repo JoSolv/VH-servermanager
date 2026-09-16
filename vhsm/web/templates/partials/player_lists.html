@@ -1,0 +1,44 @@
+{# Admin / banned / permitted lists. Valheim re-reads these while running. #}
+<div id="player-lists" class="panel" hx-target="this" hx-swap="outerHTML">
+  {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <div class="row spread" style="margin-bottom:6px">
+    <h2 style="margin:0">Access lists</h2>
+    <span class="subtle">Changes apply within seconds &mdash; no restart needed.</span>
+  </div>
+
+  <div class="listgrid">
+    {% for key, label, hint in [
+        ('admins', 'Admins', 'Can use server commands in-game.'),
+        ('banned', 'Banned', 'Disconnected and refused entry.'),
+        ('permitted', 'Permitted', 'If non-empty, ONLY these ids may join.')] %}
+      <div class="listcol">
+        <h3>{{ label }} <span class="muted">({{ lists[key] | length }})</span></h3>
+        <p class="hint">{{ hint }}</p>
+        <ul class="idlist">
+          {% for player_id in lists[key] %}
+            <li>
+              <code>{{ player_id }}</code>
+              {% if key == 'banned' and player_id in lists.temp_bans %}
+                <span class="tag upd">kick &middot; {{ lists.temp_bans[player_id] }}s</span>
+              {% endif %}
+              <button class="small danger"
+                      hx-post="/api/instances/{{ record.config.id }}/lists/{{ key }}"
+                      hx-vals='{"player_id": "{{ player_id }}", "action": "remove"}'
+                      title="Remove">&times;</button>
+            </li>
+          {% else %}
+            <li class="muted">Empty</li>
+          {% endfor %}
+        </ul>
+        <form hx-post="/api/instances/{{ record.config.id }}/lists/{{ key }}" class="row">
+          <input type="hidden" name="action" value="add">
+          <input type="text" name="player_id" placeholder="Steam ID" required
+                 pattern="[A-Za-z0-9_]{3,64}">
+          <button class="small" type="submit">Add</button>
+        </form>
+      </div>
+    {% endfor %}
+  </div>
+</div>

@@ -1,0 +1,30 @@
+{# What a Valheim client sees when it probes this server. #}
+<div class="alert {{ 'ok' if probe.query_ok else 'error' }}" style="margin-top:12px">
+  {% if probe.query_ok %}
+    <strong>Query port answered.</strong>
+    A client probing this host sees “{{ probe.name }}”, {{ probe.players }}/{{ probe.max_players }}
+    players, version <code>{{ probe.query_version }}</code>.
+    {% if probe.log_version and probe.query_version and probe.log_version != probe.query_version %}
+      <br>The console reports <code>{{ probe.log_version }}</code>, which does not match.
+    {% endif %}
+    <br><span class="subtle">
+      If it still shows as unreachable from outside, UDP {{ probe.game_port }}&ndash;{{ probe.game_port + 2 }}
+      needs forwarding — the browser entry uses {{ probe.query_port }}, not just the game port.
+    </span>
+  {% else %}
+    <strong>Query port {{ probe.query_port }} did not answer.</strong>
+    {% if probe.status != 'running' %}
+      The server is {{ probe.status }} — start it and try again.
+    {% else %}
+      This is what makes a server show as unreachable in the client even though direct
+      joins on {{ probe.game_port }} still work: the entry's name, player count and version
+      all come from this port. It stays silent for a minute or two while the world loads.
+      If it never answers, Steam's game-server API did not initialise.
+      {% if probe.crossplay %}
+        <br>Crossplay is on, so this server is meant to be joined by its join code rather
+        than through the Steam list; the Steam entry can look wrong regardless.
+      {% endif %}
+    {% endif %}
+    <br><span class="subtle">{{ probe.detail }}</span>
+  {% endif %}
+</div>

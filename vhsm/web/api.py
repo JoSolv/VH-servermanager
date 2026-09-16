@@ -17,6 +17,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from ..instance import InstanceConfig
+from ..playerlists import PlayerListError
 from ..mods.cache import cache_size, clear_cache
 from ..mods.profile import ModError
 from ..mods.thunderstore import ThunderstoreError
@@ -376,3 +377,145 @@ async def clear_package_cache(request: Request) -> JSONResponse:
     before = cache_size(settings.cache_dir)
     clear_cache(settings.cache_dir)
     return JSONResponse({"freed": before})
+
+
+# --------------------------------------------------------------------------- #
+# admin / ban / permit lists
+# --------------------------------------------------------------------------- #
+def _lists_partial(
+    request: Request, instance_id: str, message: str = "", error: str = ""
+) -> HTMLResponse:
+    record = _manager(request).get(instance_id)
+    return TEMPLATES.TemplateResponse(
+        request,
+        "partials/player_lists.html",
+        {
+            "record": record,
+            "lists": record.lists.summary(),
+            "message": message,
+            "error": error,
+        },
+    )
+
+
+@router.get("/api/instances/{instance_id}/lists", response_class=HTMLResponse)
+async def get_lists(request: Request, instance_id: str) -> HTMLResponse:
+    return _lists_partial(request, instance_id)
+
+
+@router.post("/api/instances/{instance_id}/lists/{key}", response_class=HTMLResponse)
+async def mutate_list(
+    request: Request,
+    instance_id: str,
+    key: str,
+    player_id: str = Form(...),
+    action: str = Form(default="add"),
+) -> HTMLResponse:
+    record = _manager(request).get(instance_id)
+    try:
+        target = record.lists.by_key(key)
+        if action == "remove":
+            changed = target.remove(player_id)
+            verb = "removed from" if changed else "was not on"
+        else:
+            changed = target.add(player_id)
+            verb = "added to" if changed else "was already on"
+        if key == "banned" and action == "remove":
+            # Drop any pending kick expiry so it cannot re-ban later.
+            record.lists.temp_bans.cancel(player_id)
+    except PlayerListError as exc:
+        return _lists_partial(request, instance_id, error=str(exc))
+    except OSError as exc:
+        return _lists_partial(request, instance_id, error=f"Could not write the list: {exc}")
+    return _lists_partial(request, instance_id, message=f"{player_id} {verb} the {key} list.")
+
+
+@router.post("/api/instances/{instance_id}/players/{player_id}/{action}", response_class=HTMLResponse)
+async def moderate_player(
+    request: Request, instance_id: str, player_id: str, action: str
+) -> HTMLResponse:
+    """Quick moderation for a connected player.
+
+    Valheim re-reads its list files while running, so these take effect within
+    seconds without a restart.
+    """
+    record = _manager(request).get(instance_id)
+    lists = record.lists
+    try:
+        if action == "kick":
+            # No RCON and no console input on a stock server: a brief ban is
+            # the only way to disconnect someone, and it lifts itself.
+            seconds = lists.kick(player_id)
+            message = f"Kicked {player_id}; the ban lifts automatically in ~20s."
+        elif action == "ban":
+            lists.temp_bans.cancel(player_id)
+            lists.banned.add(player_id)
+            message = f"Banned {player_id}."
+        elif action == "unban":
+            lists.temp_bans.cancel(player_id)
+            lists.banned.remove(player_id)
+            message = f"Unbanned {player_id}."
+        elif action == "admin":
+            lists.admins.add(player_id)
+            message = f"{player_id} is now an admin."
+        elif action == "unadmin":
+            lists.admins.remove(player_id)
+            message = f"{player_id} is no longer an admin."
+        elif action == "permit":
+            lists.permitted.add(player_id)
+            message = f"{player_id} added to the permitted list."
+        elif action == "unpermit":
+            lists.permitted.remove(player_id)
+            message = f"{player_id} removed from the permitted list."
+        else:
+            return _lists_partial(request, instance_id, error=f"Unknown action {action!r}.")
+    except PlayerListError as exc:
+        return _lists_partial(request, instance_id, error=str(exc))
+    except OSError as exc:
+        return _lists_partial(request, instance_id, error=f"Could not write the list: {exc}")
+    return _lists_partial(request, instance_id, message=message)
+
+
+@router.get("/api/instances/{instance_id}/connectivity", response_class=HTMLResponse)
+async def connectivity(request: Request, instance_id: str) -> HTMLResponse:
+    """Check what a Valheim client would see when it probes this server.
+
+    The client reads a server's name, player count and version from the Steam
+    query port. If that port does not answer, the entry shows as unreachable
+    even though direct joins on the game port still work.
+    """
+    from ..monitor.a2s import A2SError, query as a2s_query
+
+    record = _manager(request).get(instance_id)
+    payload: dict[str, Any] = {
+        "game_port": record.config.port,
+        "query_port": record.config.query_port,
+        "status": record.supervisor.status.value,
+        "log_version": record.supervisor.server_version,
+        "crossplay": record.config.crossplay,
+        "public": record.config.public,
+    }
+    try:
+        info = await a2s_query("127.0.0.1", record.config.query_port, 2.0)
+    except A2SError as exc:
+        payload.update({"query_ok": False, "detail": str(exc)})
+    else:
+        payload.update(
+            {
+                "query_ok": True,
+                "detail": "",
+                "name": info.name,
+                "map": info.map_name,
+                "players": info.players,
+                "max_players": info.max_players,
+                "query_version": info.version,
+            }
+        )
+    return TEMPLATES.TemplateResponse(
+        request, "partials/connectivity.html", {"probe": payload}
+    )
+
+
+@router.get("/api/update")
+async def api_update_status(request: Request, force: str = "") -> JSONResponse:
+    return JSONResponse(await _manager(request).check_update(force=bool(force)))

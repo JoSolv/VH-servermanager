@@ -26,7 +26,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         manager.load_all()
-        manager.start_sampler()
+        manager.start_background()
         if not manager.net.per_instance_available:
             log.warning(
                 "per-instance network accounting unavailable: %s",
@@ -36,7 +36,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
-            await manager.stop_sampler()
+            await manager.stop_background()
             await manager.shutdown_all()
 
     app = FastAPI(title="Valheim Server Manager", lifespan=lifespan, version="0.1.0")

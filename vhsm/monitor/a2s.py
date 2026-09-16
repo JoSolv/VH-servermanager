@@ -36,6 +36,8 @@ class ServerInfo:
     version: str = ""
     visibility: int = 0
     player_names: list[str] = field(default_factory=list)
+    #: Seconds each player has been connected, parallel to ``player_names``.
+    player_durations: list[float] = field(default_factory=list)
 
 
 class _Reader:
@@ -133,7 +135,7 @@ def _query_blocking(host: str, port: int, timeout: float) -> ServerInfo:
                 reader.byte()          # index
                 info.player_names.append(reader.string())
                 reader.long()          # score
-                reader.float()         # duration
+                info.player_durations.append(reader.float())
     except (A2SError, IndexError, struct.error, ValueError):
         pass
     return info

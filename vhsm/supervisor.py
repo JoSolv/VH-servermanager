@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import enum
 import os
+import re
 import signal
 import time
 from collections import deque
@@ -26,6 +27,10 @@ LOG_BUFFER_LINES = 1000
 #: How long to wait for a graceful save-and-exit before escalating signals.
 SIGINT_GRACE = 45.0
 SIGTERM_GRACE = 15.0
+
+#: The server announces its build on the first line of output, e.g.
+#: ``Valheim version: l-0.217.46``. This is the version a client must match.
+RE_VERSION = re.compile(r"Valheim version:?\s*(?:l-)?([0-9][0-9.]*)", re.IGNORECASE)
 
 
 class Status(str, enum.Enum):
@@ -61,6 +66,8 @@ class Supervisor:
         self.started_at: float | None = None
         self.exit_code: int | None = None
         self.last_error: str | None = None
+        #: Build reported by the running server, from its own console output.
+        self.server_version: str = ""
 
         self._process: asyncio.subprocess.Process | None = None
         self._pump: asyncio.Task[None] | None = None
@@ -88,6 +95,9 @@ class Supervisor:
         self._subscribers.discard(queue)
 
     def _emit(self, line: str) -> None:
+        match = RE_VERSION.search(line)
+        if match:
+            self.server_version = match.group(1)
         stamped = f"{time.strftime('%H:%M:%S')} {line}"
         self._buffer.append(stamped)
         for hook in self._log_hooks:
@@ -105,6 +115,21 @@ class Supervisor:
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #
+    def _working_dir(self) -> Path:
+        """Directory to launch from.
+
+        The stock ``start_server.sh`` cds into the install directory, and the
+        Steam game-server API resolves ``steamclient.so`` and writes its
+        bookkeeping relative to the working directory. Launching from
+        somewhere else can leave Steam half-initialised -- the game still
+        accepts direct connections, but the query port never answers, so the
+        server shows as unreachable in the client's browser. Instance state is
+        kept separate through absolute ``-savedir`` and Doorstop paths, so
+        sharing this directory between instances is safe.
+        """
+        game_dir = self.settings.game_dir
+        return game_dir if game_dir.is_dir() else self.layout.root
+
     def _build_command(self) -> list[str]:
         binary = self.settings.server_binary
         args = self.config.launch_args(self.layout)
@@ -149,7 +174,7 @@ class Supervisor:
             try:
                 self._process = await asyncio.create_subprocess_exec(
                     *self._build_command(),
-                    cwd=str(self.layout.root),
+                    cwd=str(self._working_dir()),
                     env=self._build_env(),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,

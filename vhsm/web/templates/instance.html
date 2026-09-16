@@ -9,6 +9,7 @@
     <div class="subtle">
       World <strong>{{ config.world }}</strong> &middot; UDP {{ config.port }}&ndash;{{ config.port + 2 }}
       &middot; query {{ config.query_port }}
+      &middot; version <span data-f="version">{{ record.version or '—' }}</span>
     </div>
   </div>
   <div class="row">
@@ -29,6 +30,7 @@
       <div class="metric"><div class="k">Uptime</div><div class="v" data-f="uptime">--</div></div>
       <div class="metric">
         <div class="k">CPU</div><div class="v" data-f="cpu">--</div>
+        <div class="sub muted" data-f="cpu-cores">&nbsp;</div>
         <div class="meter" data-meter="cpu"><span></span></div>
       </div>
       <div class="metric">
@@ -53,15 +55,36 @@
       <div class="console" id="console" data-instance-id="{{ config.id }}"></div>
     </div>
     <div class="panel">
-      <h2>Connected players</h2>
-      <ul data-players-list style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px">
-        <li class="muted">Nobody connected</li>
-      </ul>
-      <p class="subtle" style="margin-top:16px">
-        Counts come from the Steam query port; names are read from the server console.
+      <div class="row spread" style="margin-bottom:10px">
+        <h2 style="margin:0">Connected players</h2>
+        <button class="small" hx-get="/api/instances/{{ config.id }}/connectivity"
+                hx-target="#connectivity" hx-swap="innerHTML"
+                title="Check what a Valheim client sees when it probes this server">
+          Test client visibility
+        </button>
+      </div>
+      <div class="tablewrap">
+        <table class="players">
+          <thead>
+            <tr><th>Player</th><th>Id</th><th>Playtime</th><th>Flags</th><th>Actions</th></tr>
+          </thead>
+          <tbody data-players-body>
+            <tr><td colspan="5" class="muted">Nobody connected</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="connectivity"></div>
+      <p class="subtle" style="margin-top:14px">
+        Counts come from the Steam query port; ids and names are read from the server
+        console. Valheim reports no per-player latency, so ping is not shown.
       </p>
     </div>
   </div>
+</div>
+
+<div id="player-lists" hx-get="/api/instances/{{ config.id }}/lists"
+     hx-trigger="load" hx-swap="outerHTML">
+  <div class="panel empty">Loading access lists…</div>
 </div>
 
 <form class="panel" method="post" action="/instances/{{ config.id }}/edit">

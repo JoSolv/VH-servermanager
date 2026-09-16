@@ -67,8 +67,13 @@
 
     var pill = scope.querySelector('[data-f="status"]');
     if (pill) {
-      pill.textContent = snapshot.status;
-      pill.className = "pill " + snapshot.status;
+      if (snapshot.operation) {
+        pill.textContent = snapshot.operation;
+        pill.className = "pill busy";
+      } else {
+        pill.textContent = snapshot.status;
+        pill.className = "pill " + snapshot.status;
+      }
     }
 
     var players = snapshot.players || {};
@@ -78,7 +83,15 @@
 
     setText(scope, "players", players.count + (players.max ? " / " + players.max : ""));
     setText(scope, "uptime", active ? fmtDuration(snapshot.uptime) : "--");
-    setText(scope, "cpu", active ? metrics.cpu_percent.toFixed(1) + "%" : "--");
+    // metrics.cpu_percent is psutil's raw figure and is summed across cores
+    // (300% = three cores). Show the share of the whole host instead, with the
+    // core count underneath, so the number and its meter agree.
+    setText(scope, "cpu", active ? metrics.cpu_host_percent.toFixed(1) + "%" : "--");
+    setText(
+      scope, "cpu-cores",
+      active ? metrics.cpu_cores.toFixed(2) + " of " + metrics.cpu_count + " cores" : "\u00a0"
+    );
+    setText(scope, "version", snapshot.version || "\u2014");
     setText(scope, "mem", active ? fmtBytes(metrics.memory_rss) : "--");
     setText(scope, "threads", active ? String(metrics.threads) : "--");
     setText(scope, "pid", snapshot.pid ? String(snapshot.pid) : "--");
@@ -89,11 +102,11 @@
         : "↓ " + fmtBytes(net.rx_rate) + "/s  ↑ " + fmtBytes(net.tx_rate) + "/s"
     );
 
-    setMeter(scope, "cpu", active ? metrics.cpu_percent : 0);
+    setMeter(scope, "cpu", active ? metrics.cpu_host_percent : 0);
     setMeter(scope, "mem", active ? metrics.memory_percent : 0);
-    drawSpark(scope, snapshot.id, active ? metrics.cpu_percent : 0);
+    drawSpark(scope, snapshot.id, active ? metrics.cpu_host_percent : 0);
 
-    renderPlayers(scope, players.players || []);
+    renderPlayers(scope, snapshot.id, players.players || []);
 
     // Status changed: let the server re-render the action buttons.
     if (lastStatus[snapshot.id] !== snapshot.status) {
@@ -105,28 +118,105 @@
     }
   }
 
-  function renderPlayers(scope, players) {
-    var list = scope.querySelector("[data-players-list]");
-    if (!list) return;
-    if (!players.length) {
-      if (list.dataset.state !== "empty") {
-        list.dataset.state = "empty";
-        list.innerHTML = '<li class="muted">Nobody connected</li>';
-      }
+  function cell(row, text, className) {
+    var td = document.createElement("td");
+    if (className) td.className = className;
+    td.textContent = text;              // textContent: player names are untrusted
+    row.appendChild(td);
+    return td;
+  }
+
+  function actionButton(label, action, instanceId, playerId, danger) {
+    var b = document.createElement("button");
+    b.className = "small" + (danger ? " danger" : "");
+    b.textContent = label;
+    b.dataset.moderate = action;
+    b.dataset.instance = instanceId;
+    b.dataset.player = playerId;
+    return b;
+  }
+
+  function renderPlayers(scope, instanceId, players) {
+    var body = scope.querySelector("[data-players-body]");
+    if (!body) {
+      // Dashboard cards have no table; nothing else to do there.
       return;
     }
-    var signature = players.map(function (p) { return p.name + p.playtime; }).join("|");
-    if (list.dataset.state === signature) return;
-    list.dataset.state = signature;
-    list.innerHTML = players.map(function (p) {
-      return '<li><strong></strong> <span class="muted"></span></li>';
-    }).join("");
-    // Fill via textContent so player names can never inject markup.
-    Array.prototype.forEach.call(list.children, function (li, i) {
-      li.querySelector("strong").textContent = players[i].name;
-      li.querySelector("span").textContent = fmtDuration(players[i].playtime);
+    // Re-render only when something actually changed, so buttons stay clickable.
+    var signature = players.map(function (p) {
+      return [p.name, p.player_id, p.playtime, p.admin, p.banned, p.permitted, p.in_world].join(",");
+    }).join("|");
+    if (body.dataset.state === signature) return;
+    body.dataset.state = signature;
+    body.innerHTML = "";
+
+    if (!players.length) {
+      var empty = document.createElement("tr");
+      var td = document.createElement("td");
+      td.colSpan = 5; td.className = "muted"; td.textContent = "Nobody connected";
+      empty.appendChild(td); body.appendChild(empty);
+      return;
+    }
+
+    players.forEach(function (p) {
+      var row = document.createElement("tr");
+      cell(row, p.name + (p.in_world ? "" : " (loading)"));
+
+      var idCell = document.createElement("td");
+      if (p.player_id) {
+        var code = document.createElement("code");
+        code.textContent = p.player_id;
+        idCell.appendChild(code);
+        var plat = document.createElement("div");
+        plat.className = "muted"; plat.style.fontSize = "11px";
+        plat.textContent = p.platform;
+        idCell.appendChild(plat);
+      } else {
+        idCell.className = "muted";
+        idCell.textContent = "not seen in log";
+      }
+      row.appendChild(idCell);
+
+      cell(row, fmtDuration(p.playtime));
+
+      var flags = [];
+      if (p.admin) flags.push("admin");
+      if (p.permitted) flags.push("permitted");
+      if (p.banned) flags.push("banned");
+      cell(row, flags.join(", ") || "—", flags.length ? "" : "muted");
+
+      var acts = document.createElement("td");
+      var wrap = document.createElement("div");
+      wrap.className = "acts";
+      if (p.can_moderate) {
+        wrap.appendChild(actionButton(p.admin ? "Un-admin" : "Admin",
+          p.admin ? "unadmin" : "admin", instanceId, p.player_id, false));
+        wrap.appendChild(actionButton("Kick", "kick", instanceId, p.player_id, true));
+        wrap.appendChild(actionButton(p.banned ? "Unban" : "Ban",
+          p.banned ? "unban" : "ban", instanceId, p.player_id, true));
+      } else {
+        wrap.textContent = "—";
+      }
+      acts.appendChild(wrap);
+      row.appendChild(acts);
+      body.appendChild(row);
     });
   }
+
+  // Delegated so buttons rendered after page load still work; htmx only
+  // processes markup it swapped in itself.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-moderate]");
+    if (!button || !window.htmx) return;
+    var action = button.dataset.moderate;
+    if (action === "ban" && !confirm("Ban " + button.dataset.player + "?")) return;
+    window.htmx.ajax(
+      "POST",
+      "/api/instances/" + button.dataset.instance + "/players/" +
+        encodeURIComponent(button.dataset.player) + "/" + action,
+      { target: "#player-lists", swap: "outerHTML" }
+    );
+  });
 
   function applyHost(payload) {
     var host = payload.host || {}, net = payload.host_net || {};

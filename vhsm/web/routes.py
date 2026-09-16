@@ -11,7 +11,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..instance import MODIFIER_KEYS, PRESETS, InstanceConfig, ValidationError
 from ..mods.cache import cache_size
-from ..steam import SteamError, install_steamcmd, server_status, update_server
+from ..manager import ManagerError
+from ..steam import server_status
 from .templating import TEMPLATES
 
 log = logging.getLogger("vhsm.web.routes")
@@ -147,6 +148,14 @@ async def edit_instance(request: Request, instance_id: str):
 # --------------------------------------------------------------------------- #
 @router.post("/instances/{instance_id}/{action}", response_class=HTMLResponse)
 async def lifecycle(request: Request, instance_id: str, action: str):
+    """Kick off a lifecycle action and return at once.
+
+    The work runs as a manager-owned task rather than inside this request:
+    stopping a real server takes as long as saving the world does, and the
+    dashboard swaps these very buttons when the status changes, which aborts
+    the in-flight request. Awaiting here meant a cancelled request could stop
+    a server and never start it again.
+    """
     manager = _manager(request)
     record = manager.get(instance_id)
 
@@ -155,14 +164,9 @@ async def lifecycle(request: Request, instance_id: str, action: str):
         await manager.delete(instance_id, remove_files=form.get("remove_files") is not None)
         return HTMLResponse("", headers={"HX-Redirect": "/"})
 
-    operations = {"start": manager.start, "stop": manager.stop, "restart": manager.restart}
-    operation = operations.get(action)
-    if operation is None:
-        return HTMLResponse(f'<div class="alert error">Unknown action {action}.</div>', 400)
-
     try:
-        await operation(instance_id)
-    except (RuntimeError, ValidationError) as exc:
+        manager.submit(instance_id, action)
+    except (ManagerError, RuntimeError, ValidationError) as exc:
         return HTMLResponse(
             f'<div class="alert error">{exc}</div>'
             + TEMPLATES.get_template("partials/controls.html").render(record=record),
@@ -207,76 +211,75 @@ async def mods_page(request: Request, instance_id: str):
 # --------------------------------------------------------------------------- #
 # settings / server installation
 # --------------------------------------------------------------------------- #
-class SetupTask:
-    """A single long-running steamcmd job, with output the page can poll."""
-
-    def __init__(self) -> None:
-        self.lines: list[str] = []
-        self.running = False
-        self.task: asyncio.Task | None = None
-
-    def log(self, message: str) -> None:
-        self.lines.append(message)
-        del self.lines[:-400]
-
-    async def run(self, coro_factory) -> None:
-        if self.running:
-            self.log("[manager] another setup job is already running")
-            return
-        self.running = True
-        self.lines.clear()
-        try:
-            await coro_factory()
-        except SteamError as exc:
-            self.log(f"[error] {exc}")
-        except Exception as exc:  # noqa: BLE001 - surfaced in the UI
-            self.log(f"[error] unexpected: {exc}")
-            log.exception("setup job failed")
-        finally:
-            self.running = False
-            self.log("[manager] done")
-
-
-def _setup_task(request: Request) -> SetupTask:
-    task = getattr(request.app.state, "setup_task", None)
-    if task is None:
-        task = SetupTask()
-        request.app.state.setup_task = task
-    return task
-
-
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     settings = _settings(request)
+    manager = _manager(request)
     return _render(
         request,
         "settings.html",
         status=server_status(settings),
         settings=settings,
         cache_bytes=cache_size(settings.cache_dir),
-        index_count=_manager(request).index.count,
-        task=_setup_task(request),
-        net_available=_manager(request).net.per_instance_available,
-        net_reason=_manager(request).net.per_instance_reason,
+        index_count=manager.index.count,
+        task=manager.job,
+        auto_update=manager.auto_update,
+        build=await manager.check_update(),
+        net_available=manager.net.per_instance_available,
+        net_reason=manager.net.per_instance_reason,
     )
 
 
 @router.post("/settings/install", response_class=HTMLResponse)
-async def install_server(request: Request, validate_files: str = Form(default="")):
-    settings = _settings(request)
-    task = _setup_task(request)
-
-    async def job() -> None:
-        await install_steamcmd(settings, task.log)
-        task.log("[manager] running steamcmd app_update 896660")
-        async for line in update_server(settings, validate=bool(validate_files)):
-            task.log(line)
-
-    asyncio.create_task(task.run(job))
-    await asyncio.sleep(0.2)
-    return _render(request, "partials/setup_log.html", task=task)
+async def install_server(
+    request: Request,
+    validate_files: str = Form(default=""),
+    restart_instances: str = Form(default="1"),
+):
+    manager = _manager(request)
+    # Background task: a full install is a multi-GB download, far longer than
+    # any browser will hold the request open.
+    asyncio.create_task(
+        manager.run_update(validate=bool(validate_files), restart=bool(restart_instances))
+    )
+    await asyncio.sleep(0.3)
+    return _render(request, "partials/setup_log.html", task=manager.job)
 
 
 @router.get("/settings/log", response_class=HTMLResponse)
 async def setup_log(request: Request):
-    return _render(request, "partials/setup_log.html", task=_setup_task(request))
+    return _render(request, "partials/setup_log.html", task=_manager(request).job)
+
+
+@router.post("/settings/auto-update", response_class=HTMLResponse)
+async def save_auto_update(
+    request: Request,
+    enabled: str = Form(default=""),
+    at: str = Form(default="04:00"),
+    restart_instances: str = Form(default=""),
+    validate_files: str = Form(default=""),
+):
+    manager = _manager(request)
+    try:
+        hour, _, minute = at.partition(":")
+        if not (0 <= int(hour) <= 23 and 0 <= int(minute) <= 59):
+            raise ValueError
+        normalised = f"{int(hour):02d}:{int(minute):02d}"
+    except ValueError:
+        return HTMLResponse('<div class="alert error">Use a time like 04:00.</div>', 400)
+
+    manager.auto_update.enabled = bool(enabled)
+    manager.auto_update.at = normalised
+    manager.auto_update.restart_instances = bool(restart_instances)
+    manager.auto_update.validate = bool(validate_files)
+    manager.save_state()
+    state = "on" if manager.auto_update.enabled else "off"
+    return HTMLResponse(
+        f'<div class="alert ok">Scheduled update {state}, daily at {normalised}.</div>'
+    )
+
+
+@router.post("/settings/check-update", response_class=HTMLResponse)
+async def check_update(request: Request):
+    build = await _manager(request).check_update(force=True)
+    return _render(request, "partials/build_status.html", build=build)

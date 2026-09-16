@@ -26,21 +26,49 @@ tested end to end, and the structure is meant to be built on.
 - Start/stop/restart. Each server runs in its own process session, and stopping
   sends `SIGINT` first — Valheim's graceful shutdown, which saves the world —
   escalating to `SIGTERM` then `SIGKILL` only if it does not comply.
+- Lifecycle actions run as manager-owned background tasks, so a browser that
+  navigates away (or a button that re-renders mid-request) cannot abandon a
+  restart half-finished. The UI shows `starting` / `stopping` / `restarting`
+  while the work is in flight.
 - Console output is streamed to the browser over a websocket and mirrored to
   `logs/console.log`.
 - `autostart` boots flagged instances with the manager.
 
 **Monitoring**
 - Per-instance CPU, RSS, memory share, thread count and disk I/O via `psutil`,
-  rolled up over the process tree.
+  rolled up over the process tree. CPU is shown as a share of the whole host
+  with the core count alongside: psutil's raw figure is summed across cores, so
+  a server using three cores reports 300%, which reads as a broken gauge.
+- The running server's version, taken from its console banner and confirmed
+  against the Steam query response, on every card.
 - Live player count from the Steam A2S query socket (`game port + 1`), with
-  player *names* parsed from the console log, since A2S does not report them
-  reliably for Valheim.
+  player *names* and platform ids parsed from the console log, since A2S does
+  not report them reliably for Valheim. Each connected player shows their id,
+  platform, playtime and admin/ban/permit flags.
 - Per-instance network throughput via nftables counters on each instance's UDP
   port range. Linux has no per-process byte counters, so this is the honest way
   to get it; it needs root. Without it the UI says so and still shows host-wide
   traffic rather than pretending.
 - Host CPU, memory, load average and network in the dashboard header.
+- A **client visibility** probe on each instance that queries the server the way
+  a Valheim client does, so "shows as unreachable in the client" can be told
+  apart from "the game port is fine".
+
+**Moderation**
+- Admin, banned and permitted lists edited from the GUI. Valheim re-reads these
+  files while running, so changes take effect within seconds without a restart.
+- Quick actions on every connected player: make admin, ban, and kick. A stock
+  server exposes no RCON and ignores stdin, so kick is a brief ban that lifts
+  itself; the pending expiry is written to disk, so a manager restart mid-kick
+  still clears it rather than stranding the player on the banned list.
+
+**Updates**
+- The installed build id (from steamcmd's app manifest) is compared against the
+  newest published build, so the dashboard can say whether an update exists
+  rather than guessing from file dates.
+- One-click update that stops running instances, updates, and starts them again.
+- Optional daily scheduled update at a chosen time, with the same stop/start
+  handling.
 
 **Mods (r2modman-style)**
 - Browse and search the full Thunderstore catalogue for Valheim, cached to disk
@@ -145,12 +173,33 @@ edit form, as the server needs them on its command line.
 ## Known gaps / next steps
 
 - No authentication or multi-user roles.
-- No RCON-style console input — Valheim has no RCON; commands would need a
-  server-side mod.
-- No scheduled restarts, backup browser/restore, or crash auto-restart.
+- **Ping is not shown, because Valheim does not expose it.** There is no RCON,
+  the console never logs latency, and `A2S_PLAYERS` carries only a connection
+  duration (which is shown). A per-player ping would have to be invented, so
+  the field is reported as `null` rather than filled with a guess.
+- No RCON-style console input — commands would need a server-side mod.
+- No scheduled *restarts* (scheduled updates exist), backup browser/restore, or
+  crash auto-restart.
 - Mod install runs inline in the request; large packages block that request.
   Moving it to a background job with progress in the UI is the natural next step.
 - `.r2x` files exported by r2modman itself are not yet parsed (our own JSON
   export/import is); the importer already understands its `{major, minor, patch}`
   version shape.
 - Per-instance network needs root. A rootless fallback would need eBPF.
+
+### If a server shows as unreachable in the client
+
+The entry's name, player count and version all come from the **Steam query
+port** (`game port + 1`), not the game port — so a server can accept direct
+joins while its listing looks broken. Use **Test client visibility** on the
+instance page to see which of the two is failing. Things worth checking:
+
+- UDP `port`, `port+1` and `port+2` all need forwarding, not just the game port.
+- The server is launched from the game directory, as upstream's
+  `start_server.sh` does, and `steam_appid.txt` is written next to the binary.
+  Launching from elsewhere can leave Steam's game-server API half-initialised,
+  which produces exactly this symptom — direct joins work, the query port never
+  answers. If you ran an earlier build of this manager, this is worth re-testing.
+- With crossplay enabled the server is meant to be joined by its join code
+  rather than through the Steam list, so the Steam entry can look wrong
+  regardless of configuration.

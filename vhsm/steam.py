@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -21,6 +22,8 @@ from .config import Settings, VALHEIM_SERVER_APPID
 
 STEAMCMD_URL = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz"
 ProgressHook = Callable[[str], None]
+
+RE_BUILDID = re.compile(r'"buildid"\s*"(\d+)"')
 
 
 class SteamError(RuntimeError):
@@ -127,3 +130,81 @@ def server_status(settings: Settings) -> dict[str, object]:
         if settings.data_root.exists()
         else 0,
     }
+
+
+def write_steam_appid(settings: Settings) -> None:
+    """Drop ``steam_appid.txt`` next to the binary.
+
+    The Steam game-server API reads it from the working directory. Without it
+    (or the matching env var) initialisation can half-fail: the game still
+    accepts direct connections while the query port stays silent.
+    """
+    if not settings.game_dir.is_dir():
+        return
+    target = settings.game_dir / "steam_appid.txt"
+    try:
+        if target.read_text(encoding="utf-8").strip() == VALHEIM_CLIENT_APPID:
+            return
+    except (OSError, ValueError):
+        pass
+    try:
+        target.write_text(f"{VALHEIM_CLIENT_APPID}\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def installed_build_id(settings: Settings) -> str:
+    """Build id of the install on disk, from steamcmd's app manifest."""
+    manifest = (
+        settings.game_dir / "steamapps" / f"appmanifest_{VALHEIM_SERVER_APPID}.acf"
+    )
+    try:
+        match = RE_BUILDID.search(manifest.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return ""
+    return match.group(1) if match else ""
+
+
+def _parse_public_build_id(text: str) -> str:
+    """Pull the public branch's build id out of ``app_info_print`` output."""
+    branches = text.find('"branches"')
+    if branches < 0:
+        return ""
+    # The public block holds only scalars, so stopping at the first brace is safe.
+    block = re.search(r'"public"\s*\{(.*?)\}', text[branches:], re.S)
+    if not block:
+        return ""
+    match = RE_BUILDID.search(block.group(1))
+    return match.group(1) if match else ""
+
+
+async def latest_build_id(settings: Settings) -> str:
+    """Ask Steam for the newest published build id of the dedicated server."""
+    if not settings.steamcmd_bin.is_file():
+        raise SteamError("steamcmd is not installed yet")
+
+    env = dict(os.environ)
+    env.setdefault("HOME", str(settings.steamcmd_dir))
+    process = await asyncio.create_subprocess_exec(
+        str(settings.steamcmd_bin),
+        "+login", "anonymous",
+        # Without a forced refresh steamcmd happily reports its cached copy.
+        "+app_info_update", "1",
+        "+app_info_print", VALHEIM_SERVER_APPID,
+        "+quit",
+        cwd=str(settings.steamcmd_dir),
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        stdin=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=180)
+    except asyncio.TimeoutError as exc:
+        process.kill()
+        raise SteamError("timed out asking Steam for the latest build") from exc
+
+    build = _parse_public_build_id(stdout.decode("utf-8", errors="replace"))
+    if not build:
+        raise SteamError("could not read the latest build id from steamcmd output")
+    return build

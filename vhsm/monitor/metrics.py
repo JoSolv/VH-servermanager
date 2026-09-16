@@ -9,9 +9,20 @@ from typing import Any
 import psutil
 
 
+#: Logical CPUs on this host, used to turn psutil's per-core percentages
+#: into a share of the whole machine.
+CPU_COUNT = psutil.cpu_count(logical=True) or 1
+
+
 @dataclass(slots=True)
 class ProcMetrics:
-    """A single resource sample for one instance's process tree."""
+    """A single resource sample for one instance's process tree.
+
+    ``cpu_percent`` is psutil's raw figure: it is summed across cores, so a
+    server using three cores fully reports 300%. That is accurate but reads as
+    a broken gauge, so ``cpu_host_percent`` (share of the whole machine) and
+    ``cpu_cores`` are derived from it for display.
+    """
 
     cpu_percent: float = 0.0
     memory_rss: int = 0
@@ -22,8 +33,22 @@ class ProcMetrics:
     disk_write: int = 0
     uptime: float = 0.0
 
+    @property
+    def cpu_host_percent(self) -> float:
+        """CPU use as a share of the entire host, so it never exceeds 100."""
+        return self.cpu_percent / CPU_COUNT
+
+    @property
+    def cpu_cores(self) -> float:
+        """Cores' worth of CPU in use, e.g. 3.0 on a server pinning 3 cores."""
+        return self.cpu_percent / 100.0
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["cpu_host_percent"] = round(self.cpu_host_percent, 1)
+        payload["cpu_cores"] = round(self.cpu_cores, 2)
+        payload["cpu_count"] = CPU_COUNT
+        return payload
 
 
 class ProcessSampler:

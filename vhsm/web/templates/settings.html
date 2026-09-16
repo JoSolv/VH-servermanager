@@ -13,17 +13,60 @@
     <tr><th>Mode</th><td>{% if status.fake_server %}<strong>development</strong> (simulated server){% else %}production{% endif %}</td></tr>
   </table>
 
+  {% include "partials/build_status.html" %}
+
   <form hx-post="/settings/install" hx-target="#setup-log" hx-swap="outerHTML" style="margin-top:14px">
     <div class="check">
       <input type="checkbox" id="validate" name="validate_files" value="1">
       <label for="validate">Validate files (slower, repairs a broken install)</label>
     </div>
+    <div class="check">
+      <input type="checkbox" id="restart_now" name="restart_instances" value="1" checked>
+      <label for="restart_now">Stop running instances during the update, then start them again</label>
+    </div>
     <button class="primary" type="submit">
-      {% if status.server_installed %}Update server{% else %}Install server{% endif %}
+      {% if status.server_installed %}Update server now{% else %}Install server{% endif %}
     </button>
     <span class="subtle">Downloads roughly 2 GB on a first install.</span>
   </form>
   {% include "partials/setup_log.html" %}
+</div>
+
+<div class="panel">
+  <h2>Scheduled updates</h2>
+  <p class="subtle">
+    Once a day at the chosen time the manager checks Steam for a new build and, if there
+    is one, installs it. Running instances are stopped first and started again afterwards,
+    so pick an hour when the servers are quiet.
+  </p>
+  <form hx-post="/settings/auto-update" hx-target="#auto-update-note" hx-swap="innerHTML">
+    <div class="check">
+      <input type="checkbox" id="auto_enabled" name="enabled" value="1"
+             {{ 'checked' if auto_update.enabled }}>
+      <label for="auto_enabled">Check for updates and install automatically</label>
+    </div>
+    <div class="form-grid">
+      <div class="field">
+        <label for="auto_at">Daily at (server local time)</label>
+        <input type="time" id="auto_at" name="at" value="{{ auto_update.at }}">
+      </div>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="auto_restart" name="restart_instances" value="1"
+             {{ 'checked' if auto_update.restart_instances }}>
+      <label for="auto_restart">Restart instances that were running</label>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="auto_validate" name="validate_files" value="1"
+             {{ 'checked' if auto_update.validate }}>
+      <label for="auto_validate">Validate files each time (much slower)</label>
+    </div>
+    <button class="primary" type="submit">Save schedule</button>
+    {% if auto_update.last_run_date %}
+      <span class="subtle">Last scheduled run: {{ auto_update.last_run_date }}</span>
+    {% endif %}
+  </form>
+  <div id="auto-update-note"></div>
 </div>
 
 <div class="panel">
