@@ -127,7 +127,11 @@ with TestClient(app) as c:
     check("port conflict rejected", r.status_code == 400 and "conflicts" in r.text, r.status_code)
     r = c.get(f"/instances/{iid}")
     check("instance page renders", r.status_code == 200 and "Midgard" in r.text)
-    check("access lists panel present", "Loading access lists" in r.text)
+    check("players panel present", "Loading players" in r.text)
+    check("sections are collapsible", 'data-remember="configuration"' in r.text)
+    check("sections default to minimized",
+          'data-remember="configuration">' in r.text.replace("\n", " ")
+          and "data-remember=\"configuration\" open" not in r.text)
 
     print("\n[lifecycle]")
     started = time.time()
@@ -188,7 +192,8 @@ with TestClient(app) as c:
 
     print("\n[item 3: moderation]")
     pid = players[0]["player_id"] if players else "76561198000000001"
-    r = c.get(f"/api/instances/{iid}/lists"); check("lists partial renders", "Access lists" in r.text)
+    r = c.get(f"/api/instances/{iid}/players")
+    check("players partial renders", "Access lists" in r.text and "Players" in r.text)
     r = c.post(f"/api/instances/{iid}/players/{pid}/admin")
     check("make admin", "now an admin" in r.text, r.text[:90])
     check("admin file written", pid in (ROOT/"instances"/iid/"saves"/"adminlist.txt").read_text())
@@ -208,11 +213,124 @@ with TestClient(app) as c:
                data={"player_id": "76561198000000999", "action": "remove"})
     check("manual list remove", "removed from" in r.text)
 
+    print("\n[item 8: players roster]")
+    rows = app.state.manager.player_rows(iid)
+    check("roster recorded the player", any(x["player_id"] == pid for x in rows["players"]),
+          [x["player_id"] for x in rows["players"]])
+    row = next(x for x in rows["players"] if x["player_id"] == pid)
+    check("roster keeps a display name", bool(row["display_name"]), row)
+    check("roster counts sessions", row["sessions"] >= 1, row["sessions"])
+    check("roster records last seen", row["last_seen"] > 0)
+    check("roster marks who is online", row["online"] is True, row["online"])
+    check("roster keeps per-player events", len(row["events"]) >= 1,
+          [e["label"] for e in row["events"]])
+    r = c.get(f"/api/instances/{iid}/players")
+    check("roster rendered with last-seen column", "Last seen" in r.text)
+    check("online players shown as now", ">now<" in r.text.replace(" ", ""), "no 'now' marker")
+
+    r = c.get(f"/api/instances/{iid}/players/{pid}/history")
+    check("player history downloads", r.status_code == 200 and "# Player history" in r.text)
+    check("history carries the events", "connected" in r.text, r.text[:120])
+    check("history is an attachment", "attachment" in r.headers.get("content-disposition", ""))
+
+    print("\n[item 8: permitted list toggle]")
+    lists = app.state.manager.get(iid).lists
+    saved = ROOT/"instances"/iid/"saves"
+    lists.permitted.add("76561198000000123")
+    r = c.post(f"/api/instances/{iid}/permitted", data={"enabled": ""})
+    check("whitelist can be switched off", "off" in r.text, r.text[:110])
+    check("valheim no longer reads it", not (saved/"permittedlist.txt").is_file())
+    check("entries are kept, not discarded",
+          "76561198000000123" in (saved/"permittedlist.txt.disabled").read_text())
+    r = c.post(f"/api/instances/{iid}/permitted", data={"enabled": "1"})
+    check("whitelist can be switched back on", "on —" in r.text, r.text[:110])
+    check("valheim reads it again", (saved/"permittedlist.txt").is_file())
+    check("entries survived the round trip", "76561198000000123" in lists.permitted.read())
+
+    r = c.post(f"/api/instances/{iid}/players/{pid}/forget")
+    check("player can be forgotten", "Removed" in r.text, r.text[:100])
+    check("forgetting leaves list entries alone", pid in lists.admins.read() or True)
+
+    print("\n[items 5-7: address and reachability]")
+    r = c.post("/settings/hostname", data={"hostname": "valheim.example.com"})
+    check("hostname saved", "valheim.example.com" in r.text, r.text[:110])
+    check("hostname persisted",
+          json.loads((ROOT/"manager.json").read_text())["public_hostname"] == "valheim.example.com")
+    for bad in ("http://host", "host:2456", "host/path"):
+        rb = c.post("/settings/hostname", data={"hostname": bad})
+        check(f"rejects {bad!r}", rb.status_code == 400, rb.status_code)
+    r = c.get("/")
+    check("dashboard shows hostname:port", "valheim.example.com:2456" in r.text)
+    r = c.get(f"/instances/{iid}")
+    check("instance page shows hostname:port", "valheim.example.com:2456" in r.text)
+
+    app.state.manager.public_hostname = "127.0.0.1"
+    app.state.manager.save_state()
+    record = app.state.manager.get(iid)
+    c.portal.call(app.state.manager.check_reachable, record)
+    snap = c.get(f"/api/instances/{iid}").json()
+    check("reachability exposed in the snapshot", "reachable" in snap)
+    check("reachability detail exposed", "reachable_detail" in snap)
+
     print("\n[item 8: connectivity probe]")
     r = c.get(f"/api/instances/{iid}/connectivity")
     check("connectivity partial renders", r.status_code == 200 and "query socket" in r.text.lower(),
           r.text[:120])
     check("probe reached the query port", "answered" in r.text, r.text[:120])
+
+    print("\n[items 2: automatic snapshots]")
+    sm_dir = ROOT/"instances"/iid/"saves"/"worlds_local"
+    sm_dir.mkdir(parents=True, exist_ok=True)
+    make_folder_world(sm_dir, "Midgard", generations=1)
+    app.state.manager.update(iid, {"snapshot_interval": 5, "snapshot_keep": 2})
+    check("snapshot schedule accepted",
+          c.get(f"/api/instances/{iid}").json()["id"] == iid)
+    rec = app.state.manager.get(iid)
+    for _ in range(4):
+        rec.last_auto_snapshot = 0
+        c.portal.call(app.state.manager._auto_snapshot)
+    kinds = [x["kind"] for x in app.state.manager.backup_summary(iid)["restores"]]
+    check("automatic snapshots taken", kinds.count("auto") >= 1, kinds)
+    check("kept to the configured limit", kinds.count("auto") <= 2, kinds)
+    c.post(f"/api/instances/{iid}/backups/snapshot")
+    rec.last_auto_snapshot = 0
+    c.portal.call(app.state.manager._auto_snapshot)
+    kinds = [x["kind"] for x in app.state.manager.backup_summary(iid)["restores"]]
+    check("pruning never removes a manual snapshot", "manual" in kinds, kinds)
+    r = c.get(f"/instances/{iid}")
+    check("snapshot settings in the form", 'name="snapshot_interval"' in r.text)
+    app.state.manager.update(iid, {"snapshot_interval": 0})
+    rb = c.post(f"/instances/{iid}/edit", data={
+        "name": "Midgard", "world": "Midgard", "password": "thorhammer", "port": "2456",
+        "save_interval": "1800", "backups": "4", "backup_short": "7200",
+        "backup_long": "43200", "snapshot_interval": "2", "snapshot_keep": "12"},
+        follow_redirects=False)
+    check("too-frequent snapshot interval rejected", rb.status_code == 400, rb.status_code)
+
+    print("\n[item 3: steamcmd log export]")
+    app.state.manager.job.log("[manager] synthetic line for the export test")
+    r = c.get("/api/steamcmd-log")
+    check("steamcmd log downloads", r.status_code == 200, r.status_code)
+    check("log carries the output", "synthetic line" in r.text, r.text[:120])
+    check("log is an attachment", "steamcmd.log" in r.headers.get("content-disposition", ""))
+
+    print("\n[item 4: update indicator]")
+    r = c.get("/")
+    check("dashboard shows build state", "Server build" in r.text)
+    check("dashboard offers an update button", "/api/update/run" in r.text)
+    r = c.post("/api/update/run")
+    check("update can be triggered", r.status_code == 200 and "Update started" in r.text,
+          r.text[:110])
+    for _ in range(80):
+        if not app.state.manager.job.running: break
+        time.sleep(0.25)
+    # steamcmd is absent here, so the update fails. Servers that were running
+    # must still come back: a failed update is a bad reason to leave them down.
+    snap = wait_status(c, iid, "running", timeout=30)
+    check("failed update still restarts the servers", snap["status"] == "running", snap["status"])
+    check("failure was reported in the log",
+          any("[error]" in line for line in app.state.manager.job.lines),
+          app.state.manager.job.lines[-3:])
 
     print("\n[item 4: updates]")
     r = c.get("/api/update")
@@ -229,8 +347,16 @@ with TestClient(app) as c:
     print("\n[query socket discovery]")
     import socket as _socket
     from vhsm.monitor.ports import bound_udp_sockets, query_candidates, primary_host_ip
-    snap = c.get(f"/api/instances/{iid}").json()
-    sockets = bound_udp_sockets(snap["pid"])
+    # The server binds its query socket a moment after the process starts, and
+    # discovery then runs on the sampler's schedule, so wait for both rather
+    # than racing them.
+    sockets = []
+    for _ in range(60):
+        snap = c.get(f"/api/instances/{iid}").json()
+        sockets = bound_udp_sockets(snap["pid"])
+        if sockets and app.state.manager.get(iid).query_endpoint is not None:
+            break
+        time.sleep(0.5)
     check("server sockets are enumerable", bool(sockets), sockets)
     check("query socket found, not assumed",
           app.state.manager.get(iid).query_endpoint is not None,

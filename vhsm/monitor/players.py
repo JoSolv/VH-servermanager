@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 # Console lines emitted by the dedicated server, in connection order.
 RE_CONNECT = re.compile(r"Got connection SteamID (\S+)")
@@ -23,6 +23,18 @@ RE_HANDSHAKE = re.compile(r"Got handshake from client (\S+)")
 RE_CHARACTER = re.compile(r"Got character ZDOID from (.+?) : (-?\d+):(-?\d+)")
 RE_DISCONNECT = re.compile(r"Closing socket (\S+)")
 RE_CONNECTIONS = re.compile(r"Connections (\d+) ZDOS")
+
+
+@dataclass(slots=True)
+class LogEvent:
+    """A player-related thing that happened, resolved to an id where possible."""
+
+    kind: str                 # connect | named | died | disconnect | count
+    player_id: str = ""
+    name: str = ""
+    count: int | None = None
+    raw: str = ""
+    at: float = field(default_factory=time.time)
 
 
 @dataclass(slots=True)
@@ -82,13 +94,28 @@ class Player:
 
 
 class PlayerTracker:
-    """Per-instance view of connected players."""
+    """Per-instance view of connected players.
 
-    def __init__(self) -> None:
+    Pairing a character name with the id that connected is only possible here,
+    where the order of console lines is known, so anything else that needs
+    resolved events (the persistent roster) is fed from this one place rather
+    than parsing the log a second time.
+    """
+
+    def __init__(self, on_event: Callable[[LogEvent], None] | None = None) -> None:
         self._players: dict[str, Player] = {}
         self._pending: list[str] = []   # connected, awaiting a character name
+        self._on_event = on_event
         self.query_count: int | None = None
         self.max_players: int = 0
+
+    def _emit(self, event: LogEvent) -> None:
+        if self._on_event is None:
+            return
+        try:
+            self._on_event(event)
+        except Exception:  # a listener must never break log processing
+            pass
 
     def reset(self) -> None:
         self._players.clear()
@@ -105,6 +132,7 @@ class PlayerTracker:
             if session_id not in self._players:
                 self._players[session_id] = Player(session_id=session_id)
                 self._pending.append(session_id)
+                self._emit(LogEvent("connect", player_id=session_id, raw=line))
             return
 
         match = RE_CHARACTER.search(line)
@@ -113,9 +141,15 @@ class PlayerTracker:
             character_id = match.group(2)
             # A ZDOID line names the character; attach it to the most recent
             # unnamed connection. Re-spawns re-use an already named session.
+            # A ZDOID of 0 is Valheim reporting a death, not a spawn.
+            died = character_id == "0"
             for player in self._players.values():
                 if player.name == name:
                     player.character_id = character_id
+                    if died:
+                        self._emit(
+                            LogEvent("died", player_id=player.player_id, name=name, raw=line)
+                        )
                     return
             while self._pending:
                 session_id = self._pending.pop(0)
@@ -123,20 +157,31 @@ class PlayerTracker:
                 if player is not None and not player.name:
                     player.name = name
                     player.character_id = character_id
+                    self._emit(
+                        LogEvent("named", player_id=session_id, name=name, raw=line)
+                    )
                     return
             return
 
         match = RE_DISCONNECT.search(line)
         if match:
             session_id = match.group(1)
-            self._players.pop(session_id, None)
+            gone = self._players.pop(session_id, None)
             if session_id in self._pending:
                 self._pending.remove(session_id)
+            if gone is not None:
+                self._emit(
+                    LogEvent(
+                        "disconnect", player_id=session_id,
+                        name=gone.name, count=round(gone.playtime), raw=line,
+                    )
+                )
             return
 
         match = RE_CONNECTIONS.search(line)
         if match:
             self.query_count = int(match.group(1))
+            self._emit(LogEvent("count", count=self.query_count, raw=line))
 
     # ------------------------------------------------------------------ #
     # query-driven updates

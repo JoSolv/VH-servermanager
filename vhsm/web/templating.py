@@ -52,6 +52,12 @@ def timeago(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
 
 
+def as_datetime(timestamp: float) -> str:
+    if not timestamp:
+        return "never"
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def rate(bytes_per_second: float) -> str:
     return f"{human_bytes(bytes_per_second or 0)}/s"
 
@@ -60,3 +66,4 @@ TEMPLATES.env.filters["human_bytes"] = human_bytes
 TEMPLATES.env.filters["duration"] = duration
 TEMPLATES.env.filters["rate"] = rate
 TEMPLATES.env.filters["timeago"] = timeago
+TEMPLATES.env.filters["datetime"] = as_datetime

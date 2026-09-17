@@ -46,8 +46,34 @@
       <div class="v">{{ records | length }}</div>
       <div class="sub">{{ status.install_size | human_bytes }} of server files</div>
     </div>
+    <div class="stat">
+      <div class="k">Server build</div>
+      <div class="v" style="font-size:15px">
+        {% if build.available %}
+          <span class="tag upd">update available</span>
+        {% elif build.installed and build.latest %}
+          <span class="tag ok-tag">up to date</span>
+        {% else %}
+          <span class="muted">unknown</span>
+        {% endif %}
+      </div>
+      <div class="sub">
+        {% if build.installed %}build {{ build.installed }}{% else %}not installed{% endif %}
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button class="small" hx-post="/settings/check-update"
+                hx-target="#build-note" hx-swap="innerHTML">Check</button>
+        <button class="small {{ 'primary' if build.available }}"
+                hx-post="/api/update/run" hx-target="#build-note" hx-swap="innerHTML"
+                hx-confirm="Update the shared server files? Running instances are stopped and started again.">
+          Update now
+        </button>
+      </div>
+    </div>
   </div>
 </div>
+
+<div id="build-note"></div>
 
 <div class="page-head">
   <h1>Instances</h1>

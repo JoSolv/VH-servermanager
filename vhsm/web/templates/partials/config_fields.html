@@ -88,6 +88,25 @@
   </div>
 </div>
 
+<h3>Automatic snapshots</h3>
+<p class="hint" style="margin-top:-6px">
+  The manager's own rollback points, taken while the server is running and separate from
+  Valheim's backups. Each one copies the whole world, so a large world wants a longer interval.
+</p>
+<div class="form-grid">
+  <div class="field">
+    <label for="snapshot_interval">Every (minutes, 0 = off)</label>
+    <input type="number" id="snapshot_interval" name="snapshot_interval"
+           value="{{ config.snapshot_interval }}" min="0" max="10080" step="5">
+  </div>
+  <div class="field">
+    <label for="snapshot_keep">Automatic snapshots to keep</label>
+    <input type="number" id="snapshot_keep" name="snapshot_keep"
+           value="{{ config.snapshot_keep }}" min="1" max="200">
+    <div class="hint">Snapshots you take by hand are never pruned.</div>
+  </div>
+</div>
+
 <div class="field">
   <label for="extra_args">Extra launch arguments</label>
   <input type="text" id="extra_args" name="extra_args" value="{{ config.extra_args }}"

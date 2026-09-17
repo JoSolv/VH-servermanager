@@ -30,6 +30,12 @@
     <span class="subtle">Downloads roughly 2 GB on a first install.</span>
   </form>
   {% include "partials/setup_log.html" %}
+  <div class="row" style="margin-top:10px">
+    <a class="btn small" href="/api/steamcmd-log">Download steamcmd log</a>
+    <span class="subtle">
+      The full transcript, including runs whose output has scrolled out of the box above.
+    </span>
+  </div>
 </div>
 
 <div class="panel">
@@ -67,6 +73,29 @@
     {% endif %}
   </form>
   <div id="auto-update-note"></div>
+</div>
+
+<div class="panel">
+  <h2>Server address</h2>
+  <p class="subtle" style="margin-top:0">
+    The hostname or IP players connect to. It is shown beside each instance and is what
+    the reachability check probes, so it should be what players actually type — a public
+    DNS name or IP, not this machine's internal address. Leave it blank to use the
+    detected address, which is right on a LAN.
+  </p>
+  <form hx-post="/settings/hostname" hx-target="#hostname-note" hx-swap="innerHTML">
+    <div class="form-grid">
+      <div class="field">
+        <label for="hostname">Hostname or IP</label>
+        <input type="text" id="hostname" name="hostname" value="{{ hostname }}"
+               placeholder="{{ effective_hostname }}">
+        <div class="hint">No scheme and no port — each instance supplies its own port.</div>
+      </div>
+    </div>
+    <button class="primary" type="submit">Save address</button>
+    <span class="subtle">Currently using <code>{{ effective_hostname }}</code></span>
+  </form>
+  <div id="hostname-note"></div>
 </div>
 
 <div class="panel">

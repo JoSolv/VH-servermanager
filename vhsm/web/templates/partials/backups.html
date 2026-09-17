@@ -1,10 +1,23 @@
 {# Live world, snapshots, rollback, world upload and instance export. #}
-<div id="backups" class="panel" hx-target="this" hx-swap="outerHTML">
+<div id="backups" hx-target="this" hx-swap="outerHTML">
+ <details class="section" data-remember="backups">
+  <summary>
+    <span class="sec-title">World &amp; backups</span>
+    <span class="sec-note">
+      {% if backups.live.exists %}{{ backups.world }} &middot;
+        {{ backups.restores | length }} restore point(s)
+        {% if record.config.snapshot_interval %}
+          &middot; auto every {{ record.config.snapshot_interval }} min
+        {% endif %}
+      {% else %}no world yet{% endif %}
+    </span>
+  </summary>
+  <div class="section-body">
   {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
   {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
   <div class="row spread" style="margin-bottom:10px">
-    <h2 style="margin:0">World &amp; backups</h2>
+    <span class="subtle">Snapshots are this manager's own, kept inside the instance.</span>
     <div class="row">
       <button class="small" hx-post="/api/instances/{{ record.config.id }}/backups/snapshot">
         Snapshot now
@@ -162,4 +175,6 @@
     </div>
     <button class="primary" type="submit">Download archive</button>
   </form>
+  </div>
+ </details>
 </div>

@@ -43,12 +43,17 @@
     meter.classList.add(percent >= 90 ? "err" : percent >= 70 ? "warn" : "ok");
   }
 
-  function drawSpark(scope, id, value) {
-    var svg = scope.querySelector('[data-spark="cpu"]');
-    if (!svg) return;
+  function pushHistory(id, value) {
     var series = history[id] || (history[id] = []);
     series.push(value);
     if (series.length > SPARK_POINTS) series.shift();
+  }
+
+  function drawSpark(scope, id) {
+    var svg = scope.querySelector('[data-spark="cpu"]');
+    if (!svg) return;
+    var series = history[id] || [];
+    if (!series.length) return;
 
     var line = svg.querySelector("polyline");
     if (!line) return;
@@ -62,8 +67,30 @@
 
   // ------------------------------------------------------------- rendering
   function applyInstance(snapshot) {
-    var scope = document.querySelector('[data-instance="' + snapshot.id + '"]');
-    if (!scope) return;
+    // An instance can have more than one region on a page -- the detail page
+    // puts its address and reachability in the header, outside the main block
+    // -- so every matching region is updated, not just the first.
+    var scopes = document.querySelectorAll('[data-instance="' + snapshot.id + '"]');
+    if (!scopes.length) return;
+    pushHistory(snapshot.id, snapshot.metrics && snapshot.status !== "stopped"
+      ? snapshot.metrics.cpu_host_percent : 0);
+    Array.prototype.forEach.call(scopes, function (scope) {
+      applyToScope(scope, snapshot);
+    });
+
+    // Status changed: let the server re-render the action buttons.
+    if (lastStatus[snapshot.id] !== snapshot.status) {
+      lastStatus[snapshot.id] = snapshot.status;
+      var controls = document.querySelector(
+        '[data-instance="' + snapshot.id + '"] [data-controls]'
+      );
+      if (controls && window.htmx) {
+        window.htmx.ajax("GET", "/instances/" + snapshot.id + "/controls", { target: controls, swap: "outerHTML" });
+      }
+    }
+  }
+
+  function applyToScope(scope, snapshot) {
 
     var pill = scope.querySelector('[data-f="status"]');
     if (pill) {
@@ -92,6 +119,7 @@
       active ? metrics.cpu_cores.toFixed(2) + " of " + metrics.cpu_count + " cores" : "\u00a0"
     );
     setText(scope, "version", snapshot.version || "\u2014");
+    applyReach(scope, snapshot);
     setText(scope, "mem", active ? fmtBytes(metrics.memory_rss) : "--");
     setText(scope, "threads", active ? String(metrics.threads) : "--");
     setText(scope, "pid", snapshot.pid ? String(snapshot.pid) : "--");
@@ -104,18 +132,9 @@
 
     setMeter(scope, "cpu", active ? metrics.cpu_host_percent : 0);
     setMeter(scope, "mem", active ? metrics.memory_percent : 0);
-    drawSpark(scope, snapshot.id, active ? metrics.cpu_host_percent : 0);
+    drawSpark(scope, snapshot.id);
 
     renderPlayers(scope, snapshot.id, players.players || []);
-
-    // Status changed: let the server re-render the action buttons.
-    if (lastStatus[snapshot.id] !== snapshot.status) {
-      lastStatus[snapshot.id] = snapshot.status;
-      var controls = scope.querySelector("[data-controls]");
-      if (controls && window.htmx) {
-        window.htmx.ajax("GET", "/instances/" + snapshot.id + "/controls", { target: controls, swap: "outerHTML" });
-      }
-    }
   }
 
   function cell(row, text, className) {
@@ -135,6 +154,42 @@
     b.dataset.player = playerId;
     return b;
   }
+
+  function applyReach(scope, snapshot) {
+    var node = scope.querySelector('[data-f="reach"]');
+    if (!node) return;
+    var active = ["starting", "running", "stopping"].indexOf(snapshot.status) >= 0;
+    var label, cls;
+    if (!active) {
+      label = "not running"; cls = "reach";
+    } else if (snapshot.reachable === true) {
+      label = "reachable"; cls = "reach yes";
+    } else if (snapshot.reachable === false) {
+      label = "not reachable"; cls = "reach no";
+    } else {
+      label = "checking\u2026"; cls = "reach";
+    }
+    if (node.textContent !== label) node.textContent = label;
+    if (node.className !== cls) node.className = cls;
+    node.title = snapshot.reachable_detail ||
+      "Probed from this host, so a router that does not loop traffic back can " +
+      "report a working server as unreachable.";
+  }
+
+  // Copy an address without needing to select it by hand.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-copy]");
+    if (!button) return;
+    var value = button.dataset.copy;
+    var done = function () {
+      var original = button.textContent;
+      button.textContent = "copied";
+      setTimeout(function () { button.textContent = original; }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(done, function () {});
+    }
+  });
 
   function renderPlayers(scope, instanceId, players) {
     var body = scope.querySelector("[data-players-body]");
@@ -214,7 +269,7 @@
       "POST",
       "/api/instances/" + button.dataset.instance + "/players/" +
         encodeURIComponent(button.dataset.player) + "/" + action,
-      { target: "#player-lists", swap: "outerHTML" }
+      { target: "#players", swap: "outerHTML" }
     );
   });
 
@@ -304,6 +359,43 @@
     target.value = relative ? relative.split("/")[0] : "";
   });
 
+  // ------------------------------------------------- collapsible sections
+  // Sections start closed, and htmx replaces whole panels, so the open ones
+  // are remembered per browser rather than reset on every swap.
+  var SECTION_KEY = "vhsm.sections";
+
+  function openSections() {
+    try {
+      return JSON.parse(localStorage.getItem(SECTION_KEY) || "{}") || {};
+    } catch (e) {
+      return {};                      // private mode, blocked storage, bad JSON
+    }
+  }
+
+  function rememberSection(name, open) {
+    try {
+      var state = openSections();
+      if (open) { state[name] = 1; } else { delete state[name]; }
+      localStorage.setItem(SECTION_KEY, JSON.stringify(state));
+    } catch (e) { /* storage is a convenience, never a requirement */ }
+  }
+
+  function restoreSections(scope) {
+    var state = openSections();
+    (scope || document).querySelectorAll("details[data-remember]").forEach(function (el) {
+      el.open = !!state[el.dataset.remember];
+    });
+  }
+
+  document.addEventListener("toggle", function (event) {
+    var el = event.target;
+    if (el && el.dataset && el.dataset.remember) rememberSection(el.dataset.remember, el.open);
+  }, true);
+
+  document.body.addEventListener("htmx:afterSwap", function (event) {
+    restoreSections(event.target);
+  });
+
   // Uploading a world repoints the instance at it. The configuration form
   // below was rendered with the old name, so keep it in step rather than let
   // a later save send the stale value back.
@@ -317,6 +409,7 @@
   });
 
   document.addEventListener("DOMContentLoaded", function () {
+    restoreSections();
     connect();
     attachConsole();
   });

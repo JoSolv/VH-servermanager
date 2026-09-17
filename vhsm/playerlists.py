@@ -40,13 +40,56 @@ def normalise_id(value: str) -> str:
     return value
 
 
+#: A parked list is one Valheim will not read. Renaming is how the permitted
+#: list is switched off without losing who was on it.
+PARKED_SUFFIX = ".disabled"
+
+
 @dataclass(slots=True)
 class PlayerList:
-    """One of Valheim's three list files."""
+    """One of Valheim's three list files.
+
+    The permitted list doubles as an on/off switch: Valheim treats a non-empty
+    ``permittedlist.txt`` as a whitelist, so the only way to stop enforcing it
+    without discarding its contents is to move the file out of the way.
+    ``active`` is the name Valheim reads; ``parked`` is where it waits.
+    """
 
     key: str
-    path: Path
+    active: Path
     header: str
+    parkable: bool = False
+
+    @property
+    def parked(self) -> Path:
+        return self.active.with_name(self.active.name + PARKED_SUFFIX)
+
+    @property
+    def enabled(self) -> bool:
+        """True when Valheim is reading this list."""
+        return not self.parkable or self.active.is_file() or not self.parked.is_file()
+
+    @property
+    def path(self) -> Path:
+        """Whichever file currently holds the entries."""
+        if self.parkable and not self.active.is_file() and self.parked.is_file():
+            return self.parked
+        return self.active
+
+    def set_enabled(self, enabled: bool) -> bool:
+        if not self.parkable:
+            raise PlayerListError(f"the {self.key} list cannot be switched off")
+        if enabled == self.enabled:
+            return False
+        source, target = (self.parked, self.active) if enabled else (self.active, self.parked)
+        if source.is_file():
+            target.unlink(missing_ok=True)
+            source.rename(target)
+        elif enabled:
+            # Nothing stored yet; an empty active file means "allow everyone",
+            # which is what Valheim does with an empty whitelist.
+            self.write([])
+        return True
 
     def read(self) -> list[str]:
         try:
@@ -65,15 +108,17 @@ class PlayerList:
         return entries
 
     def write(self, entries: Iterable[str]) -> None:
+        target = self.path
         unique: list[str] = []
         for entry in entries:
             entry = normalise_id(entry)
             if entry not in unique:
                 unique.append(entry)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         body = "\n".join(unique)
-        self.path.write_text(f"{self.header}\n{body}\n" if body else f"{self.header}\n",
-                             encoding="utf-8")
+        target.write_text(
+            f"{self.header}\n{body}\n" if body else f"{self.header}\n", encoding="utf-8"
+        )
 
     def contains(self, player_id: str) -> bool:
         return normalise_id(player_id) in self.read()
@@ -152,6 +197,7 @@ class PlayerLists:
         self.permitted = PlayerList(
             "permitted", savedir / "permittedlist.txt",
             "// List permitted players ID, one per line.",
+            parkable=True,
         )
         self.temp_bans = TempBans(state_dir / "tempbans.json")
 
@@ -192,9 +238,14 @@ class PlayerLists:
 
     def summary(self) -> dict[str, Any]:
         pending = self.temp_bans.pending()
+        permitted = self.permitted.read()
         return {
             "admins": self.admins.read(),
             "banned": self.banned.read(),
-            "permitted": self.permitted.read(),
+            "permitted": permitted,
+            "permitted_enabled": self.permitted.enabled,
+            # An empty whitelist lets everyone in, so say so rather than imply
+            # the server is locked down.
+            "permitted_enforced": self.permitted.enabled and bool(permitted),
             "temp_bans": {k: round(v - time.time()) for k, v in pending.items()},
         }

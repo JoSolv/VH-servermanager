@@ -213,6 +213,25 @@ def snapshot(instance_root: Path, savedir: Path, world: str, kind: str = "manual
     )
 
 
+def prune(instance_root: Path, world: str, keep: int, kind: str = "auto") -> list[str]:
+    """Drop the oldest snapshots of one kind, keeping the newest *keep*.
+
+    Only the manager's own snapshots of that kind are considered: an automatic
+    schedule must never delete a snapshot someone took by hand before a risky
+    change, nor one of Valheim's own backups.
+    """
+    mine = [
+        r for r in _vhsm_snapshots(instance_root, world)
+        if r.kind == kind
+    ]
+    mine.sort(key=lambda r: r.taken_at, reverse=True)
+    removed: list[str] = []
+    for restore_point in mine[max(0, keep):]:
+        shutil.rmtree(restore_point.payload.parent, ignore_errors=True)
+        removed.append(restore_point.key)
+    return removed
+
+
 def restore(instance_root: Path, savedir: Path, world: str, key: str) -> Restore:
     """Roll the live world back, snapshotting the current one first."""
     match = next(

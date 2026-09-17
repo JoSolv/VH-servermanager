@@ -55,13 +55,23 @@ tested end to end, and the structure is meant to be built on.
   so "shows as unreachable in the client" can be told apart from "the game port
   is fine".
 
-**Moderation**
-- Admin, banned and permitted lists edited from the GUI. Valheim re-reads these
-  files while running, so changes take effect within seconds without a restart.
-- Quick actions on every connected player: make admin, ban, and kick. A stock
-  server exposes no RCON and ignores stdin, so kick is a brief ban that lifts
-  itself; the pending expiry is written to disk, so a manager restart mid-kick
-  still clears it rather than stranding the player on the banned list.
+**Players and moderation**
+- A roster of everyone who has ever joined, kept across restarts. Valheim's
+  console is the only source of player identity a stock server offers and it
+  says nothing about anyone not currently connected, so moderating someone who
+  left an hour ago means having written down that they were here.
+- Per player: names used, platform id, session count, time played, last seen
+  ("now" while online, otherwise a timestamp) and a bounded log of their
+  connects, spawns, deaths and disconnects — downloadable as a text file.
+- Admin, ban, permit and kick from the roster, whether or not the player is
+  online. Valheim re-reads its list files while running, so changes take effect
+  within seconds without a restart.
+- Kick is a brief ban that lifts itself, because a stock server exposes no RCON
+  and ignores stdin. The pending expiry is written to disk, so a manager restart
+  mid-kick still clears it rather than stranding the player on the banned list.
+- The permitted list has an on/off switch. Valheim treats a non-empty
+  `permittedlist.txt` as a whitelist, so switching it off parks the file rather
+  than deleting it — the list survives to be switched back on.
 
 **Worlds, backups and portability**
 - Both save formats are handled. Since Valheim 1.0 a world is a **folder**
@@ -74,9 +84,11 @@ tested end to end, and the structure is meant to be built on.
   and the instance is repointed at it. The server only loads the world its
   configuration names, so without that it would ignore the upload and generate
   an empty world instead.
-- Snapshots taken on demand, kept in `backups/` inside the instance rather than
-  in `worlds_local`, where a backup folder would show up as another world.
-  Valheim's own rotating backups are listed alongside them.
+- Snapshots taken on demand or on a per-instance schedule, kept in `backups/`
+  inside the instance rather than in `worlds_local`, where a backup folder would
+  show up as another world. Automatic snapshots are pruned to a configured
+  count; ones taken by hand are never pruned. Valheim's own rotating backups are
+  listed alongside them.
 - Rollback to any restore point. The live world is snapshotted first, so a
   rollback can itself be undone, and it is refused while the server is running:
   a running server holds the world in memory and would overwrite the restored
@@ -89,10 +101,26 @@ tested end to end, and the structure is meant to be built on.
 **Updates**
 - The installed build id (from steamcmd's app manifest) is compared against the
   newest published build, so the dashboard can say whether an update exists
-  rather than guessing from file dates.
-- One-click update that stops running instances, updates, and starts them again.
+  rather than guessing from file dates, with an update button beside it.
+- One-click update that stops running instances, updates, and starts them again
+  — including when the update fails, since that is a bad reason to leave servers
+  down.
 - Optional daily scheduled update at a chosen time, with the same stop/start
   handling.
+- The full steamcmd transcript is written to `steamcmd.log` and downloadable,
+  so a failed install can still be read after its output has scrolled away.
+
+**Addressing**
+- A global server address (hostname or IP) that players connect to, shown as
+  `host:port` beside every instance with a copy button.
+- Each instance is probed at that address on a timer and reports whether it
+  answered. The probe leaves the host, so it tests the path players take —
+  though a router that will not loop traffic back to itself can report a working
+  server as unreachable, and the UI says so.
+
+**Interface**
+- The instance page's sections (world and backups, players, configuration,
+  danger zone) collapse, start collapsed, and remember what you opened.
 
 **Mods (r2modman-style)**
 - Browse and search the full Thunderstore catalogue for Valheim, cached to disk
@@ -180,14 +208,17 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 .venv/bin/python tests/smoke_test.py
 ```
 
-122 checks covering page rendering, instance creation and validation, the
+166 checks covering page rendering, instance creation and validation, the
 start/stop/restart lifecycle, the live-metrics and console websockets, CPU
 normalisation, version reporting, player detail, every moderation path, query
 socket discovery (including a socket bound to a single interface), the
 connectivity probe, instance export/import (including rejection of a
 traversing archive), world upload in both save formats (zipped folder, loose
 files, and rejection of a traversing filename), snapshots and rollback of a 1.0
-folder world and its undo, the update endpoints, and the whole mod flow (search, dependency resolution, disable/enable, config
+folder world and its undo, automatic snapshots and their pruning, the update
+endpoints (including that a failed update still restarts the servers), the
+player roster and its history export, the whitelist on/off switch, the server
+address and reachability probe, and the whole mod flow (search, dependency resolution, disable/enable, config
 preservation, dependency-protected uninstall, export). Runs against the
 simulated server, so it needs no network and no Steam download.
 

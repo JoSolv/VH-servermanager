@@ -7,6 +7,7 @@ be scripted.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shutil
@@ -14,7 +15,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.background import BackgroundTask
 
 from ..instance import InstanceConfig, ValidationError
@@ -388,25 +389,71 @@ async def clear_package_cache(request: Request) -> JSONResponse:
 # --------------------------------------------------------------------------- #
 # admin / ban / permit lists
 # --------------------------------------------------------------------------- #
-def _lists_partial(
+def _players_partial(
     request: Request, instance_id: str, message: str = "", error: str = ""
 ) -> HTMLResponse:
-    record = _manager(request).get(instance_id)
+    manager = _manager(request)
+    payload = manager.player_rows(instance_id)
     return TEMPLATES.TemplateResponse(
         request,
-        "partials/player_lists.html",
+        "partials/players.html",
         {
-            "record": record,
-            "lists": record.lists.summary(),
+            "record": manager.get(instance_id),
+            "players": payload["players"],
+            "lists": payload["lists"],
+            "online_count": payload["online_count"],
             "message": message,
             "error": error,
         },
     )
 
 
-@router.get("/api/instances/{instance_id}/lists", response_class=HTMLResponse)
-async def get_lists(request: Request, instance_id: str) -> HTMLResponse:
-    return _lists_partial(request, instance_id)
+# Kept under the old name so existing call sites read naturally.
+_lists_partial = _players_partial
+
+
+@router.get("/api/instances/{instance_id}/players", response_class=HTMLResponse)
+async def get_players(request: Request, instance_id: str) -> HTMLResponse:
+    return _players_partial(request, instance_id)
+
+
+@router.post("/api/instances/{instance_id}/permitted", response_class=HTMLResponse)
+async def toggle_permitted(
+    request: Request, instance_id: str, enabled: str = Form(default="")
+) -> HTMLResponse:
+    """Enforce the whitelist, or stop enforcing it without losing the list."""
+    try:
+        _manager(request).set_permitted_enabled(instance_id, bool(enabled))
+    except (PlayerListError, OSError) as exc:
+        return _players_partial(request, instance_id, error=str(exc))
+    state = "on" if enabled else "off"
+    detail = (
+        "only listed players may join"
+        if enabled
+        else "anyone may join; the list is kept for later"
+    )
+    return _players_partial(
+        request, instance_id, message=f"Permitted list {state} — {detail}."
+    )
+
+
+@router.post("/api/instances/{instance_id}/players/{player_id}/forget", response_class=HTMLResponse)
+async def forget_player(request: Request, instance_id: str, player_id: str) -> HTMLResponse:
+    removed = _manager(request).forget_player(instance_id, player_id)
+    if not removed:
+        return _players_partial(request, instance_id, error="That player is not on the roster.")
+    return _players_partial(
+        request, instance_id,
+        message=f"Removed {player_id} from the roster. Their list entries are unchanged.",
+    )
+
+
+@router.get("/api/instances/{instance_id}/players/{player_id}/history")
+async def player_history(request: Request, instance_id: str, player_id: str):
+    text, filename = _manager(request).player_history(instance_id, player_id)
+    return PlainTextResponse(
+        text, headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 
 @router.post("/api/instances/{instance_id}/lists/{key}", response_class=HTMLResponse)
@@ -749,3 +796,40 @@ async def upload_world(
             {"vhsm:world-renamed": {"world": installed.name}}
         )
     return response
+
+
+# --------------------------------------------------------------------------- #
+# steamcmd log and updates
+# --------------------------------------------------------------------------- #
+@router.get("/api/steamcmd-log")
+async def steamcmd_log(request: Request):
+    """Download the full steamcmd transcript.
+
+    The in-memory tail is trimmed, so the file is the only complete record of a
+    long install -- which is what is needed when one fails.
+    """
+    manager = _manager(request)
+    path = manager.job.path
+    if path is None or not path.is_file():
+        return PlainTextResponse(
+            "No steamcmd output has been recorded yet.\n",
+            status_code=404,
+            headers={"Content-Disposition": 'attachment; filename="steamcmd.log"'},
+        )
+    return FileResponse(
+        path, media_type="text/plain", filename="steamcmd.log"
+    )
+
+
+@router.post("/api/update/run", response_class=HTMLResponse)
+async def run_update_now(request: Request) -> HTMLResponse:
+    """Update the shared server files, restarting instances around it."""
+    manager = _manager(request)
+    if manager.job.running:
+        return HTMLResponse('<div class="alert info">An update is already running.</div>')
+    asyncio.create_task(manager.run_update(restart=True))
+    await asyncio.sleep(0.3)
+    return HTMLResponse(
+        '<div class="alert info">Update started. Watch it on the '
+        '<a href="/settings">Settings</a> page.</div>'
+    )

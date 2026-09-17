@@ -25,9 +25,10 @@ from .mods.thunderstore import ThunderstoreIndex
 from .monitor.a2s import A2SError, query as a2s_query
 from .monitor.metrics import ProcMetrics, ProcessSampler, host_metrics
 from .monitor.net import NetworkMonitor, NetSample
-from .monitor.ports import Endpoint, bound_udp_sockets, query_candidates
+from .monitor.ports import Endpoint, bound_udp_sockets, primary_host_ip, query_candidates
 from .monitor.players import PlayerTracker
 from .playerlists import PlayerLists
+from .roster import Roster
 from .steam import (
     SteamError,
     install_steamcmd,
@@ -47,6 +48,8 @@ QUERY_EVERY_N_TICKS = 3
 A2S_TIMEOUT = 1.5
 #: Shorter, because discovery tries several addresses in a row.
 DISCOVER_TIMEOUT = 0.8
+#: How often to probe each instance from its public address.
+REACHABILITY_EVERY_N_TICKS = 15
 #: Don't re-ask Steam for the newest build more often than this.
 BUILD_CHECK_TTL = 900.0
 
@@ -56,16 +59,30 @@ class ManagerError(RuntimeError):
 
 
 class JobLog:
-    """Output of one long-running job (install, update), pollable by the UI."""
+    """Output of one long-running job (install, update), pollable by the UI.
 
-    def __init__(self) -> None:
+    Also appended to a file, so the full steamcmd transcript survives the
+    in-memory tail being trimmed and can be downloaded after the fact -- which
+    is exactly when a failed install needs reading.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
         self.lines: list[str] = []
         self.running = False
         self.title = ""
+        self.path = path
 
     def log(self, message: str) -> None:
         self.lines.append(message)
         del self.lines[:-400]
+        if self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as sink:
+                sink.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+        except OSError:
+            pass                      # a log that cannot be written is not fatal
 
     async def run(self, title: str, body: Callable[[], Awaitable[None]]) -> bool:
         if self.running:
@@ -73,6 +90,7 @@ class JobLog:
             return False
         self.running, self.title = True, title
         self.lines.clear()
+        self.log(f"=== {title} started ===")
         try:
             await body()
             return True
@@ -132,6 +150,7 @@ class InstanceRecord:
     layout: InstanceLayout
     supervisor: Supervisor
     lists: PlayerLists
+    roster: Roster
     players: PlayerTracker = field(default_factory=PlayerTracker)
     metrics: ProcMetrics = field(default_factory=ProcMetrics)
     net: NetSample = field(default_factory=NetSample)
@@ -145,6 +164,12 @@ class InstanceRecord:
     #: HTTP request, so a browser navigating away cannot abandon it half-done.
     operation: asyncio.Task | None = None
     operation_name: str = ""
+    #: Result of the last external reachability probe.
+    reachable: bool | None = None
+    reachable_at: float = 0.0
+    reachable_detail: str = ""
+    #: When the last automatic snapshot was taken.
+    last_auto_snapshot: float = 0.0
 
     @property
     def busy(self) -> bool:
@@ -173,6 +198,9 @@ class InstanceRecord:
             "exit_code": supervisor.exit_code,
             "last_error": supervisor.last_error,
             "version": self.version,
+            "reachable": self.reachable,
+            "reachable_at": self.reachable_at,
+            "reachable_detail": self.reachable_detail,
             "players": self.players.to_dict(self.lists),
             "metrics": self.metrics.to_dict(),
             "net": self.net.to_dict(),
@@ -218,7 +246,7 @@ class InstanceManager:
         self.index = ThunderstoreIndex(self.settings.cache_dir, self.settings.index_ttl)
         self.hub = Hub()
         self.net = NetworkMonitor()
-        self.job = JobLog()
+        self.job = JobLog(self.settings.data_root / "steamcmd.log")
         self._proc_sampler = ProcessSampler()
         self._records: dict[str, InstanceRecord] = {}
         self._sampler_task: asyncio.Task[None] | None = None
@@ -228,6 +256,10 @@ class InstanceManager:
         self._state_file = self.settings.data_root / "manager.json"
         state = read_json(self._state_file, {}) or {}
         self.auto_update = AutoUpdate.from_dict(state.get("auto_update", {}))
+        #: Hostname or IP players connect to, used for the address shown in the
+        #: UI and for the reachability probe. Blank falls back to this host's
+        #: own address, which is right on a LAN and wrong behind NAT.
+        self.public_hostname: str = str(state.get("public_hostname", "") or "")
         self._latest_build: str = str(state.get("latest_build", ""))
         self._latest_checked: float = float(state.get("latest_checked", 0) or 0)
 
@@ -239,6 +271,7 @@ class InstanceManager:
             self._state_file,
             {
                 "auto_update": self.auto_update.to_dict(),
+                "public_hostname": self.public_hostname,
                 "latest_build": self._latest_build,
                 "latest_checked": self._latest_checked,
             },
@@ -274,12 +307,18 @@ class InstanceManager:
     def _register(self, config: InstanceConfig) -> InstanceRecord:
         layout = InstanceLayout.for_instance(self.settings, config.id)
         supervisor = Supervisor(config, layout, self.settings)
+        roster = Roster(layout.root / "players.json")
         record = InstanceRecord(
             config=config,
             layout=layout,
             supervisor=supervisor,
             lists=PlayerLists(layout.savedir, layout.root),
+            roster=roster,
         )
+        # The tracker is the only place a character name can be paired with the
+        # id that connected, so the roster is fed from its resolved events
+        # rather than by parsing the log a second time.
+        record.players = PlayerTracker(on_event=roster.observe)
         supervisor.add_log_hook(record.players.observe_log)
         self._records[config.id] = record
         self.net.watch(config.port)
@@ -459,6 +498,97 @@ class InstanceManager:
         await asyncio.gather(
             *(r.supervisor.stop() for r in active), return_exceptions=True
         )
+        for record in self.records:
+            record.roster.save()
+
+    # ------------------------------------------------------------------ #
+    # players
+    # ------------------------------------------------------------------ #
+    def player_rows(self, instance_id: str) -> dict[str, Any]:
+        """The roster plus live and moderation state, for the players panel."""
+        record = self.get(instance_id)
+        online = {
+            p.player_id for p in record.players.players if p.player_id
+        }
+        return {
+            "players": record.roster.summary(record.lists, online),
+            "lists": record.lists.summary(),
+            "online_count": len(online),
+        }
+
+    def set_permitted_enabled(self, instance_id: str, enabled: bool) -> bool:
+        """Switch the whitelist on or off without discarding who is on it."""
+        record = self.get(instance_id)
+        changed = record.lists.permitted.set_enabled(enabled)
+        record.roster.save(force=True)
+        return changed
+
+    def forget_player(self, instance_id: str, player_id: str) -> bool:
+        return self.get(instance_id).roster.forget(player_id)
+
+    def player_history(self, instance_id: str, player_id: str) -> tuple[str, str]:
+        """A player's recorded events as downloadable text."""
+        record = self.get(instance_id)
+        entry = record.roster.get(player_id)
+        if entry is None:
+            raise ManagerError(f"no record of player {player_id!r}")
+        header = [
+            f"# Player history - {record.config.name}",
+            f"# id: {entry.player_id}",
+            f"# names: {', '.join(entry.names) or 'unknown'}",
+            f"# sessions: {entry.sessions}",
+            f"# first seen: {datetime.fromtimestamp(entry.first_seen):%Y-%m-%d %H:%M:%S}",
+            f"# last seen: {datetime.fromtimestamp(entry.last_seen):%Y-%m-%d %H:%M:%S}",
+            "",
+        ]
+        body = [
+            f"{datetime.fromtimestamp(e['at']):%Y-%m-%d %H:%M:%S}  {e['label']}"
+            for e in entry.events
+        ]
+        name = entry.display_name or entry.player_id
+        return "\n".join(header + body) + "\n", f"{name}-history.txt"
+
+    # ------------------------------------------------------------------ #
+    # addressing and reachability
+    # ------------------------------------------------------------------ #
+    @property
+    def hostname(self) -> str:
+        """What players type to connect. Falls back to this host's address."""
+        return self.public_hostname.strip() or primary_host_ip()
+
+    def address_for(self, record: InstanceRecord) -> str:
+        return f"{self.hostname}:{record.config.port}"
+
+    async def check_reachable(self, record: InstanceRecord) -> bool | None:
+        """Probe the instance the way a player's client would.
+
+        Queries the public address rather than loopback, so it exercises the
+        path players actually take. A failure here is not proof the server is
+        unreachable from the internet: many routers do not loop a request back
+        to themselves (NAT hairpinning), so a probe from the server's own host
+        can fail while outside clients connect fine. The UI says so.
+        """
+        if not record.supervisor.status.is_active:
+            record.reachable = None
+            record.reachable_detail = "server is not running"
+            record.reachable_at = time.time()
+            return None
+
+        port = (
+            record.query_endpoint.port
+            if record.query_endpoint is not None
+            else record.config.query_port
+        )
+        try:
+            await a2s_query(self.hostname, port, A2S_TIMEOUT)
+        except A2SError as exc:
+            record.reachable = False
+            record.reachable_detail = str(exc)
+        else:
+            record.reachable = True
+            record.reachable_detail = f"answered on {self.hostname}:{port}"
+        record.reachable_at = time.time()
+        return record.reachable
 
     # ------------------------------------------------------------------ #
     # export / import
@@ -648,30 +778,33 @@ class InstanceManager:
 
         async def body() -> None:
             running = [r for r in self.records if r.supervisor.status.is_active]
-            if running and restart:
-                job.log(f"[manager] stopping {len(running)} running instance(s)")
-                for record in running:
-                    job.log(f"[manager] stopping {record.config.name}")
-                    await self.stop(record.config.id)
-            elif running:
+            if running and not restart:
                 raise SteamError(
                     "Instances are running and automatic restart is disabled. "
                     "Stop them first, or enable restarting."
                 )
 
-            await install_steamcmd(self.settings, job.log)
-            job.log("[manager] running steamcmd app_update 896660")
-            async for line in update_server(self.settings, validate=validate):
-                job.log(line)
-            write_steam_appid(self.settings)
-
-            self._latest_build = installed_build_id(self.settings) or self._latest_build
-            self._latest_checked = time.time()
-            self.save_state()
-            job.log(f"[manager] installed build {self._latest_build or 'unknown'}")
-
-            if restart:
+            stopped: list[InstanceRecord] = []
+            try:
                 for record in running:
+                    job.log(f"[manager] stopping {record.config.name}")
+                    await self.stop(record.config.id)
+                    stopped.append(record)
+
+                await install_steamcmd(self.settings, job.log)
+                job.log("[manager] running steamcmd app_update 896660")
+                async for line in update_server(self.settings, validate=validate):
+                    job.log(line)
+                write_steam_appid(self.settings)
+
+                self._latest_build = installed_build_id(self.settings) or self._latest_build
+                self._latest_checked = time.time()
+                self.save_state()
+                job.log(f"[manager] installed build {self._latest_build or 'unknown'}")
+            finally:
+                # Whatever happened above, servers that were running must come
+                # back: a failed update is a bad reason to leave them down.
+                for record in stopped:
                     job.log(f"[manager] starting {record.config.name}")
                     try:
                         await self.start(record.config.id)
@@ -680,10 +813,46 @@ class InstanceManager:
 
         await job.run("update", body)
 
+    async def _auto_snapshot(self) -> None:
+        """Take scheduled rollback snapshots for instances that want them."""
+        for record in self.records:
+            interval = record.config.snapshot_interval
+            # Only while running: a stopped server's world does not change, so
+            # snapshotting it again would just churn disk.
+            if not interval or not record.supervisor.status.is_active:
+                continue
+            if time.time() - record.last_auto_snapshot < interval * 60:
+                continue
+            try:
+                made = await asyncio.to_thread(
+                    backups_mod.snapshot,
+                    record.layout.root, record.layout.savedir, record.config.world, "auto",
+                )
+                record.last_auto_snapshot = time.time()
+                dropped = await asyncio.to_thread(
+                    backups_mod.prune,
+                    record.layout.root, record.config.world, record.config.snapshot_keep, "auto",
+                )
+                log.info(
+                    "auto snapshot %s for %s (pruned %d)",
+                    made.key, record.config.name, len(dropped),
+                )
+            except backups_mod.BackupError as exc:
+                # Usually "no world yet"; retry on the next pass rather than
+                # spinning on it every few seconds.
+                record.last_auto_snapshot = time.time()
+                log.warning("auto snapshot skipped for %s: %s", record.config.name, exc)
+            except OSError as exc:
+                record.last_auto_snapshot = time.time()
+                log.warning("auto snapshot failed for %s: %s", record.config.name, exc)
+
     async def _scheduler_loop(self) -> None:
-        """Fire the scheduled update when its minute comes around."""
+        """Scheduled updates, automatic snapshots and roster flushes."""
         while True:
             try:
+                await self._auto_snapshot()
+                for record in self.records:
+                    await asyncio.to_thread(record.roster.save)
                 now = datetime.now()
                 if self.auto_update.due(now) and not self.job.running:
                     log.info("scheduled update starting (%s)", self.auto_update.at)
@@ -799,6 +968,11 @@ class InstanceManager:
         if running and self._tick % QUERY_EVERY_N_TICKS == 0:
             await asyncio.gather(
                 *(self._query_instance(r) for r in running), return_exceptions=True
+            )
+        # The external probe leaves the host, so it runs far less often.
+        if self._tick % REACHABILITY_EVERY_N_TICKS == 0:
+            await asyncio.gather(
+                *(self.check_reachable(r) for r in self.records), return_exceptions=True
             )
 
         for record in self.records:

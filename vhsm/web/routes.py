@@ -44,6 +44,8 @@ async def dashboard(request: Request):
         status=server_status(_settings(request)),
         net_available=manager.net.per_instance_available,
         net_reason=manager.net.per_instance_reason,
+        hostname=manager.hostname,
+        build=await manager.check_update(),
     )
 
 
@@ -79,6 +81,8 @@ def _config_from_form(form: dict[str, Any], base: InstanceConfig | None = None) 
             "extra_args": text("extra_args"),
             "autostart": form.get("autostart") is not None,
             "mods_enabled": form.get("mods_enabled") is not None,
+            "snapshot_interval": number("snapshot_interval", payload["snapshot_interval"]),
+            "snapshot_keep": number("snapshot_keep", payload["snapshot_keep"]),
         }
     )
     payload["modifiers"] = {
@@ -128,6 +132,8 @@ async def instance_detail(request: Request, instance_id: str):
         mods=profile.summary(),
         presets=PRESETS,
         modifier_keys=MODIFIER_KEYS,
+        address=manager.address_for(record),
+        hostname=manager.hostname,
     )
 
 
@@ -224,6 +230,8 @@ async def settings_page(request: Request):
         index_count=manager.index.count,
         task=manager.job,
         auto_update=manager.auto_update,
+        hostname=manager.public_hostname,
+        effective_hostname=manager.hostname,
         build=await manager.check_update(),
         net_available=manager.net.per_instance_available,
         net_reason=manager.net.per_instance_reason,
@@ -277,6 +285,35 @@ async def save_auto_update(
     return HTMLResponse(
         f'<div class="alert ok">Scheduled update {state}, daily at {normalised}.</div>'
     )
+
+
+@router.post("/settings/hostname", response_class=HTMLResponse)
+async def save_hostname(request: Request, hostname: str = Form(default="")) -> HTMLResponse:
+    """Set the address players connect to.
+
+    Used for the address shown beside each instance and as the target of the
+    reachability probe, so it wants to be what players actually type -- a
+    public DNS name or IP, not the machine's internal address.
+    """
+    manager = _manager(request)
+    cleaned = hostname.strip().strip("/")
+    if cleaned:
+        if "://" in cleaned or "/" in cleaned:
+            return HTMLResponse(
+                '<div class="alert error">Enter a hostname or IP only, '
+                "without a scheme or path.</div>",
+                status_code=400,
+            )
+        if ":" in cleaned and not cleaned.startswith("["):
+            return HTMLResponse(
+                '<div class="alert error">Leave the port out — each instance '
+                "supplies its own.</div>",
+                status_code=400,
+            )
+    manager.public_hostname = cleaned
+    manager.save_state()
+    shown = cleaned or f"{manager.hostname} (detected)"
+    return HTMLResponse(f'<div class="alert ok">Server address set to {shown}.</div>')
 
 
 @router.post("/settings/check-update", response_class=HTMLResponse)

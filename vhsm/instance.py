@@ -51,6 +51,11 @@ class InstanceConfig:
     extra_args: str = ""
     autostart: bool = False
     mods_enabled: bool = False
+    #: Minutes between automatic rollback snapshots; 0 turns them off. These
+    #: are the manager's own snapshots, separate from Valheim's backups.
+    snapshot_interval: int = 0
+    #: How many automatic snapshots to keep before the oldest is pruned.
+    snapshot_keep: int = 12
     created_at: float = field(default_factory=time.time)
 
     # ------------------------------------------------------------------ #
@@ -96,6 +101,12 @@ class InstanceConfig:
             raise ValidationError("A public server must have a password.")
         if self.preset and self.preset not in PRESETS:
             raise ValidationError(f"Unknown preset {self.preset!r}.")
+        if self.snapshot_interval and not 5 <= self.snapshot_interval <= 10080:
+            raise ValidationError(
+                "Snapshot interval must be between 5 minutes and a week (or 0 to turn it off)."
+            )
+        if not 1 <= self.snapshot_keep <= 200:
+            raise ValidationError("Keep between 1 and 200 automatic snapshots.")
         for key, value in self.modifiers.items():
             if key not in MODIFIER_KEYS:
                 raise ValidationError(f"Unknown modifier {key!r}.")

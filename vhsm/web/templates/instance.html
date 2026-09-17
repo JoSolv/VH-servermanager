@@ -3,13 +3,27 @@
 {% block content %}
 {% set status = record.supervisor.status.value %}
 
-<div class="page-head">
+<div class="page-head" data-instance="{{ config.id }}">
   <div>
     <h1>{{ config.name }}</h1>
     <div class="subtle">
       World <strong>{{ config.world }}</strong> &middot; UDP {{ config.port }}&ndash;{{ config.port + 2 }}
       &middot; query {{ config.query_port }}
       &middot; version <span data-f="version">{{ record.version or '—' }}</span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <span class="addr">
+        <span data-f="address">{{ address }}</span>
+        <button type="button" data-copy="{{ address }}" title="Copy">copy</button>
+      </span>
+      {% set reach = 'yes' if record.reachable else ('no' if record.reachable is sameas false else '') %}
+      <span class="reach {{ reach }}" data-f="reach"
+            title="{{ record.reachable_detail or 'Probed from this host; a router that does not loop traffic back can report a working server as unreachable.' }}">
+        {%- if not record.supervisor.status.is_active %}not running
+        {%- elif record.reachable %}reachable
+        {%- elif record.reachable is sameas false %}not reachable
+        {%- else %}checking…{% endif -%}
+      </span>
     </div>
   </div>
   <div class="row">
@@ -87,22 +101,30 @@
   <div class="panel empty">Loading backups…</div>
 </div>
 
-<div id="player-lists" hx-get="/api/instances/{{ config.id }}/lists"
+<div id="players" hx-get="/api/instances/{{ config.id }}/players"
      hx-trigger="load" hx-swap="outerHTML">
-  <div class="panel empty">Loading access lists…</div>
+  <div class="panel empty">Loading players…</div>
 </div>
 
-<form class="panel" method="post" action="/instances/{{ config.id }}/edit">
-  <h2>Configuration</h2>
-  {% if status in ('running', 'starting', 'stopping') %}
-    <div class="alert info">The server is running. Most changes apply after a restart, and the port cannot be changed.</div>
-  {% endif %}
-  {% include "partials/config_fields.html" %}
-  <button class="primary" type="submit">Save changes</button>
-</form>
+<details class="section" data-remember="configuration">
+  <summary>
+    <span class="sec-title">Configuration</span>
+    <span class="sec-note">port {{ config.port }} &middot; {{ config.world }}</span>
+  </summary>
+  <div class="section-body">
+    <form method="post" action="/instances/{{ config.id }}/edit">
+      {% if status in ('running', 'starting', 'stopping') %}
+        <div class="alert info">The server is running. Most changes apply after a restart, and the port cannot be changed.</div>
+      {% endif %}
+      {% include "partials/config_fields.html" %}
+      <button class="primary" type="submit">Save changes</button>
+    </form>
+  </div>
+</details>
 
-<div class="panel">
-  <h2>Danger zone</h2>
+<details class="section" data-remember="danger">
+  <summary><span class="sec-title">Danger zone</span></summary>
+  <div class="section-body">
   <form hx-post="/instances/{{ config.id }}/delete"
         hx-confirm="Delete {{ config.name }}? This stops the server first."
         hx-target="body">
@@ -112,5 +134,6 @@
     </div>
     <button class="danger" type="submit">Delete instance</button>
   </form>
-</div>
+  </div>
+</details>
 {% endblock %}
