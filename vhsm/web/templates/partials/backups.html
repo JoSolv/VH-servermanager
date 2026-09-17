@@ -1,0 +1,104 @@
+{# World snapshots and rollback. #}
+<div id="backups" class="panel" hx-target="this" hx-swap="outerHTML">
+  {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <div class="row spread" style="margin-bottom:10px">
+    <h2 style="margin:0">World backups</h2>
+    <div class="row">
+      <button class="small" hx-post="/api/instances/{{ record.config.id }}/backups/snapshot">
+        Snapshot now
+      </button>
+      <span class="spinner">working…</span>
+    </div>
+  </div>
+
+  {% if backups.live.exists %}
+    <p class="subtle" style="margin-top:0">
+      Live world <strong>{{ backups.world }}</strong> &middot;
+      {{ backups.live.size | human_bytes }} &middot;
+      saved {{ backups.live.modified | timeago }}
+      {% if not backups.live.has_metadata %}
+        &middot; <span class="tag upd">.fwl missing</span>
+      {% endif %}
+    </p>
+  {% else %}
+    <p class="subtle" style="margin-top:0">
+      No world yet — one is created the first time the server starts.
+    </p>
+  {% endif %}
+
+  {% if backups.running %}
+    <div class="alert info">
+      The server is running. Rolling back is disabled: a running server holds the
+      world in memory and would overwrite the restored copy at its next autosave.
+      Stop it first.
+    </div>
+  {% endif %}
+
+  {% if backups.restores %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Taken</th><th>Kind</th><th>Size</th><th>Actions</th></tr></thead>
+        <tbody>
+          {% for restore in backups.restores %}
+            <tr>
+              <td>{{ restore.taken_at | timeago }}<div class="muted" style="font-size:11px">{{ restore.label }}</div></td>
+              <td>{% if restore.kind == 'auto' %}<span class="tag">auto</span>
+                  {% else %}<span class="tag dep">manual</span>{% endif %}</td>
+              <td>{{ restore.size | human_bytes }}</td>
+              <td>
+                <div class="acts">
+                  <button class="small primary"
+                          {{ 'disabled' if backups.running }}
+                          hx-post="/api/instances/{{ record.config.id }}/backups/restore"
+                          hx-vals='{"key": "{{ restore.key }}"}'
+                          hx-confirm="Roll {{ backups.world }} back to {{ restore.label }}? The current world is snapshotted first, so this can be undone.">
+                    Roll back
+                  </button>
+                  <button class="small danger"
+                          hx-post="/api/instances/{{ record.config.id }}/backups/delete"
+                          hx-vals='{"key": "{{ restore.key }}"}'
+                          hx-confirm="Delete this backup permanently?">Delete</button>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="subtle" style="margin-bottom:0">
+      Valheim writes the <em>auto</em> entries itself on the schedule set in this instance's
+      configuration. Each entry is a matched <code>.db</code> + <code>.fwl</code> pair; one
+      without the other cannot be loaded and is not listed.
+    </p>
+  {% else %}
+    <div class="empty">
+      No restore points yet. Valheim writes them on its backup schedule, or take one now.
+    </div>
+  {% endif %}
+
+  <hr style="border:none;border-top:1px solid var(--border);margin:18px 0">
+
+  <h3 style="margin:0 0 4px">Export this instance</h3>
+  <p class="subtle" style="margin-top:0">
+    A single archive with the configuration, world, access lists and mod list — enough to
+    restore this server or move it to another host.
+  </p>
+  <form action="/api/instances/{{ record.config.id }}/export" method="get" class="row">
+    <div class="check">
+      <input type="checkbox" id="exp_mods" name="include_mods" value="1">
+      <label for="exp_mods">Include mod files</label>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="exp_backups" name="include_backups" value="1">
+      <label for="exp_backups">Include old backups</label>
+    </div>
+    <button class="primary" type="submit">Download archive</button>
+  </form>
+  <p class="subtle" style="margin-bottom:0">
+    Mod <em>config</em> is always included. Mod files are reinstalled from the recorded
+    versions, so leaving them out keeps the archive small; include them for an
+    archive that restores without network access.
+  </p>
+</div>

@@ -208,7 +208,8 @@ with TestClient(app) as c:
 
     print("\n[item 8: connectivity probe]")
     r = c.get(f"/api/instances/{iid}/connectivity")
-    check("connectivity partial renders", r.status_code == 200 and "Query port" in r.text)
+    check("connectivity partial renders", r.status_code == 200 and "query socket" in r.text.lower(),
+          r.text[:120])
     check("probe reached the query port", "answered" in r.text, r.text[:120])
 
     print("\n[item 4: updates]")
@@ -222,6 +223,118 @@ with TestClient(app) as c:
     check("schedule persisted", json.loads((ROOT/"manager.json").read_text())["auto_update"]["at"] == "04:05")
     r = c.post("/settings/auto-update", data={"enabled": "1", "at": "99:99"})
     check("bad time rejected", r.status_code == 400)
+
+    print("\n[query socket discovery]")
+    import socket as _socket
+    from vhsm.monitor.ports import bound_udp_sockets, query_candidates, primary_host_ip
+    snap = c.get(f"/api/instances/{iid}").json()
+    sockets = bound_udp_sockets(snap["pid"])
+    check("server sockets are enumerable", bool(sockets), sockets)
+    check("query socket found, not assumed",
+          app.state.manager.get(iid).query_endpoint is not None,
+          "no endpoint cached")
+
+    # A socket bound to one interface is unreachable over loopback: the exact
+    # shape of "port not open while the server is plainly running".
+    host_ip = primary_host_ip()
+    if host_ip != "127.0.0.1":
+        pinned = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        pinned.bind((host_ip, 24997))
+        found = [e for e in bound_udp_sockets(os.getpid()) if e.port == 24997]
+        check("single-interface socket is visible to discovery", bool(found), found)
+        check("discovery probes the bound address, not loopback",
+              bool(found) and found[0].probe_ip == host_ip, found)
+        cands = query_candidates(os.getpid(), 24996)
+        check("bound socket ranks ahead of the +1 guess",
+              cands and cands[0].port == 24997, [f"{x.probe_ip}:{x.port}" for x in cands[:2]])
+        pinned.close()
+    else:
+        check("single-interface case", True, "(no non-loopback address here)")
+
+    r = c.get(f"/api/instances/{iid}/connectivity")
+    check("probe lists the process's sockets", "UDP sockets this server process holds" in r.text)
+    check("probe reports which address answered", "answered on" in r.text, r.text[:140])
+
+    print("\n[export / import]")
+    world_dir = ROOT/"instances"/iid/"saves"/"worlds_local"
+    world_dir.mkdir(parents=True, exist_ok=True)
+    (world_dir/"Midgard.db").write_text("WORLD-ORIGINAL")
+    (world_dir/"Midgard.fwl").write_text("seed")
+    (ROOT/"instances"/iid/"saves"/"adminlist.txt").write_text("// admins\n76561198000000042\n")
+
+    r = c.get(f"/api/instances/{iid}/export")
+    check("export downloads", r.status_code == 200 and r.content[:2] == b"PK", r.status_code)
+    check("export is named .vhsm.zip", ".vhsm.zip" in r.headers.get("content-disposition", ""))
+    archive_bytes = r.content
+    import zipfile as _zip, io as _io
+    names = _zip.ZipFile(_io.BytesIO(archive_bytes)).namelist()
+    check("archive carries a manifest", "vhsm-manifest.json" in names)
+    check("archive carries the live world", "saves/worlds_local/Midgard.db" in names, names)
+    check("archive carries access lists", "saves/adminlist.txt" in names)
+    check("archive excludes logs", not any(n.startswith("logs/") for n in names))
+
+    r = c.post("/api/instances/import",
+               files={"file": ("midgard.vhsm.zip", archive_bytes, "application/zip")})
+    check("import accepted", r.status_code == 200 and "hx-redirect" in r.headers, r.status_code)
+    new_id = r.headers["hx-redirect"].rsplit("/", 1)[-1]
+    imported = c.get(f"/api/instances/{new_id}").json()
+    check("imported gets a fresh id", new_id != iid)
+    check("imported name avoids the collision", imported["name"] != "Midgard", imported["name"])
+    check("imported port avoids the collision", imported["port"] != 2456, imported["port"])
+    check("imported never autostarts", imported["autostart"] is False)
+    check("imported world restored",
+          (ROOT/"instances"/new_id/"saves"/"worlds_local"/"Midgard.db").read_text() == "WORLD-ORIGINAL")
+    check("imported admin list restored",
+          "76561198000000042" in (ROOT/"instances"/new_id/"saves"/"adminlist.txt").read_text())
+
+    evil = _io.BytesIO()
+    with _zip.ZipFile(evil, "w") as z:
+        z.writestr("vhsm-manifest.json",
+                   json.dumps({"kind": "vhsm-instance", "version": 1,
+                               "config": {"name": "Evil", "world": "W",
+                                          "password": "abcdef", "port": 2600}}))
+        z.writestr("../../escaped.txt", "pwned")
+    r = c.post("/api/instances/import",
+               files={"file": ("evil.vhsm.zip", evil.getvalue(), "application/zip")})
+    check("traversal in archive rejected", r.status_code == 400 and "unsafe" in r.text, r.text[:90])
+    check("no file escaped", not (ROOT.parent/"escaped.txt").exists())
+    r = c.post("/api/instances/import",
+               files={"file": ("plain.zip", b"PK\x05\x06" + b"\x00"*18, "application/zip")})
+    check("non-vhsm zip rejected", r.status_code == 400, r.status_code)
+
+    print("\n[backups / rollback]")
+    r = c.get(f"/api/instances/{new_id}/backups")
+    check("backups panel renders", r.status_code == 200 and "World backups" in r.text)
+    r = c.post(f"/api/instances/{new_id}/backups/snapshot")
+    check("snapshot taken", "Snapshot taken" in r.text, r.text[:100])
+    nd = ROOT/"instances"/new_id/"saves"/"worlds_local"
+    snaps = sorted(nd.glob("Midgard_backup_manual-*.db"))
+    check("snapshot file written", len(snaps) == 1, [x.name for x in snaps])
+    check("snapshot holds the world", snaps[0].read_text() == "WORLD-ORIGINAL")
+
+    (nd/"Midgard.db").write_text("WORLD-RUINED")
+    summary = app.state.manager.backup_summary(new_id)
+    key = summary["restores"][0]["key"]
+    r = c.post(f"/api/instances/{new_id}/backups/restore", data={"key": key})
+    check("rollback reported", "Rolled back" in r.text, r.text[:110])
+    check("world rolled back", (nd/"Midgard.db").read_text() == "WORLD-ORIGINAL")
+    after = app.state.manager.backup_summary(new_id)["restores"]
+    check("rollback is itself undoable", len(after) == 2, len(after))
+    ruined = [k for k in after if k["key"] != key]
+    check("pre-rollback state was preserved", len(ruined) == 1)
+
+    # a running server would overwrite a restored world at its next autosave
+    r = c.post(f"/instances/{new_id}/start")
+    wait_status(c, new_id, "running")
+    r = c.post(f"/api/instances/{new_id}/backups/restore", data={"key": key})
+    check("rollback refused while running", "Stop the server" in r.text, r.text[:110])
+    c.post(f"/instances/{new_id}/stop"); wait_status(c, new_id, "stopped")
+
+    r = c.post(f"/api/instances/{new_id}/backups/delete", data={"key": key})
+    check("backup deleted", "Backup deleted" in r.text)
+    r = c.post(f"/api/instances/{new_id}/backups/restore", data={"key": key})
+    check("restoring a deleted backup fails cleanly", "no backup" in r.text, r.text[:100])
+    await_delete = c.post(f"/instances/{new_id}/delete", data={"remove_files": "on"})
 
     print("\n[mods]")
     r = c.get(f"/instances/{iid}/mods"); check("mods page renders", r.status_code == 200 and "Thunderstore" in r.text)

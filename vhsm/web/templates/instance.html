@@ -82,6 +82,11 @@
   </div>
 </div>
 
+<div id="backups" hx-get="/api/instances/{{ config.id }}/backups"
+     hx-trigger="load" hx-swap="outerHTML">
+  <div class="panel empty">Loading backups…</div>
+</div>
+
 <div id="player-lists" hx-get="/api/instances/{{ config.id }}/lists"
      hx-trigger="load" hx-swap="outerHTML">
   <div class="panel empty">Loading access lists…</div>

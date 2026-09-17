@@ -242,3 +242,8 @@ table.players .acts button { padding: 2px 8px; font-size: 12px; }
 .pill.busy { color: var(--info); border-color: #2a4a68; }
 .pill.busy::before { animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+
+/* ---------- connectivity probe ---------- */
+.probe-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.probe-list li { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12.5px; }
+.probe-list code { font-size: 12px; }

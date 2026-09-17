@@ -1,30 +1,76 @@
 {# What a Valheim client sees when it probes this server. #}
 <div class="alert {{ 'ok' if probe.query_ok else 'error' }}" style="margin-top:12px">
   {% if probe.query_ok %}
-    <strong>Query port answered.</strong>
-    A client probing this host sees “{{ probe.name }}”, {{ probe.players }}/{{ probe.max_players }}
-    players, version <code>{{ probe.query_version }}</code>.
-    {% if probe.log_version and probe.query_version and probe.log_version != probe.query_version %}
-      <br>The console reports <code>{{ probe.log_version }}</code>, which does not match.
+    <strong>Query socket answered on {{ probe.answered_on }}.</strong>
+    A client sees “{{ probe.server_name }}”, {{ probe.players }}/{{ probe.max_players }} players,
+    version <code>{{ probe.query_version }}</code>.
+    {% if probe.port_differs %}
+      <br>Note this is port <strong>{{ probe.query_port }}</strong>, not the
+      {{ probe.expected_query_port }} normally assumed — forward that one.
     {% endif %}
     <br><span class="subtle">
-      If it still shows as unreachable from outside, UDP {{ probe.game_port }}&ndash;{{ probe.game_port + 2 }}
-      needs forwarding — the browser entry uses {{ probe.query_port }}, not just the game port.
+      Still unreachable from outside? UDP {{ probe.game_port }}&ndash;{{ probe.game_port + 2 }}
+      must be forwarded; the listing uses the query port, not just the game port.
     </span>
   {% else %}
-    <strong>Query port {{ probe.query_port }} did not answer.</strong>
+    <strong>No query socket answered.</strong>
     {% if probe.status != 'running' %}
       The server is {{ probe.status }} — start it and try again.
     {% else %}
-      This is what makes a server show as unreachable in the client even though direct
-      joins on {{ probe.game_port }} still work: the entry's name, player count and version
-      all come from this port. It stays silent for a minute or two while the world loads.
-      If it never answers, Steam's game-server API did not initialise.
-      {% if probe.crossplay %}
-        <br>Crossplay is on, so this server is meant to be joined by its join code rather
-        than through the Steam list; the Steam entry can look wrong regardless.
-      {% endif %}
+      Direct joins on {{ probe.game_port }} can still work: that port carries Valheim's own
+      protocol, while the listing's name, players and version come from the query socket.
     {% endif %}
-    <br><span class="subtle">{{ probe.detail }}</span>
+  {% endif %}
+
+  {% if probe.status == 'running' %}
+    <div style="margin-top:10px">
+      <strong>UDP sockets this server process holds:</strong>
+      {% if probe.sockets %}
+        <ul class="probe-list">
+          {% for sock in probe.sockets %}
+            <li>
+              <code>{{ sock.ip }}:{{ sock.port }}</code>
+              {% if sock.port == probe.game_port %}<span class="tag">game port</span>{% endif %}
+              {% if not sock.wildcard %}
+                <span class="tag upd">one interface only</span>
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+        {% if not probe.query_ok %}
+          <p class="subtle" style="margin:6px 0 0">
+            {% if probe.sockets | length == 1 and probe.game_port_bound %}
+              Only the game port is open — the server never created a query socket at all.
+              That points at Steam's game-server API failing to initialise rather than at a
+              firewall{% if probe.crossplay %}, and crossplay servers are joined by code
+              rather than through the Steam list{% endif %}.
+            {% else %}
+              A socket is open but did not answer a Source query. If it is bound to a single
+              interface, only that address can reach it.
+            {% endif %}
+          </p>
+        {% endif %}
+      {% else %}
+        <p class="subtle" style="margin:6px 0 0">
+          Could not read the process's sockets{% if not probe.sockets_readable %}
+          (permission denied){% endif %}, so the query port could only be guessed.
+        </p>
+      {% endif %}
+    </div>
+
+    {% if probe.attempts %}
+      <details style="margin-top:8px">
+        <summary class="subtle" style="cursor:pointer">Addresses tried</summary>
+        <ul class="probe-list">
+          {% for attempt in probe.attempts %}
+            <li>
+              <code>{{ attempt.ip }}:{{ attempt.port }}</code>
+              {% if attempt.ok %}<span class="tag ok-tag">answered</span>
+              {% else %}<span class="muted">{{ attempt.detail }}</span>{% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      </details>
+    {% endif %}
   {% endif %}
 </div>

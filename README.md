@@ -51,8 +51,9 @@ tested end to end, and the structure is meant to be built on.
   traffic rather than pretending.
 - Host CPU, memory, load average and network in the dashboard header.
 - A **client visibility** probe on each instance that queries the server the way
-  a Valheim client does, so "shows as unreachable in the client" can be told
-  apart from "the game port is fine".
+  a Valheim client does and reports the UDP sockets the process actually holds,
+  so "shows as unreachable in the client" can be told apart from "the game port
+  is fine".
 
 **Moderation**
 - Admin, banned and permitted lists edited from the GUI. Valheim re-reads these
@@ -61,6 +62,18 @@ tested end to end, and the structure is meant to be built on.
   server exposes no RCON and ignores stdin, so kick is a brief ban that lifts
   itself; the pending expiry is written to disk, so a manager restart mid-kick
   still clears it rather than stranding the player on the banned list.
+
+**Backups and portability**
+- Rollback to any restore point Valheim wrote, listed from the save directory.
+  Each entry is a matched `.db` + `.fwl` pair — one without the other cannot be
+  loaded, so it is not offered. The live world is snapshotted before every
+  rollback, so a rollback can itself be undone.
+- Rollback is refused while the server is running: a running server holds the
+  world in memory and would overwrite the restored copy at its next autosave.
+- Export a whole instance as one `.vhsm.zip` — configuration, world, access
+  lists and the exact mod versions — and import it here or on another host.
+  An import gets a fresh identity, and its name and port move aside if taken,
+  so a server can be imported alongside itself. It never autostarts.
 
 **Updates**
 - The installed build id (from steamcmd's app manifest) is compared against the
@@ -156,13 +169,15 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 .venv/bin/python tests/smoke_test.py
 ```
 
-66 checks covering page rendering, instance creation and validation, the
+100 checks covering page rendering, instance creation and validation, the
 start/stop/restart lifecycle, the live-metrics and console websockets, CPU
-normalisation, version reporting, player detail, every moderation path, the
-connectivity probe, the update endpoints, and the whole mod flow (search,
-dependency resolution, disable/enable, config preservation,
-dependency-protected uninstall, export). Runs against the simulated server, so
-it needs no network and no Steam download.
+normalisation, version reporting, player detail, every moderation path, query
+socket discovery (including a socket bound to a single interface), the
+connectivity probe, instance export/import (including rejection of a
+traversing archive), world rollback and its undo, the update endpoints, and the
+whole mod flow (search, dependency resolution, disable/enable, config
+preservation, dependency-protected uninstall, export). Runs against the
+simulated server, so it needs no network and no Steam download.
 
 The suite opens with a pyflakes pass over the whole tree, because compiling a
 module only proves it parses: a name referenced inside a rarely-taken branch
@@ -187,8 +202,9 @@ edit form, as the server needs them on its command line.
   duration (which is shown). A per-player ping would have to be invented, so
   the field is reported as `null` rather than filled with a guess.
 - No RCON-style console input — commands would need a server-side mod.
-- No scheduled *restarts* (scheduled updates exist), backup browser/restore, or
-  crash auto-restart.
+- No scheduled *restarts* (scheduled updates exist) and no crash auto-restart.
+- Backups are Valheim's own; the manager does not run its own backup schedule
+  beyond the snapshot it takes before a rollback.
 - Mod install runs inline in the request; large packages block that request.
   Moving it to a background job with progress in the UI is the natural next step.
 - `.r2x` files exported by r2modman itself are not yet parsed (our own JSON
@@ -198,17 +214,31 @@ edit form, as the server needs them on its command line.
 
 ### If a server shows as unreachable in the client
 
-The entry's name, player count and version all come from the **Steam query
-port** (`game port + 1`), not the game port — so a server can accept direct
-joins while its listing looks broken. Use **Test client visibility** on the
-instance page to see which of the two is failing. Things worth checking:
+A server's listing — its name, player count and version — comes from the
+**Steam query socket**, not the game port, so a server can accept direct joins
+while its entry looks dead.
 
-- UDP `port`, `port+1` and `port+2` all need forwarding, not just the game port.
-- The server is launched from the game directory, as upstream's
-  `start_server.sh` does, and `steam_appid.txt` is written next to the binary.
-  Launching from elsewhere can leave Steam's game-server API half-initialised,
-  which produces exactly this symptom — direct joins work, the query port never
-  answers. If you ran an earlier build of this manager, this is worth re-testing.
-- With crossplay enabled the server is meant to be joined by its join code
-  rather than through the Steam list, so the Steam entry can look wrong
-  regardless of configuration.
+Earlier versions of this manager probed `127.0.0.1` at `game port + 1` and
+called the port closed when nothing answered. Both halves of that were
+assumptions, and either being wrong looks identical from outside:
+
+- the query socket is not guaranteed to sit at `game port + 1`;
+- a socket bound to **one interface** is unreachable over loopback, so a
+  perfectly healthy server reports "port not open".
+
+The manager owns the server process, so it now asks the kernel which UDP
+sockets that pid holds and probes the address each one is actually bound to,
+instead of guessing. The same discovery feeds the live player count, so a
+server that binds to a single interface is no longer invisible to it.
+
+**Test client visibility** on the instance page shows the sockets the process
+holds, every address tried, and which one answered. From there:
+
+- Only the game port open, nothing else → the server never created a query
+  socket. That points at Steam's game-server API failing to initialise rather
+  than at a firewall.
+- A socket answered on a port that is not `game port + 1` → forward that port.
+- Everything answers locally but the client still cannot see it → UDP `port`
+  through `port+2` need forwarding; the listing uses the query port.
+- Crossplay servers are joined by their join code rather than through the Steam
+  list, so the Steam entry can look wrong regardless of configuration.

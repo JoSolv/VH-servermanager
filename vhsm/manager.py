@@ -7,11 +7,16 @@ import contextlib
 import json
 import logging
 import shutil
+import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from . import archive as archive_mod
+from . import backups as backups_mod
 from .config import Settings, settings as default_settings
 from .instance import InstanceConfig, InstanceLayout, ValidationError
 from .mods.profile import ModProfile
@@ -19,6 +24,7 @@ from .mods.thunderstore import ThunderstoreIndex
 from .monitor.a2s import A2SError, query as a2s_query
 from .monitor.metrics import ProcMetrics, ProcessSampler, host_metrics
 from .monitor.net import NetworkMonitor, NetSample
+from .monitor.ports import Endpoint, bound_udp_sockets, query_candidates
 from .monitor.players import PlayerTracker
 from .playerlists import PlayerLists
 from .steam import (
@@ -38,6 +44,8 @@ log = logging.getLogger("vhsm.manager")
 #: round-trips are not.
 QUERY_EVERY_N_TICKS = 3
 A2S_TIMEOUT = 1.5
+#: Shorter, because discovery tries several addresses in a row.
+DISCOVER_TIMEOUT = 0.8
 #: Don't re-ask Steam for the newest build more often than this.
 BUILD_CHECK_TTL = 900.0
 
@@ -128,6 +136,10 @@ class InstanceRecord:
     net: NetSample = field(default_factory=NetSample)
     #: Version reported by the Steam query socket, when it answers.
     query_version: str = ""
+    #: The query socket we found for this process, once one answers. Cached so
+    #: the candidate scan does not repeat on every tick.
+    query_endpoint: Endpoint | None = None
+    query_failures: int = 0
     #: In-flight lifecycle operation, owned by the manager rather than by an
     #: HTTP request, so a browser navigating away cannot abandon it half-done.
     operation: asyncio.Task | None = None
@@ -360,6 +372,8 @@ class InstanceManager:
         record = self.get(instance_id)
         record.players.reset()
         record.query_version = ""
+        record.query_endpoint = None
+        record.query_failures = 0
         self.net.watch(record.config.port)
         write_steam_appid(self.settings)
         await record.supervisor.start()
@@ -446,6 +460,128 @@ class InstanceManager:
         )
 
     # ------------------------------------------------------------------ #
+    # export / import
+    # ------------------------------------------------------------------ #
+    def _unique_name(self, name: str) -> str:
+        existing = {r.config.name.lower() for r in self._records.values()}
+        if name.lower() not in existing:
+            return name
+        for index in range(2, 100):
+            candidate = f"{name} ({index})"
+            if candidate.lower() not in existing:
+                return candidate
+        return f"{name} {uuid.uuid4().hex[:6]}"
+
+    def _free_port(self, preferred: int) -> int:
+        """First port whose 3-port range does not overlap an existing instance."""
+        used = [r.config.port for r in self._records.values()]
+
+        def clashes(port: int) -> bool:
+            return any(abs(port - other) < 3 for other in used)
+
+        if not clashes(preferred):
+            return preferred
+        port = 2456
+        while clashes(port) and port < 65500:
+            port += 3
+        return port
+
+    def export_archive(
+        self,
+        instance_id: str,
+        *,
+        include_mods: bool = False,
+        include_backups: bool = False,
+    ) -> Path:
+        """Write an archive of one instance and return the file path."""
+        record = self.get(instance_id)
+        staging = Path(tempfile.mkdtemp(prefix="vhsm-export-"))
+        destination = staging / archive_mod.suggested_filename(record.config)
+        return archive_mod.export_instance(
+            record.layout,
+            record.config,
+            destination,
+            include_mods=include_mods,
+            include_backups=include_backups,
+        )
+
+    def inspect_archive(self, archive_path: Path) -> archive_mod.ArchiveInfo:
+        return archive_mod.read_info(archive_path)
+
+    def import_archive(self, archive_path: Path, *, name: str = "") -> InstanceRecord:
+        """Create a new instance from an exported archive.
+
+        The archive keeps its original identity, name and port, none of which
+        can be reused blindly: importing onto the same host as the original
+        would collide on all three. A fresh id is minted and the name and port
+        are moved aside if taken, so importing a server next to itself works.
+        """
+        info = archive_mod.read_info(archive_path)
+        config = InstanceConfig.from_dict(info.config)
+        config.id = uuid.uuid4().hex[:12]
+        config.name = self._unique_name((name or info.name).strip() or "Imported server")
+        config.port = self._free_port(config.port)
+        # Never let an import start a server on its own; the operator decides.
+        config.autostart = False
+        config.created_at = time.time()
+        config.validate()
+
+        layout = InstanceLayout.for_instance(self.settings, config.id)
+        layout.ensure()
+        try:
+            archive_mod.extract_into(archive_path, layout.root)
+        except archive_mod.ArchiveError:
+            shutil.rmtree(layout.root, ignore_errors=True)
+            raise
+        # The extracted instance.json describes the *original*; ours wins.
+        write_json(layout.config_file, config.to_dict())
+
+        record = self._register(config)
+        log.info("imported instance %s as %s (%s)", info.name, config.name, config.id)
+        return record
+
+    # ------------------------------------------------------------------ #
+    # world backups
+    # ------------------------------------------------------------------ #
+    def backup_summary(self, instance_id: str) -> dict[str, Any]:
+        record = self.get(instance_id)
+        savedir, world = record.layout.savedir, record.config.world
+        return {
+            "world": world,
+            "live": backups_mod.live_world(savedir, world),
+            "restores": [r.to_dict() for r in backups_mod.list_restores(savedir, world)],
+            "running": record.supervisor.status.is_active,
+        }
+
+    def snapshot_world(self, instance_id: str) -> backups_mod.Restore:
+        record = self.get(instance_id)
+        result = backups_mod.snapshot(record.layout.savedir, record.config.world)
+        if result is None:
+            raise backups_mod.BackupError(
+                "There is no world to snapshot yet; start the server once."
+            )
+        return result
+
+    def restore_world(self, instance_id: str, key: str) -> backups_mod.Restore:
+        """Roll a world back. Refuses while the server is running.
+
+        A running server holds the world in memory and writes it out on its
+        own schedule, so it would overwrite whatever was restored underneath
+        it at the next autosave.
+        """
+        record = self.get(instance_id)
+        if record.supervisor.status.is_active or record.busy:
+            raise backups_mod.BackupError(
+                "Stop the server before restoring: a running server would "
+                "overwrite the restored world at its next autosave."
+            )
+        return backups_mod.restore(record.layout.savedir, record.config.world, key)
+
+    def delete_backup(self, instance_id: str, key: str) -> None:
+        record = self.get(instance_id)
+        backups_mod.delete(record.layout.savedir, record.config.world, key)
+
+    # ------------------------------------------------------------------ #
     # updates
     # ------------------------------------------------------------------ #
     async def check_update(self, force: bool = False) -> dict[str, Any]:
@@ -529,16 +665,92 @@ class InstanceManager:
     # ------------------------------------------------------------------ #
     # sampling
     # ------------------------------------------------------------------ #
-    async def _query_instance(self, record: InstanceRecord) -> None:
-        try:
-            info = await a2s_query("127.0.0.1", record.config.query_port, A2S_TIMEOUT)
-        except A2SError:
-            # Normal while the world is still generating; keep log-derived state.
-            return
+    def _apply_query(self, record: InstanceRecord, info) -> None:
         record.query_version = info.version
         record.players.observe_query(
             info.players, info.max_players, info.player_names, info.player_durations
         )
+
+    async def _query_instance(self, record: InstanceRecord) -> None:
+        """Read the Steam query socket, finding it first if we have not yet.
+
+        The socket is not reliably at ``game port + 1`` on every interface, so
+        the address is discovered from the process rather than assumed; a
+        server that binds to one interface is invisible over loopback.
+        """
+        endpoint = record.query_endpoint
+        if endpoint is not None:
+            try:
+                info = await a2s_query(endpoint.probe_ip, endpoint.port, A2S_TIMEOUT)
+            except A2SError:
+                record.query_failures += 1
+                # Re-discover rather than keep probing a socket that moved.
+                if record.query_failures >= 3:
+                    record.query_endpoint = None
+                    record.query_failures = 0
+                return
+            record.query_failures = 0
+            self._apply_query(record, info)
+            return
+
+        for candidate in query_candidates(record.supervisor.pid, record.config.port)[:4]:
+            try:
+                info = await a2s_query(candidate.probe_ip, candidate.port, DISCOVER_TIMEOUT)
+            except A2SError:
+                continue
+            log.info(
+                "%s: query socket found at %s:%s",
+                record.config.name, candidate.probe_ip, candidate.port,
+            )
+            record.query_endpoint = candidate
+            record.query_failures = 0
+            self._apply_query(record, info)
+            return
+
+    async def probe_instance(self, record: InstanceRecord) -> dict[str, Any]:
+        """Everything known about how reachable this server looks from outside."""
+        sockets = bound_udp_sockets(record.supervisor.pid)
+        payload: dict[str, Any] = {
+            "name": record.config.name,
+            "status": record.supervisor.status.value,
+            "game_port": record.config.port,
+            "expected_query_port": record.config.query_port,
+            "crossplay": record.config.crossplay,
+            "public": record.config.public,
+            "log_version": record.supervisor.server_version,
+            "sockets": [e.to_dict() for e in sockets],
+            "game_port_bound": any(e.port == record.config.port for e in sockets),
+            "sockets_readable": bool(sockets) or record.supervisor.pid is None,
+            "attempts": [],
+            "query_ok": False,
+        }
+
+        for candidate in query_candidates(record.supervisor.pid, record.config.port)[:4]:
+            attempt = {"ip": candidate.probe_ip, "port": candidate.port}
+            try:
+                info = await a2s_query(candidate.probe_ip, candidate.port, DISCOVER_TIMEOUT)
+            except A2SError as exc:
+                attempt.update({"ok": False, "detail": str(exc)})
+                payload["attempts"].append(attempt)
+                continue
+            attempt["ok"] = True
+            payload["attempts"].append(attempt)
+            record.query_endpoint = candidate
+            payload.update(
+                {
+                    "query_ok": True,
+                    "answered_on": f"{candidate.probe_ip}:{candidate.port}",
+                    "query_port": candidate.port,
+                    "server_name": info.name,
+                    "map": info.map_name,
+                    "players": info.players,
+                    "max_players": info.max_players,
+                    "query_version": info.version,
+                    "port_differs": candidate.port != record.config.query_port,
+                }
+            )
+            break
+        return payload
 
     async def sample_once(self) -> dict[str, Any]:
         """Take one sample across every instance and return the broadcast payload."""

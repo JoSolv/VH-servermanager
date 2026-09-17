@@ -10,6 +10,7 @@ graceful SIGINT shutdown. Enable with VHSM_FAKE_SERVER=1.
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import signal
 import socket
@@ -38,13 +39,16 @@ def _cstr(value: str) -> bytes:
 def a2s_server(port: int, name: str, world: str, public: bool) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # VHSM_FAKE_BIND reproduces a server that binds its query socket to one
+    # interface instead of every one, which makes it invisible over loopback.
+    bind_ip = os.environ.get("VHSM_FAKE_BIND", "0.0.0.0")
     try:
-        sock.bind(("0.0.0.0", port))
+        sock.bind((bind_ip, port))
     except OSError as exc:
         log(f"Failed to bind query port {port}: {exc}")
         return
     sock.settimeout(0.5)
-    log(f"Query socket listening on {port}")
+    log(f"Query socket listening on {bind_ip}:{port}")
 
     challenge = struct.pack("<i", random.randint(1, 2**31 - 1))
     while running:

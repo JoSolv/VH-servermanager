@@ -51,7 +51,10 @@
 
 <div class="page-head">
   <h1>Instances</h1>
-  <a class="btn primary" href="/instances/new">+ New instance</a>
+  <div class="row">
+    <a class="btn" href="#import-instance">Import archive</a>
+    <a class="btn primary" href="/instances/new">+ New instance</a>
+  </div>
 </div>
 
 {% if records %}
@@ -64,5 +67,31 @@
     <a class="btn primary" href="/instances/new">Create your first instance</a>
   </div>
 {% endif %}
+
+<div class="panel" id="import-instance" style="margin-top:20px">
+  <h2>Import a server</h2>
+  <p class="subtle" style="margin-top:0">
+    Restore a <code>.vhsm.zip</code> archive exported from this or another host. The
+    import gets a fresh identity, and its name and port are moved aside if they are
+    already taken, so a server can be imported alongside itself. It is never started
+    automatically.
+  </p>
+  <form hx-post="/api/instances/import" hx-target="#import-result" hx-swap="innerHTML"
+        hx-encoding="multipart/form-data">
+    <div class="form-grid">
+      <div class="field">
+        <label for="import_file">Archive</label>
+        <input type="file" id="import_file" name="file" accept=".zip" required>
+      </div>
+      <div class="field">
+        <label for="import_name">Name it (optional)</label>
+        <input type="text" id="import_name" name="name" placeholder="keep the archive's name">
+      </div>
+    </div>
+    <button class="primary" type="submit">Import</button>
+    <span class="spinner">importing…</span>
+  </form>
+  <div id="import-result"></div>
+</div>
 
 {% endblock %}
