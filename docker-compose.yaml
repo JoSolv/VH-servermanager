@@ -14,6 +14,11 @@ services:
     container_name: vhsm
     restart: unless-stopped
 
+    # Without this, a tag that is already on disk is reused and redeploying
+    # gets you the same image you already had. `latest` moves, so it has to
+    # be re-fetched to mean anything.
+    pull_policy: always
+
     # CHANGE ME (1 of 2): point this at a dataset on your pool.
     # Everything lives here: the Valheim server files (~2 GB), worlds,
     # backups, mods and settings. Without it, an app update means
@@ -60,6 +65,7 @@ services:
 #     image: ghcr.io/josolv/vh-servermanager:latest
 #     container_name: vhsm
 #     restart: unless-stopped
+#     pull_policy: always
 #     volumes:
 #       - /mnt/tank/apps/vhsm:/data
 #     environment:

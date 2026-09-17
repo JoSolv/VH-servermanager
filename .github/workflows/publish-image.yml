@@ -1,11 +1,15 @@
 name: Publish container image
 
 # Builds the image and pushes it to GitHub's own registry (ghcr.io).
-# "Run workflow" on the Actions tab builds from whichever branch you pick,
-# which is how to get an image before anything is merged to main.
+#
+# Every branch is built, because naming specific branches here means nothing
+# happens on a repository whose branch is called something else -- and then
+# every update needs a manual "Run workflow". The `:latest` tag still only
+# follows the repository's default branch, so other branches get their own
+# tag and cannot quietly replace what your server pulls.
 on:
   push:
-    branches: [main, master]
+    branches: ["**"]
     tags: ["v*"]
   workflow_dispatch:
 

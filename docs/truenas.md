@@ -118,11 +118,29 @@ VPN.
 
 ## Updating the app
 
-1. Push your changes (or run the workflow again) so a new `:latest` is built.
-2. In TrueNAS: **Apps → vhsm → the three dots → Edit → Save**, which re-pulls
-   the image. Some versions have a **Pull image** option in the same menu.
+Two things have to happen: a new image has to be **built**, and your NAS has to
+**pull** it. Both are easy to get half-right.
 
-Your dataset is untouched, so worlds, mods and settings survive.
+**1. Build it.** Pushing to any branch builds automatically — watch the
+**Actions** tab until the run goes green. If you want to build without pushing
+anything, use **Actions → Publish container image → Run workflow**.
+
+Only the repository's *default* branch updates the `:latest` tag. Other
+branches publish under their own name (`claude-my-branch`), so check which tag
+the green run produced if you are working on a side branch — the compose file
+pulls `:latest`.
+
+**2. Pull it.** In TrueNAS: **Apps → vhsm → the three dots → Edit → Save**.
+
+The supplied compose file sets `pull_policy: always`, which matters more than
+it looks: without it Docker reuses a tag it already has on disk, so redeploying
+an app pinned to `:latest` gets you the *same* image and nothing appears to
+change. If you wrote your own YAML and updates seem to do nothing, that is why.
+
+Your dataset is untouched either way, so worlds, mods and settings survive.
+
+To confirm which build you are actually running, the container logs print the
+image's commit on startup, and **Settings** shows the manager version.
 
 ## If something does not work
 
