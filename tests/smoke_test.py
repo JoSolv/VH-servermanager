@@ -8,6 +8,7 @@ import json, os, shutil, sys, tempfile, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 os.environ["VHSM_FAKE_SERVER"] = "1"
 ROOT = Path(tempfile.mkdtemp(prefix="vhsm-smoke-"))
@@ -18,6 +19,7 @@ from vhsm.config import Settings
 from vhsm.web.app import create_app
 from vhsm.mods.thunderstore import Package
 from vhsm.mods.cache import COMPLETE_MARKER
+from make_world import make_folder_world
 
 settings = Settings(); settings.ensure_dirs()
 # Create the shared game directory. Production always has one, and several
@@ -258,8 +260,8 @@ with TestClient(app) as c:
     print("\n[export / import]")
     world_dir = ROOT/"instances"/iid/"saves"/"worlds_local"
     world_dir.mkdir(parents=True, exist_ok=True)
-    (world_dir/"Midgard.db").write_text("WORLD-ORIGINAL")
-    (world_dir/"Midgard.fwl").write_text("seed")
+    make_folder_world(world_dir, "Midgard", generations=2)
+    (world_dir/"Midgard"/"_main.0.db2").write_bytes(b"WORLD-ORIGINAL")
     (ROOT/"instances"/iid/"saves"/"adminlist.txt").write_text("// admins\n76561198000000042\n")
 
     r = c.get(f"/api/instances/{iid}/export")
@@ -269,7 +271,11 @@ with TestClient(app) as c:
     import zipfile as _zip, io as _io
     names = _zip.ZipFile(_io.BytesIO(archive_bytes)).namelist()
     check("archive carries a manifest", "vhsm-manifest.json" in names)
-    check("archive carries the live world", "saves/worlds_local/Midgard.db" in names, names)
+    check("archive carries the live world folder",
+          any(n.startswith("saves/worlds_local/Midgard/") for n in names), names[:6])
+    check("archive carries every world file",
+          sum(1 for n in names if n.startswith("saves/worlds_local/Midgard/")) >= 14,
+          sum(1 for n in names if n.startswith("saves/worlds_local/Midgard/")))
     check("archive carries access lists", "saves/adminlist.txt" in names)
     check("archive excludes logs", not any(n.startswith("logs/") for n in names))
 
@@ -283,7 +289,8 @@ with TestClient(app) as c:
     check("imported port avoids the collision", imported["port"] != 2456, imported["port"])
     check("imported never autostarts", imported["autostart"] is False)
     check("imported world restored",
-          (ROOT/"instances"/new_id/"saves"/"worlds_local"/"Midgard.db").read_text() == "WORLD-ORIGINAL")
+          (ROOT/"instances"/new_id/"saves"/"worlds_local"/"Midgard"/"_main.0.db2").read_bytes()
+          == b"WORLD-ORIGINAL")
     check("imported admin list restored",
           "76561198000000042" in (ROOT/"instances"/new_id/"saves"/"adminlist.txt").read_text())
 
@@ -303,38 +310,120 @@ with TestClient(app) as c:
     check("non-vhsm zip rejected", r.status_code == 400, r.status_code)
 
     print("\n[backups / rollback]")
-    r = c.get(f"/api/instances/{new_id}/backups")
-    check("backups panel renders", r.status_code == 200 and "World backups" in r.text)
-    r = c.post(f"/api/instances/{new_id}/backups/snapshot")
-    check("snapshot taken", "Snapshot taken" in r.text, r.text[:100])
     nd = ROOT/"instances"/new_id/"saves"/"worlds_local"
-    snaps = sorted(nd.glob("Midgard_backup_manual-*.db"))
-    check("snapshot file written", len(snaps) == 1, [x.name for x in snaps])
-    check("snapshot holds the world", snaps[0].read_text() == "WORLD-ORIGINAL")
+    r = c.get(f"/api/instances/{new_id}/backups")
+    check("backups panel renders", r.status_code == 200 and "World &amp; backups" in r.text)
+    check("1.0 folder world detected", "folder format" in r.text, r.text[:200])
+    check("save generations reported", "save generation" in r.text)
 
-    (nd/"Midgard.db").write_text("WORLD-RUINED")
+    # The reported bug: this used to fail with "no world to snapshot".
+    r = c.post(f"/api/instances/{new_id}/backups/snapshot")
+    check("snapshot of a 1.0 world works", "Snapshot taken" in r.text, r.text[:140])
+    snaps = list((ROOT/"instances"/new_id/"backups").glob("manual-*"))
+    check("snapshot stored under the instance", len(snaps) == 1, [x.name for x in snaps])
+    check("snapshot copied the whole world folder",
+          (snaps[0]/"payload"/"Midgard"/"_main.0.db2").read_bytes() == b"WORLD-ORIGINAL")
+    check("snapshot kept out of worlds_local",
+          not any(p.name.startswith("manual-") for p in nd.iterdir()))
+
+    # Valheim's own folder-format backup should be listed too.
+    make_folder_world(nd, "Midgard_backup_auto-20260916040000", generations=1)
     summary = app.state.manager.backup_summary(new_id)
-    key = summary["restores"][0]["key"]
+    sources = {x["source"] for x in summary["restores"]}
+    check("valheim's own backup listed alongside ours", sources == {"vhsm", "valheim"}, sources)
+    check("backup folder not mistaken for a world",
+          [w["name"] for w in summary["worlds"]] == ["Midgard"], summary["worlds"])
+
+    (nd/"Midgard"/"_main.0.db2").write_bytes(b"CORRUPTED")
+    (nd/"Midgard"/"junk.chunk").write_bytes(b"junk")
+    key = [x["key"] for x in summary["restores"] if x["source"] == "vhsm"][0]
     r = c.post(f"/api/instances/{new_id}/backups/restore", data={"key": key})
     check("rollback reported", "Rolled back" in r.text, r.text[:110])
-    check("world rolled back", (nd/"Midgard.db").read_text() == "WORLD-ORIGINAL")
+    check("world rolled back", (nd/"Midgard"/"_main.0.db2").read_bytes() == b"WORLD-ORIGINAL")
+    check("stale files removed by rollback", not (nd/"Midgard"/"junk.chunk").exists())
     after = app.state.manager.backup_summary(new_id)["restores"]
-    check("rollback is itself undoable", len(after) == 2, len(after))
-    ruined = [k for k in after if k["key"] != key]
-    check("pre-rollback state was preserved", len(ruined) == 1)
+    check("rollback is itself undoable",
+          len([x for x in after if x["source"] == "vhsm"]) == 2,
+          [x["key"] for x in after])
 
-    # a running server would overwrite a restored world at its next autosave
-    r = c.post(f"/instances/{new_id}/start")
-    wait_status(c, new_id, "running")
+    r = c.post(f"/instances/{new_id}/start"); wait_status(c, new_id, "running")
     r = c.post(f"/api/instances/{new_id}/backups/restore", data={"key": key})
     check("rollback refused while running", "Stop the server" in r.text, r.text[:110])
+
+    print("\n[world upload]")
+    # a running server would overwrite whatever we put down
+    zipped = _io.BytesIO()
+    src = make_folder_world(Path(tempfile.mkdtemp()), "Jotunheim", generations=2)
+    with _zip.ZipFile(zipped, "w") as z:
+        for f in src.rglob("*"):
+            if f.is_file():
+                z.write(f, f"Jotunheim/{f.relative_to(src)}")
+    world_zip = zipped.getvalue()
+    r = c.post(f"/api/instances/{new_id}/world/upload",
+               files={"files": ("Jotunheim.zip", world_zip, "application/zip")})
+    check("upload refused while running", "Stop the server" in r.text, r.text[:110])
     c.post(f"/instances/{new_id}/stop"); wait_status(c, new_id, "stopped")
 
-    r = c.post(f"/api/instances/{new_id}/backups/delete", data={"key": key})
-    check("backup deleted", "Backup deleted" in r.text)
-    r = c.post(f"/api/instances/{new_id}/backups/restore", data={"key": key})
-    check("restoring a deleted backup fails cleanly", "no backup" in r.text, r.text[:100])
-    await_delete = c.post(f"/instances/{new_id}/delete", data={"remove_files": "on"})
+    r = c.post(f"/api/instances/{new_id}/world/upload",
+               files={"files": ("Jotunheim.zip", world_zip, "application/zip")})
+    check("zipped world folder installs", "Installed world" in r.text, r.text[:140])
+    check("world files landed", (nd/"Jotunheim"/"_main.0.fwl2").is_file())
+    check("instance repointed at the upload",
+          c.get(f"/api/instances/{new_id}").json()["world"] == "Jotunheim",
+          c.get(f"/api/instances/{new_id}").json()["world"])
+    check("uploaded world is now the live one",
+          app.state.manager.backup_summary(new_id)["live"]["exists"])
+
+    r = c.post(f"/api/instances/{new_id}/world/upload",
+               files={"files": ("Jotunheim.zip", world_zip, "application/zip")})
+    check("refuses to clobber without overwrite", "already here" in r.text, r.text[:120])
+    r = c.post(f"/api/instances/{new_id}/world/upload",
+               files={"files": ("Jotunheim.zip", world_zip, "application/zip")},
+               data={"overwrite": "1"})
+    check("overwrite accepted when asked", "Installed world" in r.text, r.text[:120])
+
+    # a directory upload: every file posted separately, name carried alongside
+    loose = [("files", (f"Vanaheim/{f.relative_to(src)}", f.read_bytes(), "application/octet-stream"))
+             for f in sorted(src.rglob("*")) if f.is_file()]
+    r = c.post(f"/api/instances/{new_id}/world/upload", files=loose, data={"name": "Vanaheim"})
+    check("folder upload installs", "Installed world" in r.text, r.text[:140])
+    check("folder upload landed", (nd/"Vanaheim"/"_main.0.db2").is_file())
+
+    evil = [("files", ("../../escaped.txt", b"pwned", "text/plain"))]
+    r = c.post(f"/api/instances/{new_id}/world/upload", files=evil)
+    check("traversing filename rejected", "unsafe name" in r.text, r.text[:120])
+    check("nothing escaped", not (ROOT.parent/"escaped.txt").exists())
+
+    notworld = _io.BytesIO()
+    with _zip.ZipFile(notworld, "w") as z:
+        z.writestr("holiday.jpg", "not a world")
+    r = c.post(f"/api/instances/{new_id}/world/upload",
+               files={"files": ("random.zip", notworld.getvalue(), "application/zip")})
+    check("non-world zip rejected with guidance", "No Valheim world found" in r.text, r.text[:140])
+
+    # legacy worlds still work
+    legacy = _io.BytesIO()
+    with _zip.ZipFile(legacy, "w") as z:
+        z.writestr("OldWorld.db", "LEGACY-DB"); z.writestr("OldWorld.fwl", "LEGACY-FWL")
+    r = c.post(f"/api/instances/{new_id}/world/upload",
+               files={"files": ("old.zip", legacy.getvalue(), "application/zip")})
+    check("legacy .db/.fwl upload still works", "Installed world" in r.text, r.text[:140])
+    check("legacy world on disk", (nd/"OldWorld.db").is_file() and (nd/"OldWorld.fwl").is_file())
+
+    # Backups are per-world, and the uploads repointed this instance, so the
+    # earlier Midgard snapshot is deliberately no longer listed here.
+    stale = c.post(f"/api/instances/{new_id}/backups/delete", data={"key": key})
+    check("a snapshot of another world is not offered", "no backup" in stale.text, stale.text[:100])
+
+    c.post(f"/api/instances/{new_id}/backups/snapshot")
+    current = app.state.manager.backup_summary(new_id)
+    check("snapshot of the uploaded world", len(current["restores"]) >= 1, current["restores"])
+    own = current["restores"][0]["key"]
+    r = c.post(f"/api/instances/{new_id}/backups/delete", data={"key": own})
+    check("backup deleted", "Backup deleted" in r.text, r.text[:100])
+    check("snapshot directory removed",
+          not (ROOT/"instances"/new_id/"backups"/own).exists())
+    c.post(f"/instances/{new_id}/delete", data={"remove_files": "on"})
 
     print("\n[mods]")
     r = c.get(f"/instances/{iid}/mods"); check("mods page renders", r.status_code == 200 and "Thunderstore" in r.text)

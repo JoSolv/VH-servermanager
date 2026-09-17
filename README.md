@@ -63,13 +63,24 @@ tested end to end, and the structure is meant to be built on.
   itself; the pending expiry is written to disk, so a manager restart mid-kick
   still clears it rather than stranding the player on the banned list.
 
-**Backups and portability**
-- Rollback to any restore point Valheim wrote, listed from the save directory.
-  Each entry is a matched `.db` + `.fwl` pair — one without the other cannot be
-  loaded, so it is not offered. The live world is snapshotted before every
-  rollback, so a rollback can itself be undone.
-- Rollback is refused while the server is running: a running server holds the
-  world in memory and would overwrite the restored copy at its next autosave.
+**Worlds, backups and portability**
+- Both save formats are handled. Since Valheim 1.0 a world is a **folder**
+  named after it, holding `_main.<N>.db2`, `_main.<N>.fwl2`, `_main.<N>.chunks`,
+  an `_main.<N>.ok` marker and many `.chunk` files, with several save
+  generations side by side; older worlds are still a `.db` + `.fwl` pair.
+  Worlds are always copied whole — a partial copy of a 1.0 world is not a
+  smaller world, it is a broken one.
+- Upload an existing world as a zipped folder or by picking the folder itself,
+  and the instance is repointed at it. The server only loads the world its
+  configuration names, so without that it would ignore the upload and generate
+  an empty world instead.
+- Snapshots taken on demand, kept in `backups/` inside the instance rather than
+  in `worlds_local`, where a backup folder would show up as another world.
+  Valheim's own rotating backups are listed alongside them.
+- Rollback to any restore point. The live world is snapshotted first, so a
+  rollback can itself be undone, and it is refused while the server is running:
+  a running server holds the world in memory and would overwrite the restored
+  copy at its next autosave.
 - Export a whole instance as one `.vhsm.zip` — configuration, world, access
   lists and the exact mod versions — and import it here or on another host.
   An import gets a fresh identity, and its name and port move aside if taken,
@@ -169,13 +180,14 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 .venv/bin/python tests/smoke_test.py
 ```
 
-100 checks covering page rendering, instance creation and validation, the
+122 checks covering page rendering, instance creation and validation, the
 start/stop/restart lifecycle, the live-metrics and console websockets, CPU
 normalisation, version reporting, player detail, every moderation path, query
 socket discovery (including a socket bound to a single interface), the
 connectivity probe, instance export/import (including rejection of a
-traversing archive), world rollback and its undo, the update endpoints, and the
-whole mod flow (search, dependency resolution, disable/enable, config
+traversing archive), world upload in both save formats (zipped folder, loose
+files, and rejection of a traversing filename), snapshots and rollback of a 1.0
+folder world and its undo, the update endpoints, and the whole mod flow (search, dependency resolution, disable/enable, config
 preservation, dependency-protected uninstall, export). Runs against the
 simulated server, so it needs no network and no Steam download.
 
@@ -211,6 +223,31 @@ edit form, as the server needs them on its command line.
   export/import is); the importer already understands its `{major, minor, patch}`
   version shape.
 - Per-instance network needs root. A rootless fallback would need eBPF.
+
+### Bringing an existing world in
+
+From another dedicated server, or from single-player:
+
+1. Find the world. Since Valheim 1.0 it is a **folder** named after the world
+   inside `worlds_local` — on Linux that is
+   `~/.config/unity3d/IronGate/Valheim/worlds_local/<World>/` when the old
+   server ran without `-savedir`, otherwise under the `-savedir` it was given.
+2. Zip that folder (the folder itself, not just its contents).
+3. On the instance page, stop the server, then **Upload an existing world** →
+   *A zipped world folder*. Picking the folder directly works too, in browsers
+   that support directory selection.
+
+The instance is repointed at whatever you upload, so the old trap of the
+configured world name not matching the folder on disk — which makes Valheim
+silently generate a fresh empty world — does not apply. Upload the whole
+folder: one complete `_main.<N>` generation and its `.ok` marker must be
+present, and the panel says so if they are not.
+
+Copying files in by hand still works. Put the world folder in
+`<data_root>/instances/<id>/saves/worlds_local/` and set the instance's world
+name to match the folder exactly — it is case-sensitive. Access lists go in
+`<data_root>/instances/<id>/saves/` as `adminlist.txt`, `bannedlist.txt` and
+`permittedlist.txt`.
 
 ### If a server shows as unreachable in the client
 

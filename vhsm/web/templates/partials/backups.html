@@ -1,10 +1,10 @@
-{# World snapshots and rollback. #}
+{# Live world, snapshots, rollback, world upload and instance export. #}
 <div id="backups" class="panel" hx-target="this" hx-swap="outerHTML">
   {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
   {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
   <div class="row spread" style="margin-bottom:10px">
-    <h2 style="margin:0">World backups</h2>
+    <h2 style="margin:0">World &amp; backups</h2>
     <div class="row">
       <button class="small" hx-post="/api/instances/{{ record.config.id }}/backups/snapshot">
         Snapshot now
@@ -16,23 +16,39 @@
   {% if backups.live.exists %}
     <p class="subtle" style="margin-top:0">
       Live world <strong>{{ backups.world }}</strong> &middot;
-      {{ backups.live.size | human_bytes }} &middot;
-      saved {{ backups.live.modified | timeago }}
-      {% if not backups.live.has_metadata %}
-        &middot; <span class="tag upd">.fwl missing</span>
+      {% if backups.live.format == 'folder' %}
+        folder format &middot; {{ backups.live.file_count }} files &middot;
+        {{ backups.live.generations | length }} save generation(s)
+      {% else %}
+        legacy <code>.db</code> + <code>.fwl</code>
       {% endif %}
+      &middot; {{ backups.live.size | human_bytes }} &middot; saved {{ backups.live.modified | timeago }}
     </p>
+    {% if backups.live.issues %}
+      <div class="alert error">
+        This world looks incomplete: {{ backups.live.issues | join('; ') }}.
+      </div>
+    {% endif %}
   {% else %}
-    <p class="subtle" style="margin-top:0">
-      No world yet — one is created the first time the server starts.
-    </p>
+    <div class="alert info">
+      No world named <strong>{{ backups.world }}</strong> in
+      <code>{{ backups.live.directory }}</code> yet.
+      {% if backups.live.other_worlds %}
+        Worlds found there: {% for other in backups.live.other_worlds %}
+          <code>{{ other }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.
+        The name must match exactly — set this instance's world name to one of those,
+        or upload the world you want below.
+      {% else %}
+        One is created the first time the server starts, or upload an existing world below.
+      {% endif %}
+    </div>
   {% endif %}
 
   {% if backups.running %}
     <div class="alert info">
-      The server is running. Rolling back is disabled: a running server holds the
-      world in memory and would overwrite the restored copy at its next autosave.
-      Stop it first.
+      The server is running. Rollback and world upload are disabled: a running server
+      holds the world in memory and would overwrite whatever is put in place at its
+      next autosave. Stop it first.
     </div>
   {% endif %}
 
@@ -44,8 +60,10 @@
           {% for restore in backups.restores %}
             <tr>
               <td>{{ restore.taken_at | timeago }}<div class="muted" style="font-size:11px">{{ restore.label }}</div></td>
-              <td>{% if restore.kind == 'auto' %}<span class="tag">auto</span>
-                  {% else %}<span class="tag dep">manual</span>{% endif %}</td>
+              <td>
+                {% if restore.source == 'vhsm' %}<span class="tag dep">snapshot</span>
+                {% else %}<span class="tag">Valheim {{ restore.kind }}</span>{% endif %}
+              </td>
               <td>{{ restore.size | human_bytes }}</td>
               <td>
                 <div class="acts">
@@ -68,15 +86,63 @@
       </table>
     </div>
     <p class="subtle" style="margin-bottom:0">
-      Valheim writes the <em>auto</em> entries itself on the schedule set in this instance's
-      configuration. Each entry is a matched <code>.db</code> + <code>.fwl</code> pair; one
-      without the other cannot be loaded and is not listed.
+      Snapshots are taken by this manager and kept in <code>backups/</code> inside the
+      instance. Entries marked <em>Valheim</em> are the server's own rotating backups.
     </p>
   {% else %}
     <div class="empty">
-      No restore points yet. Valheim writes them on its backup schedule, or take one now.
+      No restore points yet. Take a snapshot, or let Valheim write one on its backup schedule.
     </div>
   {% endif %}
+
+  <hr style="border:none;border-top:1px solid var(--border);margin:18px 0">
+
+  <h3 style="margin:0 0 4px">Upload an existing world</h3>
+  <p class="subtle" style="margin-top:0">
+    Bring a world over from another server or from single-player. Since Valheim 1.0 a world
+    is a <strong>folder</strong> named after it, holding <code>_main.&lt;N&gt;.db2</code>,
+    <code>_main.&lt;N&gt;.fwl2</code> and many <code>.chunk</code> files — upload the whole
+    folder, zipped or directly. Legacy <code>.db</code> + <code>.fwl</code> worlds work too.
+  </p>
+
+  <div class="toolbar">
+    <form hx-post="/api/instances/{{ record.config.id }}/world/upload"
+          hx-encoding="multipart/form-data" hx-disabled-elt="find button">
+      <label for="world-zip">A zipped world folder</label>
+      <div class="row">
+        <input type="file" id="world-zip" name="files" accept=".zip" required
+               {{ 'disabled' if backups.running }}>
+        <button class="small" type="submit" {{ 'disabled' if backups.running }}>Upload zip</button>
+        <span class="spinner">uploading…</span>
+      </div>
+      <div class="check" style="margin-top:8px">
+        <input type="checkbox" id="zip_overwrite" name="overwrite" value="1">
+        <label for="zip_overwrite">Replace a world of the same name</label>
+      </div>
+    </form>
+
+    <form hx-post="/api/instances/{{ record.config.id }}/world/upload"
+          hx-encoding="multipart/form-data" hx-disabled-elt="find button">
+      {# A directory picker sends every file in the folder; the folder's own
+         name is only in webkitRelativePath, so app.js copies it here. #}
+      <label for="world-dir">Or the world folder itself</label>
+      <div class="row">
+        <input type="file" id="world-dir" name="files" webkitdirectory directory multiple required
+               data-folder-name="dir-world-name" {{ 'disabled' if backups.running }}>
+        <input type="hidden" name="name" id="dir-world-name" value="">
+        <button class="small" type="submit" {{ 'disabled' if backups.running }}>Upload folder</button>
+        <span class="spinner">uploading…</span>
+      </div>
+      <div class="check" style="margin-top:8px">
+        <input type="checkbox" id="dir_overwrite" name="overwrite" value="1">
+        <label for="dir_overwrite">Replace a world of the same name</label>
+      </div>
+    </form>
+  </div>
+  <p class="subtle">
+    The server only loads the world its configuration names, so this instance is repointed
+    at whatever you upload — otherwise it would ignore it and generate an empty world.
+  </p>
 
   <hr style="border:none;border-top:1px solid var(--border);margin:18px 0">
 
@@ -96,9 +162,4 @@
     </div>
     <button class="primary" type="submit">Download archive</button>
   </form>
-  <p class="subtle" style="margin-bottom:0">
-    Mod <em>config</em> is always included. Mod files are reinstalled from the recorded
-    versions, so leaving them out keeps the archive small; include them for an
-    archive that restores without network access.
-  </p>
 </div>

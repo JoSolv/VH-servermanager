@@ -247,3 +247,6 @@ table.players .acts button { padding: 2px 8px; font-size: 12px; }
 .probe-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
 .probe-list li { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12.5px; }
 .probe-list code { font-size: 12px; }
+
+/* A field the server changed under us, briefly highlighted. */
+input.changed { outline: 2px solid var(--accent); transition: outline-color 1.5s ease; }

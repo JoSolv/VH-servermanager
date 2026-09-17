@@ -1,16 +1,20 @@
-"""World backups and rollback.
+"""World snapshots and rollback.
 
-Valheim writes its own rotating backups next to the live world, named
-``<World>_backup_auto-<timestamp>.db`` with a matching ``.fwl``. Both halves
-matter: the ``.db`` holds the world, the ``.fwl`` holds its seed and metadata,
-and restoring one without the other produces a world the server will not load.
-So a restore point is only offered when the pair is present, and is always
-applied as a pair.
+Snapshots are taken and kept by the manager, in ``<instance>/backups/<stamp>/``
+with a small manifest beside the copied world. They are deliberately not
+written into ``worlds_local``: a 1.0 world is a *folder*, and a backup folder
+sitting next to the live one shows up as another world.
+
+Valheim's own rotating backups are listed alongside them when they can be
+recognised, in either save format.
+
+Everything defers to :mod:`vhsm.worlds` for what a world is and which files
+belong to it, so a 1.0 folder world and a legacy pair are handled the same way
+and a world is always copied whole.
 """
 
 from __future__ import annotations
 
-import re
 import shutil
 import time
 from dataclasses import dataclass
@@ -18,45 +22,35 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-#: Valheim keeps worlds in ``worlds_local`` under the save directory; older
-#: installs used ``worlds``. The save directory itself is checked last.
-WORLD_DIRS = ("worlds_local", "worlds")
+from . import worlds as worlds_mod
+from .util import read_json, write_json
 
-#: ``<world>_backup_auto-20240131-235959.db`` and the manual variant we write.
-RE_BACKUP = re.compile(
-    r"^(?P<world>.+)_backup_(?P<kind>auto|manual)-(?P<stamp>[0-9_\-]+)\.(?P<ext>db|fwl)$"
-)
+#: Snapshots live under the instance, not under worlds_local.
+SNAPSHOT_DIR = "backups"
+MANIFEST = "snapshot.json"
+PAYLOAD = "payload"
+
+SOURCE_VHSM = "vhsm"
+SOURCE_VALHEIM = "valheim"
 
 
 class BackupError(RuntimeError):
     pass
 
 
-def world_dir(savedir: Path, world: str) -> Path:
-    """Where this world's files live, preferring a directory that has them."""
-    for name in WORLD_DIRS:
-        candidate = savedir / name
-        if candidate.is_dir() and any(candidate.glob(f"{world}*.db")):
-            return candidate
-    for name in WORLD_DIRS:
-        candidate = savedir / name
-        if candidate.is_dir():
-            return candidate
-    return savedir / WORLD_DIRS[0]
-
-
 @dataclass(slots=True)
 class Restore:
-    """One restorable snapshot: a matched ``.db`` / ``.fwl`` pair."""
+    """A point the live world can be rolled back to."""
 
     key: str
     world: str
     kind: str
-    stamp: str
-    db: Path
-    fwl: Path
+    source: str
     taken_at: float
     size: int
+    #: Directory holding the copied world (its contents are world entries).
+    payload: Path
+    world_format: str = worlds_mod.FORMAT_FOLDER
 
     @property
     def label(self) -> str:
@@ -68,141 +62,221 @@ class Restore:
             "key": self.key,
             "world": self.world,
             "kind": self.kind,
-            "stamp": self.stamp,
+            "source": self.source,
             "taken_at": self.taken_at,
             "label": self.label,
             "size": self.size,
+            "format": self.world_format,
         }
 
 
-def _stamp_to_time(stamp: str, fallback: float) -> float:
-    digits = re.sub(r"[^0-9]", "", stamp)
-    for fmt in ("%Y%m%d%H%M%S", "%Y%m%d%H%M", "%Y%m%d"):
-        if len(digits) == len(datetime.now().strftime(fmt)):
-            try:
-                return datetime.strptime(digits, fmt).timestamp()
-            except ValueError:
-                break
-    return fallback
+# --------------------------------------------------------------------------- #
+# listing
+# --------------------------------------------------------------------------- #
+def snapshot_root(instance_root: Path) -> Path:
+    return instance_root / SNAPSHOT_DIR
 
 
-def list_restores(savedir: Path, world: str) -> list[Restore]:
-    """Every snapshot that can be rolled back to, newest first."""
-    directory = world_dir(savedir, world)
-    if not directory.is_dir():
+def _vhsm_snapshots(instance_root: Path, world: str) -> list[Restore]:
+    root = snapshot_root(instance_root)
+    if not root.is_dir():
         return []
-
-    pairs: dict[tuple[str, str], dict[str, Path]] = {}
-    for path in directory.iterdir():
-        if not path.is_file():
+    found: list[Restore] = []
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
             continue
-        match = RE_BACKUP.match(path.name)
-        if not match or match.group("world") != world:
+        payload = read_json(entry / MANIFEST)
+        if not isinstance(payload, dict) or payload.get("world") != world:
             continue
-        key = (match.group("kind"), match.group("stamp"))
-        pairs.setdefault(key, {})[match.group("ext")] = path
-
-    restores: list[Restore] = []
-    for (kind, stamp), files in pairs.items():
-        db, fwl = files.get("db"), files.get("fwl")
-        # A .db without its .fwl cannot be loaded, so it is not a restore point.
-        if db is None or fwl is None:
+        body = entry / PAYLOAD
+        if not body.is_dir():
             continue
-        restores.append(
+        found.append(
             Restore(
-                key=f"{kind}-{stamp}",
+                key=entry.name,
                 world=world,
-                kind=kind,
-                stamp=stamp,
-                db=db,
-                fwl=fwl,
-                taken_at=_stamp_to_time(stamp, db.stat().st_mtime),
-                size=db.stat().st_size + fwl.stat().st_size,
+                kind=str(payload.get("kind") or "manual"),
+                source=SOURCE_VHSM,
+                taken_at=float(payload.get("taken_at") or entry.stat().st_mtime),
+                size=int(payload.get("size") or 0),
+                payload=body,
+                world_format=str(payload.get("format") or worlds_mod.FORMAT_FOLDER),
             )
         )
+    return found
+
+
+def _valheim_backups(savedir: Path, world: str) -> list[Restore]:
+    """Valheim's own rotating backups, in either save format."""
+    found: list[Restore] = []
+    for directory in worlds_mod.world_dirs(savedir):
+        if not directory.is_dir():
+            continue
+
+        pairs: dict[tuple[str, str], dict[str, Path]] = {}
+        for entry in directory.iterdir():
+            stem = entry.name if entry.is_dir() else entry.stem
+            match = worlds_mod.RE_BACKUP_NAME.match(stem)
+            if not match or match.group("world") != world:
+                continue
+            kind, stamp = match.group("kind"), match.group("stamp")
+
+            if entry.is_dir():
+                size, modified = worlds_mod._tree_size(entry)
+                found.append(
+                    Restore(
+                        key=f"valheim:{entry.name}", world=world, kind=kind,
+                        source=SOURCE_VALHEIM, taken_at=modified, size=size,
+                        payload=entry, world_format=worlds_mod.FORMAT_FOLDER,
+                    )
+                )
+            elif entry.suffix in (".db", ".fwl"):
+                pairs.setdefault((kind, stamp), {})[entry.suffix] = entry
+
+        for (kind, stamp), files in pairs.items():
+            db, fwl = files.get(".db"), files.get(".fwl")
+            # A .db without its .fwl cannot be loaded, so it is not a restore point.
+            if db is None or fwl is None:
+                continue
+            found.append(
+                Restore(
+                    key=f"valheim:{db.stem}", world=world, kind=kind,
+                    source=SOURCE_VALHEIM,
+                    taken_at=db.stat().st_mtime,
+                    size=db.stat().st_size + fwl.stat().st_size,
+                    payload=db.parent, world_format=worlds_mod.FORMAT_PAIR,
+                )
+            )
+    return found
+
+
+def list_restores(instance_root: Path, savedir: Path, world: str) -> list[Restore]:
+    restores = _vhsm_snapshots(instance_root, world) + _valheim_backups(savedir, world)
     return sorted(restores, key=lambda r: r.taken_at, reverse=True)
 
 
 def live_world(savedir: Path, world: str) -> dict[str, Any]:
     """Details of the world the server actually loads."""
-    directory = world_dir(savedir, world)
-    db, fwl = directory / f"{world}.db", directory / f"{world}.fwl"
-    if not db.is_file():
-        return {"exists": False, "directory": str(directory)}
-    return {
-        "exists": True,
-        "directory": str(directory),
-        "size": db.stat().st_size + (fwl.stat().st_size if fwl.is_file() else 0),
-        "modified": db.stat().st_mtime,
-        "has_metadata": fwl.is_file(),
-    }
+    found = worlds_mod.find(savedir, world)
+    directory = str(worlds_mod.default_world_dir(savedir))
+    if found is None:
+        others = [w.name for w in worlds_mod.discover(savedir)]
+        return {"exists": False, "directory": directory, "other_worlds": others}
+    payload = found.to_dict()
+    payload.update({"exists": True, "directory": directory, "other_worlds": []})
+    return payload
 
 
-def snapshot(savedir: Path, world: str, kind: str = "manual") -> Restore | None:
-    """Copy the live world aside as a new restore point.
+# --------------------------------------------------------------------------- #
+# taking and applying
+# --------------------------------------------------------------------------- #
+def snapshot(instance_root: Path, savedir: Path, world: str, kind: str = "manual") -> Restore:
+    found = worlds_mod.find(savedir, world)
+    if found is None:
+        available = [w.name for w in worlds_mod.discover(savedir)]
+        hint = f" Worlds found here: {', '.join(available)}." if available else ""
+        raise BackupError(
+            f"No world named {world!r} in {worlds_mod.default_world_dir(savedir)}.{hint}"
+        )
 
-    Taken before a rollback so the rollback itself can be undone.
-    """
-    directory = world_dir(savedir, world)
-    db, fwl = directory / f"{world}.db", directory / f"{world}.fwl"
-    if not db.is_file():
-        return None
-
+    root = snapshot_root(instance_root)
+    root.mkdir(parents=True, exist_ok=True)
     # Second-resolution stamps collide when two snapshots land in the same
-    # second -- which a restore does, since it snapshots before copying. A
-    # collision would overwrite an existing restore point with the live world,
-    # destroying the very state the user is rolling back to, so the stamp is
-    # extended until it names files that do not exist yet.
+    # second, which a restore does; extend until the name is free.
     base = time.strftime("%Y%m%d%H%M%S")
-    stamp, suffix = base, 0
-    while (directory / f"{world}_backup_{kind}-{stamp}.db").exists() or (
-        directory / f"{world}_backup_{kind}-{stamp}.fwl"
-    ).exists():
+    stamp, suffix = f"{kind}-{base}", 0
+    while (root / stamp).exists():
         suffix += 1
-        stamp = f"{base}_{suffix}"
+        stamp = f"{kind}-{base}_{suffix}"
         if suffix > 999:
-            raise BackupError("could not find a free backup name")
+            raise BackupError("could not find a free snapshot name")
 
-    target_db = directory / f"{world}_backup_{kind}-{stamp}.db"
-    target_fwl = directory / f"{world}_backup_{kind}-{stamp}.fwl"
-    shutil.copy2(db, target_db)
-    if fwl.is_file():
-        shutil.copy2(fwl, target_fwl)
-    else:
-        # Keep the pair complete so the snapshot is offered as a restore point.
-        target_fwl.write_bytes(b"")
+    entry = root / stamp
+    body = entry / PAYLOAD
+    try:
+        worlds_mod.copy_world(found, body)
+    except OSError as exc:
+        shutil.rmtree(entry, ignore_errors=True)
+        raise BackupError(f"could not copy the world: {exc}") from exc
 
+    write_json(
+        entry / MANIFEST,
+        {
+            "world": world, "kind": kind, "taken_at": time.time(),
+            "size": found.size, "format": found.format,
+            "generations": found.generations, "files": found.file_count,
+        },
+    )
     return Restore(
-        key=f"{kind}-{stamp}", world=world, kind=kind, stamp=stamp,
-        db=target_db, fwl=target_fwl, taken_at=time.time(),
-        size=target_db.stat().st_size + target_fwl.stat().st_size,
+        key=stamp, world=world, kind=kind, source=SOURCE_VHSM,
+        taken_at=time.time(), size=found.size, payload=body, world_format=found.format,
     )
 
 
-def restore(savedir: Path, world: str, key: str) -> Restore:
-    """Roll the live world back to a snapshot, keeping the current one first."""
-    match = next((r for r in list_restores(savedir, world) if r.key == key), None)
+def restore(instance_root: Path, savedir: Path, world: str, key: str) -> Restore:
+    """Roll the live world back, snapshotting the current one first."""
+    match = next(
+        (r for r in list_restores(instance_root, savedir, world) if r.key == key), None
+    )
     if match is None:
         raise BackupError(f"no backup {key!r} for world {world!r}")
-    if not match.db.is_file() or not match.fwl.is_file():
-        raise BackupError("that backup is missing one of its two files")
 
-    directory = world_dir(savedir, world)
     # Snapshot first: a rollback that cannot be undone is a trap. This cannot
-    # clobber the backup being restored, because snapshot() picks a free name.
-    snapshot(savedir, world, kind="manual")
+    # clobber the backup being restored -- snapshots live in their own
+    # directory and always pick a free name.
+    current = worlds_mod.find(savedir, world)
+    if current is not None:
+        snapshot(instance_root, savedir, world, kind="manual")
+
+    target_dir = worlds_mod.default_world_dir(savedir)
+    target_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        shutil.copy2(match.db, directory / f"{world}.db")
-        shutil.copy2(match.fwl, directory / f"{world}.fwl")
+        if current is not None:
+            worlds_mod.remove_world(current)
+
+        if match.world_format == worlds_mod.FORMAT_FOLDER:
+            source = match.payload
+            # A vhsm snapshot wraps the world folder; a Valheim backup folder
+            # is the world itself.
+            inner = next(
+                (p for p in source.iterdir()
+                 if p.is_dir() and worlds_mod.looks_like_world_folder(p)),
+                None,
+            )
+            if inner is None and worlds_mod.looks_like_world_folder(source):
+                inner = source
+            if inner is None:
+                raise BackupError("that backup does not contain a readable world")
+            destination = target_dir / world
+            shutil.rmtree(destination, ignore_errors=True)
+            shutil.copytree(inner, destination)
+        else:
+            source_db = next(match.payload.glob("*.db"), None)
+            if source_db is None:
+                raise BackupError("that backup has no .db file")
+            shutil.copy2(source_db, target_dir / f"{world}.db")
+            source_fwl = source_db.with_suffix(".fwl")
+            if source_fwl.is_file():
+                shutil.copy2(source_fwl, target_dir / f"{world}.fwl")
     except OSError as exc:
         raise BackupError(f"could not restore: {exc}") from exc
     return match
 
 
-def delete(savedir: Path, world: str, key: str) -> None:
-    match = next((r for r in list_restores(savedir, world) if r.key == key), None)
+def delete(instance_root: Path, savedir: Path, world: str, key: str) -> None:
+    match = next(
+        (r for r in list_restores(instance_root, savedir, world) if r.key == key), None
+    )
     if match is None:
         raise BackupError(f"no backup {key!r} for world {world!r}")
-    match.db.unlink(missing_ok=True)
-    match.fwl.unlink(missing_ok=True)
+    if match.source == SOURCE_VHSM:
+        shutil.rmtree(match.payload.parent, ignore_errors=True)
+        return
+    # A Valheim-written backup: remove just that backup's own files.
+    if match.world_format == worlds_mod.FORMAT_FOLDER:
+        shutil.rmtree(match.payload, ignore_errors=True)
+    else:
+        name = match.key.split(":", 1)[1]
+        for suffix in (".db", ".fwl"):
+            (match.payload / f"{name}{suffix}").unlink(missing_ok=True)

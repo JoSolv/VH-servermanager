@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable
 
 from . import archive as archive_mod
 from . import backups as backups_mod
+from . import worlds as worlds_mod
 from .config import Settings, settings as default_settings
 from .instance import InstanceConfig, InstanceLayout, ValidationError
 from .mods.profile import ModProfile
@@ -545,22 +546,22 @@ class InstanceManager:
     # ------------------------------------------------------------------ #
     def backup_summary(self, instance_id: str) -> dict[str, Any]:
         record = self.get(instance_id)
-        savedir, world = record.layout.savedir, record.config.world
+        root, savedir, world = record.layout.root, record.layout.savedir, record.config.world
         return {
             "world": world,
             "live": backups_mod.live_world(savedir, world),
-            "restores": [r.to_dict() for r in backups_mod.list_restores(savedir, world)],
+            "restores": [
+                r.to_dict() for r in backups_mod.list_restores(root, savedir, world)
+            ],
             "running": record.supervisor.status.is_active,
+            "worlds": [w.to_dict() for w in worlds_mod.discover(savedir)],
         }
 
     def snapshot_world(self, instance_id: str) -> backups_mod.Restore:
         record = self.get(instance_id)
-        result = backups_mod.snapshot(record.layout.savedir, record.config.world)
-        if result is None:
-            raise backups_mod.BackupError(
-                "There is no world to snapshot yet; start the server once."
-            )
-        return result
+        return backups_mod.snapshot(
+            record.layout.root, record.layout.savedir, record.config.world
+        )
 
     def restore_world(self, instance_id: str, key: str) -> backups_mod.Restore:
         """Roll a world back. Refuses while the server is running.
@@ -575,11 +576,48 @@ class InstanceManager:
                 "Stop the server before restoring: a running server would "
                 "overwrite the restored world at its next autosave."
             )
-        return backups_mod.restore(record.layout.savedir, record.config.world, key)
+        return backups_mod.restore(
+            record.layout.root, record.layout.savedir, record.config.world, key
+        )
 
     def delete_backup(self, instance_id: str, key: str) -> None:
         record = self.get(instance_id)
-        backups_mod.delete(record.layout.savedir, record.config.world, key)
+        backups_mod.delete(
+            record.layout.root, record.layout.savedir, record.config.world, key
+        )
+
+    # ------------------------------------------------------------------ #
+    # world upload
+    # ------------------------------------------------------------------ #
+    def install_world(
+        self,
+        instance_id: str,
+        staging: Path,
+        *,
+        name: str = "",
+        overwrite: bool = False,
+        adopt_name: bool = True,
+    ) -> worlds_mod.World:
+        """Install an uploaded world into an instance.
+
+        The server loads the world named by ``-world``, which for a 1.0 save is
+        the folder name, so an uploaded world whose name differs from the
+        instance's would be ignored and a fresh one generated instead. By
+        default the instance is pointed at what was actually uploaded.
+        """
+        record = self.get(instance_id)
+        if record.supervisor.status.is_active or record.busy:
+            raise worlds_mod.WorldError(
+                "Stop the server before uploading a world: a running server "
+                "would overwrite it at its next autosave."
+            )
+
+        installed = worlds_mod.install(
+            record.layout.savedir, staging, name=name, overwrite=overwrite
+        )
+        if adopt_name and installed.name != record.config.world:
+            self.update(instance_id, {"world": installed.name})
+        return installed
 
     # ------------------------------------------------------------------ #
     # updates

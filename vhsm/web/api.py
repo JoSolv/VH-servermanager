@@ -11,7 +11,7 @@ import json
 import logging
 import shutil
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -19,8 +19,9 @@ from starlette.background import BackgroundTask
 
 from ..instance import InstanceConfig, ValidationError
 from ..playerlists import KICK_BAN_SECONDS, PlayerListError
-from ..archive import ArchiveError, SUFFIX
+from ..archive import ArchiveError, SUFFIX, extract_zip
 from ..backups import BackupError
+from ..worlds import WorldError
 from ..mods.cache import cache_size, clear_cache
 from ..mods.profile import ModError
 from ..mods.thunderstore import ThunderstoreError
@@ -630,3 +631,121 @@ async def delete_backup(
     except (BackupError, OSError) as exc:
         return _backups_partial(request, instance_id, error=str(exc))
     return _backups_partial(request, instance_id, message="Backup deleted.")
+
+
+# --------------------------------------------------------------------------- #
+# world upload
+# --------------------------------------------------------------------------- #
+def _safe_member(filename: str) -> Path | None:
+    """Turn an uploaded file's name into a safe relative path.
+
+    A directory upload sends each file's path relative to the chosen folder, so
+    the name can contain separators and has to be validated like any other
+    archive member.
+    """
+    raw = (filename or "").replace("\\", "/").strip()
+    if not raw:
+        return None
+    parts = [p for p in PurePosixPath(raw).parts if p not in ("", ".", "/")]
+    if any(p == ".." for p in parts) or not parts:
+        return None
+    return Path(*parts)
+
+
+@router.post("/api/instances/{instance_id}/world/upload", response_class=HTMLResponse)
+async def upload_world(
+    request: Request,
+    instance_id: str,
+    files: list[UploadFile] = File(...),
+    name: str = Form(default=""),
+    overwrite: str = Form(default=""),
+    adopt_name: str = Form(default="1"),
+) -> HTMLResponse:
+    """Install a world from a zipped world folder or the folder's files."""
+    manager = _manager(request)
+    previous_world = manager.get(instance_id).config.world
+    staging = Path(tempfile.mkdtemp(prefix="vhsm-world-"))
+    unpack = staging / "unpacked"
+    unpack.mkdir()
+
+    try:
+        uploads = [f for f in files if (f.filename or "").strip()]
+        if not uploads:
+            return _backups_partial(request, instance_id, error="No files were uploaded.")
+
+        single_zip = len(uploads) == 1 and uploads[0].filename.lower().endswith(".zip")
+        total = 0
+        if single_zip:
+            payload = staging / "world.zip"
+            with payload.open("wb") as sink:
+                while chunk := await uploads[0].read(1 << 20):
+                    total += len(chunk)
+                    if total > MAX_ARCHIVE_UPLOAD:
+                        return _backups_partial(
+                            request, instance_id, error="That upload is too large."
+                        )
+                    sink.write(chunk)
+            try:
+                extract_zip(payload, unpack)
+            except ArchiveError as exc:
+                return _backups_partial(request, instance_id, error=str(exc))
+        else:
+            for upload in uploads:
+                relative = _safe_member(upload.filename)
+                if relative is None:
+                    return _backups_partial(
+                        request, instance_id,
+                        error=f"Refusing a file with an unsafe name: {upload.filename!r}",
+                    )
+                destination = (unpack / relative).resolve()
+                if unpack.resolve() not in destination.parents:
+                    return _backups_partial(
+                        request, instance_id,
+                        error=f"Refusing a file that escapes the upload: {upload.filename!r}",
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with destination.open("wb") as sink:
+                    while chunk := await upload.read(1 << 20):
+                        total += len(chunk)
+                        if total > MAX_ARCHIVE_UPLOAD:
+                            return _backups_partial(
+                                request, instance_id, error="That upload is too large."
+                            )
+                        sink.write(chunk)
+
+        try:
+            installed = manager.install_world(
+                instance_id,
+                unpack,
+                name=name.strip(),
+                overwrite=bool(overwrite),
+                adopt_name=bool(adopt_name),
+            )
+        except (WorldError, ValidationError) as exc:
+            return _backups_partial(request, instance_id, error=str(exc))
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    record = manager.get(instance_id)
+    message = (
+        f"Installed world {installed.name!r} "
+        f"({installed.file_count} files, {installed.format} format)."
+    )
+    renamed = record.config.world == installed.name and previous_world != installed.name
+    if renamed:
+        message += (
+            f" This instance's world name was changed from {previous_world!r} so it "
+            "loads the world you uploaded."
+        )
+    if installed.issues:
+        message += " Warning: " + "; ".join(installed.issues)
+
+    response = _backups_partial(request, instance_id, message=message)
+    if renamed:
+        # The configuration form was rendered with the old world name and is
+        # still on screen; leaving it stale would let a later save silently
+        # point the server back at a world that is no longer there.
+        response.headers["HX-Trigger"] = json.dumps(
+            {"vhsm:world-renamed": {"world": installed.name}}
+        )
+    return response

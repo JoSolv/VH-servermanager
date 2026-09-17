@@ -291,6 +291,31 @@
     open();
   }
 
+  // A directory picker submits every file in the folder, but the folder's own
+  // name only exists in webkitRelativePath. Valheim 1.0 takes the world name
+  // from that folder, so it has to travel with the upload.
+  document.addEventListener("change", function (event) {
+    var input = event.target;
+    if (!input.dataset || !input.dataset.folderName) return;
+    var target = document.getElementById(input.dataset.folderName);
+    if (!target) return;
+    var first = input.files && input.files[0];
+    var relative = first && (first.webkitRelativePath || "");
+    target.value = relative ? relative.split("/")[0] : "";
+  });
+
+  // Uploading a world repoints the instance at it. The configuration form
+  // below was rendered with the old name, so keep it in step rather than let
+  // a later save send the stale value back.
+  document.body.addEventListener("vhsm:world-renamed", function (event) {
+    var input = document.getElementById("world");
+    if (input && event.detail && event.detail.world) {
+      input.value = event.detail.world;
+      input.classList.add("changed");
+      setTimeout(function () { input.classList.remove("changed"); }, 2500);
+    }
+  });
+
   document.addEventListener("DOMContentLoaded", function () {
     connect();
     attachConsole();

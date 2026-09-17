@@ -169,21 +169,26 @@ def read_info(archive_path: Path) -> ArchiveInfo:
     )
 
 
-def extract_into(archive_path: Path, target: Path) -> int:
-    """Extract an archive's payload into *target*, refusing unsafe members.
+def extract_zip(archive_path: Path, target: Path, skip: frozenset[str] = frozenset()) -> int:
+    """Extract a zip into *target*, refusing any member that escapes it.
 
     Paths inside an archive are attacker-controlled in the same way a
-    downloaded mod zip is, so every member is checked to land inside the
-    instance directory before anything is written.
+    downloaded mod zip is, so every member is checked before anything is
+    written. Shared by instance import and world upload.
     """
     target = target.resolve()
     target.mkdir(parents=True, exist_ok=True)
     extracted = 0
     total = 0
 
-    with zipfile.ZipFile(archive_path) as archive:
+    try:
+        archive_file = zipfile.ZipFile(archive_path)
+    except zipfile.BadZipFile as exc:
+        raise ArchiveError(f"not a readable zip file: {exc}") from exc
+
+    with archive_file as archive:
         for info in archive.infolist():
-            if info.is_dir() or info.filename == MANIFEST_NAME:
+            if info.is_dir() or info.filename in skip:
                 continue
             relative = PurePosixPath(info.filename)
             if relative.is_absolute() or ".." in relative.parts or info.filename.startswith("\\"):
@@ -194,13 +199,18 @@ def extract_into(archive_path: Path, target: Path) -> int:
 
             destination = (target / relative).resolve()
             if target not in destination.parents:
-                raise ArchiveError(f"archive member escapes the instance: {info.filename}")
+                raise ArchiveError(f"archive member escapes the target: {info.filename}")
             destination.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(info) as source, destination.open("wb") as sink:
                 while chunk := source.read(1 << 20):
                     sink.write(chunk)
             extracted += 1
     return extracted
+
+
+def extract_into(archive_path: Path, target: Path) -> int:
+    """Extract an instance archive's payload, leaving the manifest behind."""
+    return extract_zip(archive_path, target, skip=frozenset({MANIFEST_NAME}))
 
 
 def suggested_filename(config: InstanceConfig) -> str:
