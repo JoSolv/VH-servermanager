@@ -14,7 +14,7 @@ import sys
 
 import uvicorn
 
-from vhsm.config import settings
+from vhsm.config import DataRootError, settings
 
 
 def main() -> int:
@@ -40,7 +40,12 @@ def main() -> int:
     if args.fake_server:
         settings.fake_server = True
     settings.host, settings.port = args.host, args.port
-    settings.ensure_dirs()
+    try:
+        settings.ensure_dirs()
+    except DataRootError as exc:
+        # A traceback here helps nobody; the message already says what to fix.
+        logging.error("%s", exc)
+        return 1
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         logging.warning(

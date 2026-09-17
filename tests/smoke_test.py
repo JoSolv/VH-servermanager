@@ -307,6 +307,45 @@ with TestClient(app) as c:
         follow_redirects=False)
     check("too-frequent snapshot interval rejected", rb.status_code == 400, rb.status_code)
 
+    print("\n[writable HOME for child processes]")
+    # A container always has HOME set, and it usually points somewhere an
+    # unprivileged user cannot write. steamcmd keeps its state under
+    # $HOME/Steam and fails with "Missing file permissions" if it cannot.
+    from vhsm.steam import steam_env
+    hostile = os.environ.get("HOME")
+    os.environ["HOME"] = "/"
+    try:
+        env = steam_env(settings)
+        check("steamcmd HOME is not inherited", env["HOME"] != "/", env["HOME"])
+        check("steamcmd HOME is inside the data root",
+              Path(env["HOME"]).is_relative_to(settings.data_root), env["HOME"])
+        check("steamcmd HOME exists", Path(env["HOME"]).is_dir())
+        sup = app.state.manager.get(iid).supervisor
+        senv = sup._build_env()
+        check("server HOME is not inherited", senv["HOME"] != "/", senv["HOME"])
+        check("server HOME is its own instance directory",
+              Path(senv["HOME"]) == sup.layout.root, senv["HOME"])
+    finally:
+        if hostile is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = hostile
+
+    # An unusable data directory must be explained, not traceback. Using a
+    # path under a regular file fails for everyone, including root, which a
+    # permission-based test would not.
+    from vhsm.config import DataRootError
+    blocker = ROOT / "not-a-directory"
+    blocker.write_text("x")
+    try:
+        Settings(data_root=blocker / "data").ensure_dirs()
+        check("unusable data root is explained", False, "no error raised")
+    except DataRootError as exc:
+        check("unusable data root is explained", "Cannot create" in str(exc), str(exc)[:80])
+        check("error names the user", "uid" in str(exc), str(exc)[:80])
+    except OSError as exc:
+        check("unusable data root is explained", False, f"raw {type(exc).__name__}")
+
     print("\n[item 3: steamcmd log export]")
     app.state.manager.job.log("[manager] synthetic line for the export test")
     r = c.get("/api/steamcmd-log")

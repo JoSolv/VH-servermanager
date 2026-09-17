@@ -26,6 +26,10 @@ VALHEIM_CLIENT_APPID = "892970"
 THUNDERSTORE_COMMUNITY = "valheim"
 
 
+class DataRootError(RuntimeError):
+    """The data directory cannot be created or written."""
+
+
 def _env_path(name: str, default: Path) -> Path:
     raw = os.environ.get(name)
     return Path(raw).expanduser().resolve() if raw else default
@@ -82,6 +86,19 @@ class Settings:
         return self.data_root / "cache"
 
     @property
+    def home_dir(self) -> Path:
+        """HOME for the processes we launch.
+
+        steamcmd keeps its own state under ``$HOME/Steam`` and the server
+        writes crash dumps relative to HOME, so both need somewhere writable.
+        Inheriting the manager's HOME is not good enough: in a container it is
+        typically ``/`` or ``/root``, which an unprivileged app user cannot
+        write, and steamcmd then fails with "Missing file permissions" long
+        after appearing to work.
+        """
+        return self.data_root / "home"
+
+    @property
     def instances_dir(self) -> Path:
         return self.data_root / "instances"
 
@@ -91,8 +108,21 @@ class Settings:
             self.steamcmd_dir,
             self.cache_dir,
             self.instances_dir,
+            self.home_dir,
         ):
-            path.mkdir(parents=True, exist_ok=True)
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                # This is the first thing that happens on a misconfigured
+                # container mount, so it is worth an answer rather than a
+                # traceback: name the path, the user, and the usual cause.
+                raise DataRootError(
+                    f"Cannot create {path}: {exc.strerror or exc}.\n"
+                    f"Running as uid {os.getuid()}, gid {os.getgid()}.\n"
+                    "The data directory must be writable by that user. In a "
+                    "container, check that the mounted dataset is owned by "
+                    "your PUID/PGID."
+                ) from exc
 
 
 settings = Settings()

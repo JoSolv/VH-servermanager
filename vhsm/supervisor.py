@@ -140,8 +140,10 @@ class Supervisor:
     def _build_env(self) -> dict[str, str]:
         env = dict(os.environ)
         env["SteamAppId"] = VALHEIM_CLIENT_APPID
-        # The server writes crash dumps and Steam files relative to HOME.
-        env.setdefault("HOME", str(self.layout.root))
+        # The server writes crash dumps and Steam files relative to HOME, so
+        # it needs one it can write. Assigned rather than defaulted: HOME is
+        # always already set, so setdefault would never take effect.
+        env["HOME"] = str(self.layout.root)
         lib_paths = [str(self.settings.game_dir / "linux64"), str(self.settings.game_dir)]
         if env.get("LD_LIBRARY_PATH"):
             lib_paths.append(env["LD_LIBRARY_PATH"])

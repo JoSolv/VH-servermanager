@@ -136,6 +136,19 @@ the YAML and redeploy.
 **"Server binary missing" when starting an instance.** The server files have
 not been installed yet — do step 5.1.
 
+**steamcmd downloads fine, then fails with `Missing file permissions`
+(exit code 8).** Look for a line like `Redirecting stderr to '//Steam/logs'`
+earlier in the log. steamcmd keeps its own state under `$HOME/Steam`, and
+`//Steam` means `HOME` was the container root, which your app user cannot
+write. Images built before this was fixed inherit that `HOME`; pull the latest
+image and it will use `/data/home` instead. The manager now also checks those
+directories before running steamcmd and names the one it cannot write.
+
+**The app exits immediately with "Cannot create /data/…: Permission denied".**
+The mounted dataset is not writable by the user the container runs as. Either
+set `PUID`/`PGID` to an account that owns it, or fix the ownership on the
+dataset (in TrueNAS: **Datasets → your dataset → Permissions → Edit**).
+
 **The network panel says per-instance accounting is unavailable.** The
 container does not have `NET_ADMIN`, or is running as a non-root user via
 PUID/PGID. Everything else works; only the per-instance network graph is

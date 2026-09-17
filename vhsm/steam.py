@@ -66,10 +66,38 @@ async def install_steamcmd(settings: Settings, progress: ProgressHook) -> None:
     progress("steamcmd installed")
 
 
+def check_writable(settings: Settings) -> None:
+    """Fail early, and legibly, when a directory steamcmd needs is read-only.
+
+    steamcmd reports this as "Missing file permissions" only after downloading
+    and self-updating, and never says which path it could not write, so the
+    check is done here where the path and the user can both be named.
+    """
+    for label, path in (
+        ("HOME (steamcmd keeps its state here)", settings.home_dir),
+        ("the install directory", settings.game_dir),
+        ("the steamcmd directory", settings.steamcmd_dir),
+    ):
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            probe = path / ".vhsm-write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            raise SteamError(
+                f"Cannot write to {label}: {path} ({exc.strerror or exc}). "
+                f"Running as uid {os.getuid()}, gid {os.getgid()}. "
+                "In a container this usually means the data volume is not "
+                "owned by the user the app runs as -- check PUID/PGID and the "
+                "permissions on the mounted dataset."
+            ) from exc
+
+
 async def update_server(settings: Settings, validate: bool = False) -> AsyncIterator[str]:
     """Install or update the Valheim dedicated server, yielding output lines."""
     if not settings.steamcmd_bin.is_file():
         raise SteamError("steamcmd is not installed yet")
+    check_writable(settings)
 
     settings.game_dir.mkdir(parents=True, exist_ok=True)
     command = [
@@ -82,8 +110,7 @@ async def update_server(settings: Settings, validate: bool = False) -> AsyncIter
         command.append("validate")
     command.append("+quit")
 
-    env = dict(os.environ)
-    env.setdefault("HOME", str(settings.steamcmd_dir))
+    env = steam_env(settings)
 
     process = await asyncio.create_subprocess_exec(
         *command,
@@ -130,6 +157,21 @@ def server_status(settings: Settings) -> dict[str, object]:
         if settings.data_root.exists()
         else 0,
     }
+
+
+def steam_env(settings: Settings) -> dict[str, str]:
+    """Environment for a steamcmd run.
+
+    HOME is assigned, never defaulted: it is always already set, so a default
+    would never be applied and steamcmd would keep its state wherever the
+    manager's own HOME points. In a container that is typically ``/``, which
+    an unprivileged user cannot write, and steamcmd reports it late and
+    obliquely as "Missing file permissions" after appearing to work.
+    """
+    env = dict(os.environ)
+    env["HOME"] = str(settings.home_dir)
+    settings.home_dir.mkdir(parents=True, exist_ok=True)
+    return env
 
 
 def write_steam_appid(settings: Settings) -> None:
@@ -183,8 +225,7 @@ async def latest_build_id(settings: Settings) -> str:
     if not settings.steamcmd_bin.is_file():
         raise SteamError("steamcmd is not installed yet")
 
-    env = dict(os.environ)
-    env.setdefault("HOME", str(settings.steamcmd_dir))
+    env = steam_env(settings)
     process = await asyncio.create_subprocess_exec(
         str(settings.steamcmd_bin),
         "+login", "anonymous",

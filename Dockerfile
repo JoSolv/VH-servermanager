@@ -9,6 +9,8 @@ FROM python:3.11-slim-bookworm
 # nftables is optional and only used for per-instance network counters.
 # gosu drops privileges cleanly when PUID/PGID are set (setpriv lives in
 # util-linux-extra on bookworm, not util-linux, so it is not a safe default).
+# en_US.UTF-8 is generated because steamcmd asks for it by name, and without
+# a UTF-8 locale non-ASCII server, world and player names get mangled.
 RUN dpkg --add-architecture i386 \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -21,6 +23,9 @@ RUN dpkg --add-architecture i386 \
       nftables \
       tzdata \
       gosu \
+      locales \
+ && sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen \
+ && locale-gen \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -37,8 +42,14 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV VHSM_DATA_ROOT=/data \
     VHSM_HOST=0.0.0.0 \
     VHSM_PORT=8080 \
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
+
+# steamcmd keeps its state under $HOME/Steam. The image's default HOME is not
+# writable by an unprivileged PUID, so it is pointed inside the data volume.
+ENV HOME=/data/home
 
 # Server files, worlds, mods and backups all live here. Mount it, or an
 # update is a fresh 2 GB download every time the container is recreated.

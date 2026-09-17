@@ -32,9 +32,11 @@ services:
 
       # Optional: run as a specific user so files on the dataset are owned
       # by it. Leaving these out runs as root, which is simplest and lets
-      # the per-instance network graphs work.
-      # PUID: "3000"
-      # PGID: "3000"
+      # the per-instance network graphs work. On TrueNAS, 568 is the built-in
+      # "apps" account. Whatever you pick must own the dataset above, or the
+      # app will exit at startup saying so.
+      # PUID: "568"
+      # PGID: "568"
 
     network_mode: host
 
