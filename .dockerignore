@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+venv
+data
+docs
+tests
+__pycache__
+**/__pycache__
+*.pyc
+*.md
+!README.md
+.gitignore
+.dockerignore
+docker-compose*.yaml

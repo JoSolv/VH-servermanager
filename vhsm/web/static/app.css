@@ -301,5 +301,7 @@ table.players tr.is-online td { background: rgba(79, 180, 119, .06); }
 .reach::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .reach.yes { color: var(--ok); }
 .reach.yes::before { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.reach.warn { color: var(--warn); }
+.reach.warn::before { background: var(--warn); }
 .reach.no { color: var(--err); }
 .reach.no::before { background: var(--err); }

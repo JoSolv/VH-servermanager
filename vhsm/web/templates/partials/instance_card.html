@@ -11,11 +11,12 @@
       <span data-f="address">{{ hostname }}:{{ config.port }}</span>
       <button type="button" data-copy="{{ hostname }}:{{ config.port }}" title="Copy">copy</button>
     </span>
-    {% set reach = 'yes' if record.reachable else ('no' if record.reachable is sameas false else '') %}
+    {% set reach = 'yes' if record.reachable else ('warn' if record.listening else ('no' if record.reachable is sameas false else '')) %}
     <span class="reach {{ reach }}" data-f="reach" title="{{ record.reachable_detail }}">
       {%- if not record.supervisor.status.is_active %}not running
       {%- elif record.reachable %}reachable
-      {%- elif record.reachable is sameas false %}not reachable
+      {%- elif record.reachable is sameas false %}{% if record.listening %}up, query silent{% else %}not reachable{% endif %}
+      {%- elif record.listening %}up
       {%- else %}checking…{% endif -%}
     </span>
   </div>

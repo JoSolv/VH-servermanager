@@ -1,0 +1,69 @@
+# Valheim Server Manager - TrueNAS "Custom App" / docker compose
+#
+# Paste this into TrueNAS: Apps -> Discover Apps -> Custom App -> Install via YAML.
+# Change the two marked lines and nothing else is required.
+#
+# Host networking is used on purpose. A Valheim instance needs three UDP ports,
+# and you add instances from the web UI later -- with bridge networking you
+# would have to edit this file and redeploy the app every time. On host
+# networking every port an instance opens just works.
+
+services:
+  vhsm:
+    image: ghcr.io/josolv/vh-servermanager:latest
+    container_name: vhsm
+    restart: unless-stopped
+
+    # CHANGE ME (1 of 2): point this at a dataset on your pool.
+    # Everything lives here: the Valheim server files (~2 GB), worlds,
+    # backups, mods and settings. Without it, an app update means
+    # downloading the game again.
+    volumes:
+      - /mnt/tank/apps/vhsm:/data
+
+    environment:
+      # CHANGE ME (2 of 2): your timezone, so scheduled updates and
+      # snapshot timestamps line up with your clock.
+      TZ: Europe/Oslo
+
+      # The web UI. With host networking this is a port on the NAS itself,
+      # so change it if something already uses 8080.
+      VHSM_PORT: "8080"
+
+      # Optional: run as a specific user so files on the dataset are owned
+      # by it. Leaving these out runs as root, which is simplest and lets
+      # the per-instance network graphs work.
+      # PUID: "3000"
+      # PGID: "3000"
+
+    network_mode: host
+
+    # Lets the manager install nftables counters so each instance gets its
+    # own network graph. Drop this and everything else still works; the
+    # network panel just says it is unavailable.
+    cap_add:
+      - NET_ADMIN
+
+# ---------------------------------------------------------------------------
+# Bridge networking instead (only if you cannot use host networking)
+#
+# You must publish a UDP range covering every instance you intend to create,
+# because ports cannot be added to a running container. The range below
+# covers four instances (2456-2458, 2459-2461, 2462-2464, 2465-2467).
+# The reachability check is also less meaningful this way, since the probe
+# leaves from inside the container's network rather than from the NAS.
+#
+# services:
+#   vhsm:
+#     image: ghcr.io/josolv/vh-servermanager:latest
+#     container_name: vhsm
+#     restart: unless-stopped
+#     volumes:
+#       - /mnt/tank/apps/vhsm:/data
+#     environment:
+#       TZ: Europe/Oslo
+#     ports:
+#       - "8080:8080/tcp"
+#       - "2456-2467:2456-2467/udp"
+#     cap_add:
+#       - NET_ADMIN

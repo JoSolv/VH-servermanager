@@ -165,7 +165,12 @@
     } else if (snapshot.reachable === true) {
       label = "reachable"; cls = "reach yes";
     } else if (snapshot.reachable === false) {
-      label = "not reachable"; cls = "reach no";
+      // The process holding its game port is the real "is it up" signal; a
+      // silent query socket is a separate, weaker fact.
+      label = snapshot.listening ? "up, query silent" : "not reachable";
+      cls = snapshot.listening ? "reach warn" : "reach no";
+    } else if (snapshot.listening) {
+      label = "up"; cls = "reach yes";
     } else {
       label = "checking\u2026"; cls = "reach";
     }

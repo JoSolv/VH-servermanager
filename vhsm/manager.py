@@ -164,8 +164,14 @@ class InstanceRecord:
     #: HTTP request, so a browser navigating away cannot abandon it half-done.
     operation: asyncio.Task | None = None
     operation_name: str = ""
-    #: Result of the last external reachability probe.
+    #: Result of the last external reachability probe. Tri-state: True when
+    #: the Steam query socket answered, False when it did not, None when not
+    #: applicable (server stopped, or crossplay, which has no such socket).
     reachable: bool | None = None
+    #: Whether the process holds its game port. This comes from the kernel
+    #: rather than from a network round trip, so it is a fact rather than an
+    #: inference, and it is what "the server is up" actually means.
+    listening: bool = False
     reachable_at: float = 0.0
     reachable_detail: str = ""
     #: When the last automatic snapshot was taken.
@@ -199,6 +205,7 @@ class InstanceRecord:
             "last_error": supervisor.last_error,
             "version": self.version,
             "reachable": self.reachable,
+            "listening": self.listening,
             "reachable_at": self.reachable_at,
             "reachable_detail": self.reachable_detail,
             "players": self.players.to_dict(self.lists),
@@ -568,10 +575,28 @@ class InstanceManager:
         to themselves (NAT hairpinning), so a probe from the server's own host
         can fail while outside clients connect fine. The UI says so.
         """
+        record.reachable_at = time.time()
         if not record.supervisor.status.is_active:
             record.reachable = None
+            record.listening = False
             record.reachable_detail = "server is not running"
-            record.reachable_at = time.time()
+            return None
+
+        # Ask the kernel first. Whether the process holds its game port is a
+        # fact; whether a query answers is a round trip that can fail for
+        # reasons that have nothing to do with the server being up.
+        sockets = bound_udp_sockets(record.supervisor.pid)
+        record.listening = any(e.port == record.config.port for e in sockets)
+
+        if record.config.crossplay:
+            # A crossplay server talks to players through a PlayFab relay and
+            # is joined by code, so there is no Steam query socket to answer
+            # and no port to forward. Calling that "unreachable" is wrong.
+            record.reachable = None
+            record.reachable_detail = (
+                "crossplay is on, so players join by code through the PlayFab "
+                "relay and there is no Steam query port to probe"
+            )
             return None
 
         port = (
@@ -583,11 +608,13 @@ class InstanceManager:
             await a2s_query(self.hostname, port, A2S_TIMEOUT)
         except A2SError as exc:
             record.reachable = False
-            record.reachable_detail = str(exc)
+            record.reachable_detail = (
+                f"{exc}. The process {'is' if record.listening else 'is not'} holding "
+                f"UDP {record.config.port}."
+            )
         else:
             record.reachable = True
             record.reachable_detail = f"answered on {self.hostname}:{port}"
-        record.reachable_at = time.time()
         return record.reachable
 
     # ------------------------------------------------------------------ #
@@ -927,6 +954,7 @@ class InstanceManager:
             "log_version": record.supervisor.server_version,
             "sockets": [e.to_dict() for e in sockets],
             "game_port_bound": any(e.port == record.config.port for e in sockets),
+            "query_socket_bound": any(e.port != record.config.port for e in sockets),
             "sockets_readable": bool(sockets) or record.supervisor.pid is None,
             "attempts": [],
             "query_ok": False,

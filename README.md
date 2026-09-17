@@ -146,7 +146,31 @@ tested end to end, and the structure is meant to be built on.
   works unprivileged
 - ~2 GB disk for the shared dedicated-server install
 
-## Quick start
+## Running it
+
+### As a container (TrueNAS, Unraid, plain Docker)
+
+A prebuilt image is published to GitHub's registry by
+[`.github/workflows/publish-image.yml`](.github/workflows/publish-image.yml),
+and [`docker-compose.yaml`](docker-compose.yaml) is ready to paste into a
+TrueNAS custom app. **[docs/truenas.md](docs/truenas.md) is a step-by-step
+walkthrough** that assumes no Docker experience.
+
+```bash
+docker run -d --name vhsm \
+  --network host --cap-add NET_ADMIN \
+  -v /srv/vhsm:/data -e TZ=Europe/Oslo \
+  ghcr.io/josolv/vh-servermanager:latest
+```
+
+Host networking is the default because a Valheim instance needs three UDP
+ports and instances are created from the web UI after the container is already
+running — with bridge networking every new instance would mean editing the
+port list and redeploying. The image is amd64 only, since the Valheim
+dedicated server is an x86_64 binary. Mount `/data`: the server files, worlds,
+backups and mods all live there.
+
+### From source
 
 ```bash
 python3 -m venv .venv
@@ -177,6 +201,8 @@ suite runnable — without downloading the game.
 | `VHSM_SAMPLE_INTERVAL` | `2.0` | Seconds between metric samples |
 | `VHSM_INDEX_TTL` | `3600` | Thunderstore catalogue cache lifetime |
 | `VHSM_FAKE_SERVER` | unset | Use the simulated server |
+| `PUID` / `PGID` | `0` | Container only: own `/data` as this user |
+| `TZ` | UTC | Container only: local time for schedules and timestamps |
 
 CLI flags `--host`, `--port`, `--data-root`, `--fake-server` and `--reload`
 override these.

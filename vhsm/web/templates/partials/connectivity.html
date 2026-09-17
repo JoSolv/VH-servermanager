@@ -1,5 +1,23 @@
 {# What a Valheim client sees when it probes this server. #}
-<div class="alert {{ 'ok' if probe.query_ok else 'error' }}" style="margin-top:12px">
+{% if probe.crossplay and not probe.query_ok %}
+  <div class="alert info" style="margin-top:12px">
+    <strong>Crossplay is on for this server.</strong>
+    A crossplay server reaches players through Microsoft's PlayFab relay and is joined
+    by its <em>join code</em>, not by address — so it needs no port forwarding and there
+    is usually no Steam query socket to answer here. A silent query port is expected in
+    this mode and does not mean the server is unreachable.
+    {% if probe.game_port_bound %}
+      The process is holding UDP {{ probe.game_port }}, so it is up and listening.
+    {% endif %}
+    <br><span class="subtle">
+      Turn crossplay off in the configuration if you want the Steam server browser and
+      these checks to work the usual way.
+    </span>
+  </div>
+{% endif %}
+
+<div class="alert {{ 'ok' if probe.query_ok else ('info' if probe.crossplay else 'error') }}"
+     style="margin-top:12px">
   {% if probe.query_ok %}
     <strong>Query socket answered on {{ probe.answered_on }}.</strong>
     A client sees “{{ probe.server_name }}”, {{ probe.players }}/{{ probe.max_players }} players,
@@ -16,9 +34,13 @@
     <strong>No query socket answered.</strong>
     {% if probe.status != 'running' %}
       The server is {{ probe.status }} — start it and try again.
+    {% elif probe.game_port_bound %}
+      The process <strong>is</strong> holding UDP {{ probe.game_port }}, so the server is up.
+      Direct joins on that port carry Valheim's own protocol, while the listing's name,
+      players and version come from the query socket — which is what did not answer.
     {% else %}
-      Direct joins on {{ probe.game_port }} can still work: that port carries Valheim's own
-      protocol, while the listing's name, players and version come from the query socket.
+      The process is not holding UDP {{ probe.game_port }} either, so the server is not
+      listening at all.
     {% endif %}
   {% endif %}
 
