@@ -40,7 +40,11 @@ class InstanceConfig:
     world: str = "Dedicated"
     password: str = ""
     port: int = 2456
-    public: bool = False
+    #: Advertised in the Valheim server browser. Defaults on, because a server
+    #: that is not listed looks broken from the outside -- reachable, joinable
+    #: by address, and absent from the list -- with nothing to say why.
+    #: Instances saved earlier keep whatever is in their instance.json.
+    public: bool = True
     crossplay: bool = False
     preset: str = ""
     modifiers: dict[str, str] = field(default_factory=dict)

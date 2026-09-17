@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from ..instance import MODIFIER_KEYS, PRESETS, InstanceConfig, ValidationError
 from ..mods.cache import cache_size
 from ..manager import ManagerError
+from ..diagnostics import check_libraries, package_for
 from ..steam import server_status
 from .templating import TEMPLATES
 
@@ -226,6 +227,8 @@ async def settings_page(request: Request):
         "settings.html",
         status=server_status(settings),
         settings=settings,
+        libraries=check_libraries(settings).to_dict(),
+        package_for=package_for,
         cache_bytes=cache_size(settings.cache_dir),
         index_count=manager.index.count,
         task=manager.job,

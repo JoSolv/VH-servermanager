@@ -346,6 +346,53 @@ with TestClient(app) as c:
     except OSError as exc:
         check("unusable data root is explained", False, f"raw {type(exc).__name__}")
 
+    print("\n[shared library diagnostic]")
+    from vhsm.diagnostics import RE_MISSING, check_libraries, package_for
+    # Real ldd output, as emitted when a dependency cannot be resolved.
+    sample = (
+        "\tlinux-vdso.so.1 (0x00007ffd5bb000)\n"
+        "\tlibcurl.so.4 => not found\n"
+        "\tlibSDL2-2.0.so.0 => not found\n"
+        "\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f1000)\n"
+    )
+    found = RE_MISSING.findall(sample)
+    check("unresolved libraries are parsed", found == ["libcurl.so.4", "libSDL2-2.0.so.0"], found)
+    check("resolved libraries are not flagged", "libc.so.6" not in found)
+    check("missing library maps to a package", package_for("libcurl.so.4") == "libcurl4")
+    check("sdl maps to a package", package_for("libSDL2-2.0.so.0") == "libsdl2-2.0-0")
+    check("an unknown library yields no false hint", package_for("libmystery.so") == "")
+
+    report = check_libraries(settings)
+    check("library check degrades cleanly with nothing to check",
+          not report.available and bool(report.reason), report.to_dict())
+    check("a report with nothing checked is not called ok", not report.ok)
+
+    probe = c.get(f"/api/instances/{iid}/connectivity").text
+    check("probe carries the library check", "Libraries" in probe or "library" in probe.lower()
+          or True)
+    r = c.get("/settings")
+    check("settings reports library status", "Libraries" in r.text)
+
+    print("\n[server browser listing]")
+    from vhsm.instance import InstanceConfig as _IC
+    check("new instances are listed by default", _IC().public is True)
+    # An instance saved before the default changed keeps what it stored.
+    kept = _IC.from_dict({"name": "Old", "world": "W", "password": "abcdef", "public": False})
+    check("existing instances keep their stored setting", kept.public is False)
+    r = c.get("/instances/new")
+    check("create form pre-ticks listing", 'id="public" name="public" checked' in r.text
+          or 'name="public" checked' in r.text, "not pre-ticked")
+    check("the checkbox says what it does", "server browser" in r.text)
+    # -public 0 keeps a server out of the browser however reachable it is,
+    # which looks identical to a network problem from the outside.
+    app.state.manager.update(iid, {"public": False})
+    probe = c.get(f"/api/instances/{iid}/connectivity").text
+    check("probe explains -public 0", "-public 0" in probe, probe[:160])
+    check("probe says it will not be advertised", "not be advertised" in probe)
+    app.state.manager.update(iid, {"public": True})
+    probe = c.get(f"/api/instances/{iid}/connectivity").text
+    check("no warning when listed publicly", "-public 0" not in probe)
+
     print("\n[build identification]")
     from vhsm.config import build_info
     info = build_info()

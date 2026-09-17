@@ -24,7 +24,8 @@
   <div class="meta">
     World <strong>{{ config.world }}</strong> &middot; port {{ config.port }}
     &middot; <span data-f="version" title="Version reported by the running server">{{ record.version or '—' }}</span>
-    {% if config.public %}&middot; <span class="tag">public</span>{% endif %}
+    {% if config.public %}&middot; <span class="tag">listed</span>
+    {% else %}&middot; <span class="tag upd" title="Not advertised in the Valheim server browser; players must add it by address">unlisted</span>{% endif %}
     {% if config.crossplay %}&middot; <span class="tag">crossplay</span>{% endif %}
     {% if config.mods_enabled %}&middot; <span class="tag dep">modded</span>{% endif %}
   </div>

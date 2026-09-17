@@ -19,6 +19,7 @@ from . import archive as archive_mod
 from . import backups as backups_mod
 from . import worlds as worlds_mod
 from .config import Settings, settings as default_settings
+from .diagnostics import check_libraries
 from .instance import InstanceConfig, InstanceLayout, ValidationError
 from .mods.profile import ModProfile
 from .mods.thunderstore import ThunderstoreIndex
@@ -958,6 +959,9 @@ class InstanceManager:
             "sockets_readable": bool(sockets) or record.supervisor.pid is None,
             "attempts": [],
             "query_ok": False,
+            # A silently unresolved steamclient.so dependency looks exactly
+            # like a firewall problem from the outside, so it is checked here.
+            "libraries": check_libraries(self.settings).to_dict(),
         }
 
         for candidate in query_candidates(record.supervisor.pid, record.config.port)[:4]:

@@ -6,6 +6,11 @@ FROM python:3.11-slim-bookworm
 
 # steamcmd itself is a 32-bit binary, hence the i386 architecture and
 # lib32gcc-s1; the rest are what the 64-bit Valheim server links against.
+# libcurl4 and libsdl2 are here because Steam's steamclient.so is loaded at
+# runtime and a missing dependency there fails silently -- the game runs and
+# accepts connections while Steam never initialises, so the query port stays
+# quiet and the server never appears in the browser. The library check on the
+# Settings page reports anything still unresolved.
 # nftables is optional and only used for per-instance network counters.
 # gosu drops privileges cleanly when PUID/PGID are set (setpriv lives in
 # util-linux-extra on bookworm, not util-linux, so it is not a safe default).
@@ -17,8 +22,11 @@ RUN dpkg --add-architecture i386 \
       ca-certificates \
       lib32gcc-s1 \
       libatomic1 \
+      libcurl4 \
       libpulse0 \
+      libsdl2-2.0-0 \
       libstdc++6 \
+      procps \
       zlib1g \
       nftables \
       tzdata \

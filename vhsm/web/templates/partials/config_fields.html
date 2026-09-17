@@ -28,7 +28,10 @@
 <div class="row" style="gap:24px; margin-bottom:14px">
   <div class="check">
     <input type="checkbox" id="public" name="public" {{ 'checked' if config.public }}>
-    <label for="public">List publicly</label>
+    <label for="public">
+      List in the server browser
+      <span class="muted">— off means players must add it by address; needs a password</span>
+    </label>
   </div>
   <div class="check">
     <input type="checkbox" id="crossplay" name="crossplay" {{ 'checked' if config.crossplay }}>

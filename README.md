@@ -306,6 +306,21 @@ name to match the folder exactly — it is case-sensitive. Access lists go in
 `<data_root>/instances/<id>/saves/` as `adminlist.txt`, `bannedlist.txt` and
 `permittedlist.txt`.
 
+### If a server does not appear in the server browser
+
+Check **List in the server browser** on the instance first. Without it the
+server launches with `-public 0` and is never advertised: it runs, it accepts
+players who type its address, and it is absent from the list — which is
+indistinguishable from a network problem unless you know to look. New
+instances default to listed; older ones keep what they were saved with, and
+the connectivity probe calls it out.
+
+The manager also checks that the server's shared libraries resolve, because
+Steam's `steamclient.so` is loaded at run time and a missing dependency there
+fails silently in the same shape: the game runs while Steam never initialises,
+so the query port stays quiet and the server never registers. **Settings**
+reports anything unresolved, with the Debian package that provides it.
+
 ### If a server shows as unreachable in the client
 
 A server's listing — its name, player count and version — comes from the

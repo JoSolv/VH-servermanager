@@ -11,7 +11,32 @@
     <tr><th>Server</th><td>{% if status.server_installed %}installed ({{ status.install_size | human_bytes }}){% else %}<span class="muted">not installed</span>{% endif %} &middot; <code>{{ status.server_path }}</code></td></tr>
     <tr><th>Disk free</th><td>{{ status.disk_free | human_bytes }}</td></tr>
     <tr><th>Mode</th><td>{% if status.fake_server %}<strong>development</strong> (simulated server){% else %}production{% endif %}</td></tr>
+    <tr>
+      <th>Libraries</th>
+      <td>
+        {% if not libraries.available %}
+          <span class="muted">{{ libraries.reason }}</span>
+        {% elif libraries.ok %}
+          <span class="tag ok-tag">all resolve</span>
+          <span class="muted">checked {{ libraries.checked | join(', ') }}</span>
+        {% else %}
+          <span class="tag upd">missing</span>
+          {% for lib in libraries.all_missing %}
+            <code>{{ lib }}</code>{% if package_for(lib) %}
+              <span class="muted">({{ package_for(lib) }})</span>{% endif %}{% if not loop.last %}, {% endif %}
+          {% endfor %}
+        {% endif %}
+      </td>
+    </tr>
   </table>
+  {% if libraries.available and not libraries.ok %}
+    <div class="alert error">
+      Steam loads <code>steamclient.so</code> at run time and a missing dependency there
+      fails silently — the server runs and accepts direct joins while Steam never
+      initialises, so it stays out of the server browser and its query port never answers.
+      Install the packages listed above and restart.
+    </div>
+  {% endif %}
 
   {% include "partials/build_status.html" %}
 

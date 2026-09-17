@@ -188,6 +188,14 @@ container does not have `NET_ADMIN`, or is running as a non-root user via
 PUID/PGID. Everything else works; only the per-instance network graph is
 affected.
 
+**The server is joinable but does not appear in the Valheim server browser.**
+Check **List in the server browser** in the instance's configuration first.
+Without it the server runs with `-public 0`, is never advertised, and players
+have to add it by address — which looks exactly like a firewall or NAT problem
+from the outside. New instances have it on by default; instances created before
+that change kept whatever they were saved with. **Test client visibility** says
+so explicitly when it is off.
+
 **An instance says "up, query silent" or the visibility check finds nothing.**
 The server is running and holding its game port — that part is confirmed from
 the kernel, not guessed. What did not answer is the Steam query socket, which

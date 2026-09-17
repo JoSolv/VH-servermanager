@@ -1,4 +1,29 @@
 {# What a Valheim client sees when it probes this server. #}
+{% if probe.libraries and not probe.libraries.ok and probe.libraries.available %}
+  <div class="alert error" style="margin-top:12px">
+    <strong>The server is missing shared libraries.</strong>
+    Steam's <code>steamclient.so</code> is loaded at run time, and a missing dependency
+    there fails without saying so: the game starts and accepts direct connections while
+    Steam never initialises — so the query port stays silent and the server never appears
+    in the browser. That matches what you are seeing.
+    <ul class="probe-list">
+      {% for file, libs in probe.libraries.missing.items() %}
+        <li><code>{{ file }}</code> needs {{ libs | join(', ') }}</li>
+      {% endfor %}
+    </ul>
+    <span class="subtle">Install the missing libraries in the host or image and restart.</span>
+  </div>
+{% endif %}
+
+{% if not probe.public %}
+  <div class="alert info" style="margin-top:12px">
+    <strong>This server is set to <code>-public 0</code>.</strong>
+    It will not be advertised in the Valheim server browser no matter how reachable it is
+    — players have to add it by address. Turn on <em>List publicly</em> in the
+    configuration below if you want it listed.
+  </div>
+{% endif %}
+
 {% if probe.crossplay and not probe.query_ok %}
   <div class="alert info" style="margin-top:12px">
     <strong>Crossplay is on for this server.</strong>
