@@ -29,7 +29,7 @@ from .steam import (
     update_server,
     write_steam_appid,
 )
-from .supervisor import Status, Supervisor
+from .supervisor import Supervisor
 from .util import read_json, write_json
 
 log = logging.getLogger("vhsm.manager")

@@ -152,14 +152,23 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 ## Tests
 
 ```bash
+.venv/bin/pip install -r requirements-dev.txt   # pyflakes, for the static gate
 .venv/bin/python tests/smoke_test.py
 ```
 
-44 checks covering page rendering, instance creation and validation, the
-start/stop lifecycle, the live-metrics and console websockets, and the whole
-mod flow (search, dependency resolution, disable/enable, dependency-protected
-uninstall, export). Runs against the simulated server, so it needs no network
-and no Steam download.
+66 checks covering page rendering, instance creation and validation, the
+start/stop/restart lifecycle, the live-metrics and console websockets, CPU
+normalisation, version reporting, player detail, every moderation path, the
+connectivity probe, the update endpoints, and the whole mod flow (search,
+dependency resolution, disable/enable, config preservation,
+dependency-protected uninstall, export). Runs against the simulated server, so
+it needs no network and no Steam download.
+
+The suite opens with a pyflakes pass over the whole tree, because compiling a
+module only proves it parses: a name referenced inside a rarely-taken branch
+stays invisible until that branch runs. The suite also creates the shared game
+directory up front, so the code paths that only execute when a real install is
+present are covered rather than skipped.
 
 ## Security
 

@@ -1,0 +1,2 @@
+# Static checks run by tests/smoke_test.py
+pyflakes>=3.2

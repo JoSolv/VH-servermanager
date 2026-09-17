@@ -109,8 +109,6 @@ def player_churn() -> None:
 
 
 def main() -> int:
-    global running
-
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("-name", default="Fake Server")
     parser.add_argument("-world", default="Dedicated")

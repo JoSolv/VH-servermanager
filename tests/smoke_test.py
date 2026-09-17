@@ -20,6 +20,12 @@ from vhsm.mods.thunderstore import Package
 from vhsm.mods.cache import COMPLETE_MARKER
 
 settings = Settings(); settings.ensure_dirs()
+# Create the shared game directory. Production always has one, and several
+# code paths (steam_appid.txt, the launch working directory) are skipped
+# entirely when it is missing -- a gap that once let a NameError reach a
+# release because the fake-server tests never entered those branches.
+settings.game_dir.mkdir(parents=True, exist_ok=True)
+
 app = create_app(settings)
 
 ok = fail = 0
@@ -27,6 +33,31 @@ def check(label, cond, extra=""):
     global ok, fail
     if cond: ok += 1; print(f"  PASS  {label}")
     else:    fail += 1; print(f"  FAIL  {label} {extra}")
+
+
+def lint() -> None:
+    """Catch undefined names and dead imports before anything runs.
+
+    Compiling a module only proves it parses; a name that is only referenced
+    inside a rarely-taken branch stays invisible until that branch runs.
+    """
+    try:
+        from pyflakes.api import checkPath
+        from pyflakes.reporter import Reporter
+    except ImportError:
+        print("  SKIP  pyflakes not installed (pip install -r requirements-dev.txt)")
+        return
+    import io
+    root = Path(__file__).resolve().parent.parent
+    out, err = io.StringIO(), io.StringIO()
+    reporter = Reporter(out, err)
+    problems = 0
+    for path in sorted(root.rglob("*.py")):
+        if ".venv" in path.parts:
+            continue
+        problems += checkPath(str(path), reporter)
+    findings = (out.getvalue() + err.getvalue()).strip()
+    check("static analysis clean", problems == 0, "\n" + findings)
 
 def seed(idx, ns, name, ver, files, deps=()):
     d = settings.cache_dir/f"{ns}-{name}"/ver; d.mkdir(parents=True, exist_ok=True)
@@ -50,6 +81,9 @@ def wait_status(c, iid, want, timeout=25):
         time.sleep(0.25)
     return c.get(f"/api/instances/{iid}").json()
 
+
+print("\n[static]")
+lint()
 
 with TestClient(app) as c:
     idx = app.state.manager.index
@@ -101,6 +135,11 @@ with TestClient(app) as c:
     snap = wait_status(c, iid, "running")
     check("reaches running", snap["status"] == "running", snap["status"])
     check("pid assigned", bool(snap["pid"]))
+    appid = settings.game_dir / "steam_appid.txt"
+    check("steam_appid.txt written on start", appid.is_file())
+    check("steam_appid.txt holds the client id",
+          appid.is_file() and appid.read_text().strip() == "892970",
+          appid.read_text().strip() if appid.is_file() else "missing")
     r = c.post(f"/instances/{iid}/start")
     check("double start reports error", "already" in r.text.lower(), r.text[:80])
 

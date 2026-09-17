@@ -16,7 +16,7 @@ import signal
 import time
 from collections import deque
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Callable
 
 from .config import Settings, VALHEIM_CLIENT_APPID
 from .instance import InstanceConfig, InstanceLayout

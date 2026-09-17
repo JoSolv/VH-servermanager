@@ -17,7 +17,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from ..instance import InstanceConfig
-from ..playerlists import PlayerListError
+from ..playerlists import KICK_BAN_SECONDS, PlayerListError
 from ..mods.cache import cache_size, clear_cache
 from ..mods.profile import ModError
 from ..mods.thunderstore import ThunderstoreError
@@ -445,8 +445,11 @@ async def moderate_player(
         if action == "kick":
             # No RCON and no console input on a stock server: a brief ban is
             # the only way to disconnect someone, and it lifts itself.
-            seconds = lists.kick(player_id)
-            message = f"Kicked {player_id}; the ban lifts automatically in ~20s."
+            lists.kick(player_id)
+            message = (
+                f"Kicked {player_id}; the ban lifts automatically in "
+                f"~{KICK_BAN_SECONDS:.0f}s."
+            )
         elif action == "ban":
             lists.temp_bans.cancel(player_id)
             lists.banned.add(player_id)

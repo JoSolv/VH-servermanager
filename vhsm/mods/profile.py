@@ -12,13 +12,13 @@ import shutil
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
 from ..instance import InstanceLayout
 from ..util import read_json, write_json
 from . import rules
 from .bepinex import BEPINEX_PACKAGE
-from .cache import ensure_cached, entry_path, is_cached
+from .cache import ensure_cached
 from .thunderstore import (
     PackageVersion,
     ThunderstoreError,

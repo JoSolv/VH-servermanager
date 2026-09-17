@@ -18,7 +18,7 @@ from typing import AsyncIterator, Callable
 
 import httpx
 
-from .config import Settings, VALHEIM_SERVER_APPID
+from .config import Settings, VALHEIM_CLIENT_APPID, VALHEIM_SERVER_APPID
 
 STEAMCMD_URL = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz"
 ProgressHook = Callable[[str], None]
