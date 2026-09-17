@@ -27,7 +27,9 @@
 </main>
 
 <footer class="footer">
-  <span>vhsm {{ version | default('0.1.0') }}</span>
+  <span title="{{ vhsm_build.source }}{% if vhsm_build.built_at %}, built {{ vhsm_build.built_at }}{% endif %}">
+    vhsm {{ vhsm_build.version }}{% if vhsm_build.short_commit %} &middot; {{ vhsm_build.short_commit }}{% endif %}
+  </span>
   <span id="host-summary" class="muted"></span>
 </footer>
 </body>

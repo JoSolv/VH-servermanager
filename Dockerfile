@@ -59,6 +59,14 @@ EXPOSE 8080/tcp
 # One instance uses three consecutive UDP ports starting at its game port.
 EXPOSE 2456-2458/udp
 
+# Stamped in by CI so the running container can say which commit it is.
+# Deliberately last: these change every build, and anything below an ARG
+# cannot be cached, so the expensive layers stay above them.
+ARG VHSM_BUILD_SHA=""
+ARG VHSM_BUILD_TIME=""
+ENV VHSM_BUILD_SHA=${VHSM_BUILD_SHA} \
+    VHSM_BUILD_TIME=${VHSM_BUILD_TIME}
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD python -c "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('VHSM_PORT','8080')+'/api/host',timeout=4)" || exit 1
 

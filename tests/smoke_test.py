@@ -346,6 +346,24 @@ with TestClient(app) as c:
     except OSError as exc:
         check("unusable data root is explained", False, f"raw {type(exc).__name__}")
 
+    print("\n[build identification]")
+    from vhsm.config import build_info
+    info = build_info()
+    check("build info reports a version", info["version"], info)
+    check("source checkout is labelled as such",
+          info["source"] == "source checkout", info["source"])
+    os.environ["VHSM_BUILD_SHA"] = "e045c7f50bb942fdb686b33d21ba62beb3af6457"
+    os.environ["VHSM_BUILD_TIME"] = "2026-09-17T16:21:00Z"
+    stamped = build_info()
+    check("a stamped image reports its commit", stamped["short_commit"] == "e045c7f", stamped)
+    check("a stamped image reports its build time", stamped["built_at"], stamped)
+    check("a stamped image is labelled an image", stamped["source"] == "container image")
+    os.environ.pop("VHSM_BUILD_SHA", None)
+    os.environ.pop("VHSM_BUILD_TIME", None)
+    r = c.get("/settings")
+    check("settings shows which build is running", "This manager" in r.text)
+    check("footer carries the version", "vhsm 0.1.0" in c.get("/").text)
+
     print("\n[item 3: steamcmd log export]")
     app.state.manager.job.log("[manager] synthetic line for the export test")
     r = c.get("/api/steamcmd-log")

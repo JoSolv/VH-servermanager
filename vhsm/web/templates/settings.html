@@ -76,6 +76,29 @@
 </div>
 
 <div class="panel">
+  <h2>This manager</h2>
+  <table>
+    <tr><th>Version</th><td>{{ vhsm_build.version }}</td></tr>
+    <tr>
+      <th>Build</th>
+      <td>
+        {% if vhsm_build.commit %}
+          <code>{{ vhsm_build.short_commit }}</code>
+          <span class="muted">built {{ vhsm_build.built_at or 'unknown' }}</span>
+        {% else %}
+          <span class="muted">running from a source checkout</span>
+        {% endif %}
+      </td>
+    </tr>
+  </table>
+  <p class="subtle" style="margin-bottom:0">
+    A container tag like <code>latest</code> moves, so this is the reliable way to tell
+    whether an update actually reached the machine. Compare it against the commit of the
+    build you expected.
+  </p>
+</div>
+
+<div class="panel">
   <h2>Server address</h2>
   <p class="subtle" style="margin-top:0">
     The hostname or IP players connect to. It is shown beside each instance and is what

@@ -14,7 +14,7 @@ import sys
 
 import uvicorn
 
-from vhsm.config import DataRootError, settings
+from vhsm.config import DataRootError, build_info, settings
 
 
 def main() -> int:
@@ -55,6 +55,16 @@ def main() -> int:
             args.host,
         )
 
+    build = build_info()
+    # Printed first so "which build am I running" is answerable from the
+    # container log alone, without trusting an update indicator.
+    logging.info(
+        "vhsm %s (%s%s)",
+        build["version"],
+        build["source"],
+        f", commit {build['short_commit']}, built {build['built_at']}"
+        if build["commit"] else "",
+    )
     logging.info("data root: %s", settings.data_root)
     logging.info("listening on http://%s:%s", args.host, args.port)
 

@@ -118,29 +118,45 @@ VPN.
 
 ## Updating the app
 
-Two things have to happen: a new image has to be **built**, and your NAS has to
-**pull** it. Both are easy to get half-right.
+Two separate things have to happen: a new image has to be **built**, and your
+NAS has to **pull** it.
 
 **1. Build it.** Pushing to any branch builds automatically — watch the
-**Actions** tab until the run goes green. If you want to build without pushing
-anything, use **Actions → Publish container image → Run workflow**.
+**Actions** tab until the run goes green. To build without pushing, use
+**Actions → Publish container image → Run workflow**.
 
 Only the repository's *default* branch updates the `:latest` tag. Other
-branches publish under their own name (`claude-my-branch`), so check which tag
-the green run produced if you are working on a side branch — the compose file
-pulls `:latest`.
+branches publish under their own name (`claude-my-branch`), so if you are
+working on a side branch, check which tag the green run produced — the compose
+file pulls `:latest`.
 
-**2. Pull it.** In TrueNAS: **Apps → vhsm → the three dots → Edit → Save**.
+**2. Pull it.** Either:
 
-The supplied compose file sets `pull_policy: always`, which matters more than
-it looks: without it Docker reuses a tag it already has on disk, so redeploying
-an app pinned to `:latest` gets you the *same* image and nothing appears to
-change. If you wrote your own YAML and updates seem to do nothing, that is why.
+- **Apps → vhsm → Update**, if TrueNAS is offering it. TrueNAS does watch
+  upstream images for custom apps, so this generally works.
+- **Apps → vhsm → the three dots → Edit → Save**, which redeploys. The supplied
+  compose file sets `pull_policy: always`, which matters: without it Docker
+  reuses a tag it already has on disk, so redeploying an app pinned to
+  `:latest` fetches nothing and the update silently does not happen.
 
-Your dataset is untouched either way, so worlds, mods and settings survive.
+### Do not trust the "Update available" column with `latest`
 
-To confirm which build you are actually running, the container logs print the
-image's commit on startup, and **Settings** shows the manager version.
+A moving tag like `latest` does not give TrueNAS a version to compare, only a
+digest, and the indicator is known to get stuck showing "Update available"
+even after a successful update. Treat it as a hint, never as confirmation.
+
+**Check the build instead.** The image stamps in its commit, and the manager
+reports it in two places:
+
+- the container log, on the first line at startup:
+  `vhsm 0.1.0 (container image, commit e045c7f, built 2026-...)`
+- **Settings → This manager**
+
+Compare that commit against the one the green Actions run built. If they match,
+the update landed, whatever the column says. If it says *running from a source
+checkout*, you are not running a built image at all.
+
+Your dataset is untouched by any of this, so worlds, mods and settings survive.
 
 ## If something does not work
 

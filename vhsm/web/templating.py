@@ -12,6 +12,7 @@ from pathlib import Path
 
 from fastapi.templating import Jinja2Templates
 
+from ..config import build_info
 from ..util import human_bytes
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
@@ -65,5 +66,6 @@ def rate(bytes_per_second: float) -> str:
 TEMPLATES.env.filters["human_bytes"] = human_bytes
 TEMPLATES.env.filters["duration"] = duration
 TEMPLATES.env.filters["rate"] = rate
+TEMPLATES.env.globals["vhsm_build"] = build_info()
 TEMPLATES.env.filters["timeago"] = timeago
 TEMPLATES.env.filters["datetime"] = as_datetime

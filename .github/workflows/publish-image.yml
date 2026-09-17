@@ -35,7 +35,9 @@ jobs:
 
       # Image names must be lowercase; repository names need not be.
       - id: name
-        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - id: meta
         uses: docker/metadata-action@v5
@@ -53,6 +55,12 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          # Lets the running container report which commit it is, which is the
+          # only reliable answer to "did my update actually land" when the tag
+          # being pulled is mutable.
+          build-args: |
+            VHSM_BUILD_SHA=${{ github.sha }}
+            VHSM_BUILD_TIME=${{ steps.name.outputs.built_at }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

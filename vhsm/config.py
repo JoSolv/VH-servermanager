@@ -16,6 +16,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import __version__
+
 #: Steam app id of the Valheim *dedicated server*.
 VALHEIM_SERVER_APPID = "896660"
 #: Steam app id of the Valheim *client*. The server binary refuses to boot
@@ -24,6 +26,24 @@ VALHEIM_CLIENT_APPID = "892970"
 
 #: Thunderstore community slug used to build API urls.
 THUNDERSTORE_COMMUNITY = "valheim"
+
+
+def build_info() -> dict[str, str]:
+    """Which build of the manager this actually is.
+
+    A mutable tag like ``:latest`` makes "did my update land?" genuinely hard
+    to answer from the outside, so the image stamps its commit and build time
+    in and they are shown in the UI and logged at startup. Running from a
+    source checkout leaves them blank, which is itself the answer.
+    """
+    commit = os.environ.get("VHSM_BUILD_SHA", "").strip()
+    return {
+        "version": __version__,
+        "commit": commit,
+        "short_commit": commit[:7],
+        "built_at": os.environ.get("VHSM_BUILD_TIME", "").strip(),
+        "source": "container image" if commit else "source checkout",
+    }
 
 
 class DataRootError(RuntimeError):
