@@ -197,7 +197,6 @@ class InstanceRecord:
             "public": config.public,
             "crossplay": config.crossplay,
             "mods_enabled": config.mods_enabled,
-            "autostart": config.autostart,
             "status": supervisor.status.value,
             "operation": self.operation_name if self.busy else "",
             "pid": supervisor.pid,
@@ -488,15 +487,6 @@ class InstanceManager:
                 await record.operation
         record.operation_name = ""
 
-    async def start_autostart(self) -> None:
-        for record in self.records:
-            if not record.config.autostart:
-                continue
-            try:
-                await self.start(record.config.id)
-            except (RuntimeError, ValidationError) as exc:
-                log.warning("autostart failed for %s: %s", record.config.name, exc)
-
     async def shutdown_all(self) -> None:
         for record in self.records:
             await self._cancel_operation(record)
@@ -680,8 +670,6 @@ class InstanceManager:
         config.id = uuid.uuid4().hex[:12]
         config.name = self._unique_name((name or info.name).strip() or "Imported server")
         config.port = self._free_port(config.port)
-        # Never let an import start a server on its own; the operator decides.
-        config.autostart = False
         config.created_at = time.time()
         config.validate()
 

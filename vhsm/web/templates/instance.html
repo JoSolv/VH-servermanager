@@ -38,25 +38,33 @@
 
 <div data-instance="{{ config.id }}">
   <div class="panel">
-    {% include "partials/controls.html" %}
-    <div class="metrics" style="grid-template-columns: repeat(auto-fit, minmax(130px,1fr)); margin-top:14px">
-      <div class="metric"><div class="k">Players</div><div class="v" data-f="players">{{ record.players.count }}</div></div>
-      <div class="metric"><div class="k">Uptime</div><div class="v" data-f="uptime">--</div></div>
+    {# Controls on the left, the process facts nobody acts on kept small on the
+       right: threads and pid are context for the numbers below, not metrics. #}
+    <div class="row spread">
+      {% include "partials/controls.html" %}
+      <span class="procline" data-f="proc"></span>
+    </div>
+    <div class="metrics wide">
       <div class="metric">
-        <div class="k">CPU</div><div class="v" data-f="cpu">--</div>
-        <div class="sub muted" data-f="cpu-cores">&nbsp;</div>
+        <div class="k"><span>Players</span></div>
+        <div class="v"><span data-f="players">{{ record.players.count }}</span><span
+             class="unit" data-f="players-max"></span></div>
+      </div>
+      <div class="metric">
+        <div class="k"><span>Uptime</span></div>
+        <div class="v" data-f="uptime">--</div>
+      </div>
+      <div class="metric">
+        <div class="k"><span>CPU</span><span class="unit" data-f="cpu-cores"></span></div>
+        <div class="v" data-f="cpu">--</div>
         <div class="meter" data-meter="cpu"><span></span></div>
       </div>
       <div class="metric">
-        <div class="k">Memory</div><div class="v" data-f="mem">--</div>
+        <div class="k"><span>Memory</span></div>
+        <div class="v" data-f="mem">--</div>
         <div class="meter" data-meter="mem"><span></span></div>
       </div>
-      <div class="metric"><div class="k">Threads</div><div class="v" data-f="threads">--</div></div>
-      <div class="metric"><div class="k">PID</div><div class="v" data-f="pid">--</div></div>
     </div>
-    <svg class="spark" data-spark="cpu" viewBox="0 0 100 30" preserveAspectRatio="none" style="margin-top:10px">
-      <polyline points=""></polyline>
-    </svg>
   </div>
 
   <div class="two-col">
@@ -71,14 +79,13 @@
       <div class="tablewrap">
         <table class="players">
           <thead>
-            <tr><th>Player</th><th>Id</th><th>Playtime</th><th>Flags</th><th>Actions</th></tr>
+            <tr><th>Player</th><th>Id</th><th>Playtime</th><th>Actions</th></tr>
           </thead>
           <tbody data-players-body>
-            <tr><td colspan="5" class="muted">Nobody connected</td></tr>
+            <tr><td colspan="4" class="muted">Nobody connected</td></tr>
           </tbody>
         </table>
       </div>
-      </p>
     </div>
   </div>
 </div>
@@ -86,6 +93,11 @@
 <div id="backups" hx-get="/api/instances/{{ config.id }}/backups"
      hx-trigger="load" hx-swap="outerHTML">
   <div class="panel empty">Loading backups…</div>
+</div>
+
+<div id="transfer" hx-get="/api/instances/{{ config.id }}/transfer"
+     hx-trigger="load" hx-swap="outerHTML">
+  <div class="panel empty">Loading transfer…</div>
 </div>
 
 <div id="players" hx-get="/api/instances/{{ config.id }}/players"
@@ -96,12 +108,17 @@
 <details class="section" data-remember="configuration">
   <summary>
     <span class="sec-title">Configuration</span>
-    <span class="sec-note">port {{ config.port }} &middot; {{ config.world }}</span>
+    {# The rules are what people actually come here to check; the port and world
+       are already in the header two panels up. #}
+    <span class="sec-note">{{ config | rules_note }}</span>
   </summary>
   <div class="section-body">
     <form method="post" action="/instances/{{ config.id }}/edit">
       {% if status in ('running', 'starting', 'stopping') %}
-        <div class="alert info">The server is running. Most changes apply after a restart, and the port cannot be changed.</div>
+        <div class="alert info">
+          The server is running. Most changes apply on restart, and the port can't be
+          changed until it stops.
+        </div>
       {% endif %}
       {% include "partials/config_fields.html" %}
       <button class="primary" type="submit">Save changes</button>

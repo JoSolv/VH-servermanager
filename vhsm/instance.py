@@ -53,7 +53,6 @@ class InstanceConfig:
     backup_short: int = 7200
     backup_long: int = 43200
     extra_args: str = ""
-    autostart: bool = False
     mods_enabled: bool = False
     #: Minutes between automatic rollback snapshots; 0 turns them off. These
     #: are the manager's own snapshots, separate from Valheim's backups.
