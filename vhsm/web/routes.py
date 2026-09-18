@@ -167,7 +167,7 @@ async def lifecycle(request: Request, instance_id: str, action: str):
 
     if action == "delete":
         form = dict(await request.form())
-        await manager.delete(instance_id, remove_files=form.get("remove_files") is not None)
+        await manager.delete(instance_id, remove_files=True)
         return HTMLResponse("", headers={"HX-Redirect": "/"})
 
     try:

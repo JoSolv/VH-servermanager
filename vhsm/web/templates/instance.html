@@ -116,16 +116,13 @@
 <details class="section" data-remember="configuration">
   <summary>
     <span class="sec-title">Configuration</span>
-    {# The rules are what people actually come here to check; the port and world
-       are already in the header two panels up. #}
     <span class="sec-note">{{ config | rules_note }}</span>
   </summary>
   <div class="section-body">
     <form method="post" action="/instances/{{ config.id }}/edit">
       {% if status in ('running', 'starting', 'stopping') %}
-        <div class="alert info">
-          The server is running. Most changes apply on restart, and the port can't be
-          changed until it stops.
+        <div class="alert important">
+          The server is running. Changes apply on restart.
         </div>
       {% endif %}
       {% include "partials/config_fields.html" %}
@@ -138,13 +135,9 @@
   <summary><span class="sec-title">Danger zone</span></summary>
   <div class="section-body">
   <form hx-post="/instances/{{ config.id }}/delete"
-        hx-confirm="Delete {{ config.name }}? This stops the server first."
+        hx-confirm="Delete {{ config.name }}? The attached world will also be deleted."
         hx-target="body">
-    <div class="check">
-      <input type="checkbox" id="remove_files" name="remove_files">
-      <label for="remove_files">Also delete world saves and installed mods from disk</label>
-    </div>
-    <button class="danger" type="submit">Delete instance</button>
+    <button class="danger" type="submit"> Delete instance</button>
   </form>
   </div>
 </details>

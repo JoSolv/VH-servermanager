@@ -11,6 +11,7 @@
         <summary aria-label="More actions for {{ config.name }}"
                  title="More actions">&vellip;</summary>
         <div class="menu-body">
+          <a href="/instances/{{ config.id }}">Details</a>
           <a href="/instances/{{ config.id }}/mods">Manage mods</a>
           <a href="/api/instances/{{ config.id }}/export">Export server</a>
           <button type="button"
@@ -18,6 +19,12 @@
                   hx-target="#dashboard-note" hx-swap="innerHTML"
                   hx-confirm="Clone {{ config.name }}? The copy gets the same world, players, mods and backups, its own port, and is left stopped.">
             Clone server
+          </button>
+          <button type="button"
+                  hx-post="/instances/{{ config.id }}/delete"
+                  hx-target="body"
+                  hx-confirm="Delete {{ config.name }}? The attached world will also be deleted.">
+            <span style="color:red">Delete server</span>
           </button>
         </div>
       </details>
@@ -40,9 +47,8 @@
   </div>
 
   <div class="meta">
-    World <strong>{{ config.world }}</strong> &middot; port {{ config.port }}
-    &middot; <span data-f="version" title="Version reported by the running server">{{ record.version or '—' }}</span>
-    {% if config.public %}&middot; <span class="tag">listed</span>
+    v. <span data-f="version" title="Version reported by the running server">{{ record.version or '—' }}</span>
+    {% if config.public %} <span class="tag">listed</span>
     {% else %}&middot; <span class="tag upd" title="Not advertised in the Valheim server browser; players must add it by address">unlisted</span>{% endif %}
     {% if config.crossplay %}&middot; <span class="tag">crossplay</span>{% endif %}
     {% if config.mods_enabled %}&middot; <span class="tag dep">modded</span>{% endif %}
@@ -75,14 +81,6 @@
     </div>
   </div>
 
-  <div class="metric">
-    <div class="k">Network</div>
-    <div class="v" data-f="net" style="font-size:14px">--</div>
-  </div>
-
   {% include "partials/controls.html" %}
 
-  <div class="row">
-    <a class="btn small" href="/instances/{{ config.id }}">Details</a>
-  </div>
 </article>

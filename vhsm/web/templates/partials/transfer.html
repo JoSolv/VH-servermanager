@@ -1,23 +1,15 @@
-{# Moving a *world* in and out of this instance -- the Valheim save on its own.
-   Configuration, players, access lists and mods are untouched by everything
-   here; moving the whole server is on the dashboard, under Transfer servers.
-
-   One import field takes either shape a world arrives in: a zip, or the world
-   folder exactly as it sits on the other server. #}
 {% set has_world = backups.live.exists %}
 <div id="transfer" hx-target="this" hx-swap="outerHTML">
  <details class="section" data-remember="transfer">
   <summary>
     <span class="sec-title">Transfer world</span>
-    <span class="sec-note">import &middot; export</span>
   </summary>
   <div class="section-body">
     {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
     {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
     {% if backups.running %}
-      <div class="alert info">
-        The server is running, so importing is disabled: it holds the world in memory
-        and would overwrite the imported one at its next autosave. Stop it first.
+      <div class="alert error">
+        Importing is disabled while server is running.
       </div>
     {% endif %}
 
@@ -26,15 +18,11 @@
         <h3>Import world</h3>
         <p class="hint">
           Bring in a world from another server or from single-player &mdash; zipped or
-          as-is. Only the world changes: this server's configuration, players and mods
-          stay exactly as they are.
+          as-is. Only the world changes: this server's configuration, players and mods will be unchanged.
         </p>
         {% if has_world %}
           <div class="alert info">
-            <strong>{{ backups.world }}</strong> already exists here, so importing
-            <em>replaces</em> it. You will be asked to confirm, and the world as it
-            stands is snapshotted first so it can be rolled back to under
-            <em>Backups</em>.
+            A world already exists on this server, importing a new one <em>replaces</em> it.
           </div>
         {% endif %}
         <form hx-post="/api/instances/{{ record.config.id }}/world/upload"
@@ -62,10 +50,6 @@
             </button>
             <span class="spinner">uploading…</span>
           </div>
-          <p class="hint" style="margin:10px 0 0">
-            Drop the world folder here to send it as-is, or browse for a
-            <code>.zip</code> of it.
-          </p>
         </form>
         <div class="dropnote">Drop the world folder to import it</div>
       </section>
@@ -73,18 +57,16 @@
       <section class="transfer-half">
         <h3>Export world</h3>
         <p class="hint">
-          Download <strong>{{ backups.world }}</strong> as a zip of its world folder
-          &mdash; the save on its own, ready to import into another instance or to play
-          in single-player.
+          Download <strong>{{ backups.world }}</strong> as a zip.
         </p>
         {% if has_world %}
-          <p class="subtle" style="margin-top:0">
+          <p class="subtle" style="margin-top:52px">
             {{ backups.live.size | human_bytes }} &middot;
             {{ backups.live.file_count }} files &middot;
             last written {{ backups.live.modified | timeago }}
           </p>
           <a class="btn primary" href="/api/instances/{{ record.config.id }}/world/export">
-            Download world
+            Export world
           </a>
         {% else %}
           <div class="alert info" style="margin-bottom:0">
@@ -93,10 +75,7 @@
             import one on the left.
           </div>
         {% endif %}
-        <p class="hint" style="margin-bottom:0">
-          To move the whole server &mdash; players, mods, backups and all &mdash; use
-          <a href="/#transfer-instances">Transfer servers</a> on the dashboard.
-        </p>
+
       </section>
     </div>
   </div>

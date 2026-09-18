@@ -22,12 +22,6 @@
     {{ build.latest }}). <a href="/settings">Update it from the Settings page</a>.
   </div>
 {% endif %}
-{% if not net_available %}
-  <div class="alert info">
-    Per-instance network accounting is off &mdash; {{ net_reason or 'nftables is unavailable' }}.
-    Host-wide traffic is still shown below.
-  </div>
-{% endif %}
 
 <div class="panel" data-host>
   <div class="hoststrip">
@@ -38,16 +32,12 @@
     </div>
     <div class="stat">
       <div class="k">Host memory</div>
-      <div class="v" style="font-size:15px" data-f="host-mem">--</div>
+      <div class="v" data-f="host-mem">--</div>
       <div class="meter" data-meter="host-mem"><span></span></div>
     </div>
     <div class="stat">
-      <div class="k">Load average</div>
-      <div class="v" style="font-size:16px" data-f="host-load">--</div>
-    </div>
-    <div class="stat">
       <div class="k">Host network</div>
-      <div class="v" style="font-size:14px" data-f="host-net">--</div>
+      <div class="v" data-f="host-net">--</div>
     </div>
     <div class="stat">
       <div class="k">Instances</div>
@@ -62,8 +52,7 @@
 <div class="page-head">
   <h1>Instances</h1>
   <div class="row">
-    <a class="btn" href="#transfer-instances">Import / export</a>
-    <a class="btn primary" href="/instances/new">+ New instance</a>
+    <a class="btn primary" href="/instances/new" title="Create new valheim server">+</a>
   </div>
 </div>
 
@@ -81,13 +70,10 @@
 {# One place for moving whole servers in and out. A world on its own is moved
    from the instance that owns it, under Transfer world. #}
 <div class="panel" id="transfer-instances">
-  <h2>Transfer servers</h2>
+  <h2>Import/Export server</h2>
   <p class="subtle" style="margin-top:0">
     A server archive is the whole instance &mdash; configuration, world, access lists,
-    the player roster, mods and snapshots &mdash; so importing one gives you a clone of
-    the server it came from. An import gets a fresh identity, and its name and port move
-    aside if they are already taken, so a server can be imported alongside itself. It is
-    never started automatically.
+    the player roster, mods and snapshots.
   </p>
 
   <div class="transfer">
