@@ -20,14 +20,16 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.background import BackgroundTask
 
-from ..instance import InstanceConfig, ValidationError
+from ..instance import InstanceConfig, InstanceLayout, ValidationError
 from ..manager import ManagerError
 from ..playerlists import KICK_BAN_SECONDS, PlayerListError
 from ..archive import ArchiveError, SUFFIX, extract_zip
 from ..backups import BackupError
 from ..worlds import WorldError
 from ..mods.cache import cache_size, clear_cache
-from ..mods.profile import ModError
+from ..mods import config as modconfig
+from ..mods.config import ConfigError
+from ..mods.profile import InstalledMod, ModError
 from ..mods.thunderstore import ThunderstoreError
 from ..monitor.metrics import host_metrics
 from ..steam import server_status
@@ -47,17 +49,87 @@ def _manager(request: Request):
 
 def _mods_partial(request: Request, instance_id: str, message: str = "", error: str = "") -> HTMLResponse:
     manager = _manager(request)
+    record = manager.get(instance_id)
     profile = manager.profile(instance_id)
     return TEMPLATES.TemplateResponse(
         request,
         "partials/installed_mods.html",
         {
-            "record": manager.get(instance_id),
+            "record": record,
             "mods": profile.summary(),
             "orphans": [m.package_full_name for m in profile.orphans()],
+            "config_files": config_index(record.layout, profile.mods),
             "message": message,
             "error": error,
         },
+    )
+
+
+def config_index(
+    layout: InstanceLayout, mods: list[InstalledMod]
+) -> dict[str, list[modconfig.ConfigFile]]:
+    """Config files per owning mod, for the Config button on each row.
+
+    Scanning re-reads the config tree, which is a handful of small text files;
+    doing it on every render keeps the button honest about whether the mod has
+    anything to configure yet.
+    """
+    return modconfig.index_by_owner(modconfig.scan(layout, mods))
+
+
+def config_context(
+    request: Request,
+    instance_id: str,
+    *,
+    path: str = "",
+    mode: str = "form",
+    message: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    """Everything the config editor renders: the file list and the open file.
+
+    Returned as a context rather than a response so the full page and the
+    HTMX partial can both build from it.
+    """
+    manager = _manager(request)
+    record = manager.get(instance_id)
+    mods = manager.profile(instance_id).mods
+
+    files = modconfig.scan(record.layout, mods)
+    groups = modconfig.group_by_mod(files, mods)
+
+    selected = next((f for f in files if f.relative == path), None)
+    document = None
+    if selected is not None:
+        try:
+            document = modconfig.read_document(selected.path)
+        except ConfigError as exc:
+            error = error or str(exc)
+    elif path and not error:
+        error = f"{path} is no longer there."
+
+    # A file with nothing parseable in it has nothing to build a form from,
+    # so it opens in the raw editor whatever the caller asked for.
+    if document is not None and not document.structured:
+        mode = "raw"
+
+    return {
+        "record": record,
+        "config": record.config,
+        "groups": groups,
+        "file_count": len(files),
+        "selected": selected,
+        "document": document,
+        "mode": "raw" if mode == "raw" else "form",
+        "running": record.supervisor.status.value in ("starting", "running"),
+        "message": message,
+        "error": error,
+    }
+
+
+def _config_workspace(request: Request, instance_id: str, **kwargs: Any) -> HTMLResponse:
+    return TEMPLATES.TemplateResponse(
+        request, "partials/mod_config.html", config_context(request, instance_id, **kwargs)
     )
 
 
@@ -291,6 +363,181 @@ async def prune_orphans(request: Request, instance_id: str) -> HTMLResponse:
             continue
     message = f"Removed unused dependencies: {', '.join(removed)}." if removed else "No unused dependencies."
     return _mods_partial(request, instance_id, message=message)
+
+
+# --------------------------------------------------------------------------- #
+# per-mod configuration
+# --------------------------------------------------------------------------- #
+def _submitted_values(form: Any, document: "modconfig.ConfigDocument") -> dict[tuple[str, str], str]:
+    """Read the config form back.
+
+    Each rendered entry carries its section and key in hidden fields, so a
+    value is matched to the entry it belongs to rather than to whatever now
+    sits at that position -- the server may have rewritten the file while the
+    form was open. How to read the field is decided from the entry on disk,
+    never from the submission, so a crafted form cannot widen what it may set.
+    """
+    values: dict[tuple[str, str], str] = {}
+    for name in set(form.keys()):
+        if not (name.startswith("s") and name[1:].isdigit()):
+            continue
+        index = name[1:]
+        section = str(form.get(f"s{index}") or "")
+        key = str(form.get(f"n{index}") or "")
+        entry = document.get(section, key) if key else None
+        if entry is None:
+            continue
+        submitted = [str(v) for v in form.getlist(f"v{index}")]
+        if entry.kind == "flags":
+            # A flags entry is a group of checkboxes: none ticked is a real
+            # answer (the empty set), not a missing field.
+            values[(section, key)] = ", ".join(submitted)
+        elif submitted:
+            # Booleans render a hidden "false" ahead of the checkbox, so the
+            # last value submitted is the one the operator actually chose.
+            values[(section, key)] = submitted[-1]
+    return values
+
+
+@router.get("/api/instances/{instance_id}/mods/config/view", response_class=HTMLResponse)
+async def config_view(
+    request: Request, instance_id: str, path: str = "", mode: str = "form"
+) -> HTMLResponse:
+    """The config editor: file list on the left, the open file on the right."""
+    return _config_workspace(request, instance_id, path=path, mode=mode)
+
+
+@router.post("/api/instances/{instance_id}/mods/config/save", response_class=HTMLResponse)
+async def config_save(request: Request, instance_id: str) -> HTMLResponse:
+    form = await request.form()
+    path = str(form.get("path") or "")
+    mode = "raw" if str(form.get("mode") or "") == "raw" else "form"
+    record = _manager(request).get(instance_id)
+
+    try:
+        target = modconfig.resolve_config_path(record.layout, path)
+        document = modconfig.read_document(target)
+    except ConfigError as exc:
+        return _config_workspace(request, instance_id, path=path, mode=mode, error=str(exc))
+
+    if mode == "raw":
+        text = str(form.get("text") or "")
+        if len(text.encode("utf-8")) > modconfig.MAX_EDITABLE_BYTES:
+            return _config_workspace(
+                request, instance_id, path=path, mode=mode, error="That is too much text."
+            )
+        modconfig.write_text(target, modconfig.normalise_submitted(text, document))
+        return _config_workspace(
+            request, instance_id, path=path, mode=mode, message=f"Saved {target.name}."
+        )
+
+    changed, problems = document.apply(_submitted_values(form, document))
+    if changed:
+        modconfig.write_text(target, document.text)
+
+    message = f"Saved {changed} setting(s) in {target.name}." if changed else ""
+    if not changed and not problems:
+        message = "Nothing changed."
+    error = " ".join(problems)
+    if problems:
+        error = f"Kept the previous value for {len(problems)} setting(s): {error}"
+    return _config_workspace(
+        request, instance_id, path=path, mode=mode, message=message, error=error
+    )
+
+
+@router.post("/api/instances/{instance_id}/mods/config/reset", response_class=HTMLResponse)
+async def config_reset(request: Request, instance_id: str) -> HTMLResponse:
+    """Put one setting, or a whole file, back to the values the mod shipped."""
+    form = await request.form()
+    path = str(form.get("path") or "")
+    section = str(form.get("section") or "")
+    key = str(form.get("key") or "")
+    record = _manager(request).get(instance_id)
+
+    try:
+        target = modconfig.resolve_config_path(record.layout, path)
+        document = modconfig.read_document(target)
+    except ConfigError as exc:
+        return _config_workspace(request, instance_id, path=path, error=str(exc))
+
+    if key:
+        entry = document.get(section, key)
+        if entry is None:
+            return _config_workspace(
+                request, instance_id, path=path, error=f"{key} is no longer in this file."
+            )
+        if not entry.has_default:
+            return _config_workspace(
+                request, instance_id, path=path, error=f"{key} does not record a default."
+            )
+        try:
+            changed = document.set_value(entry, entry.default)
+        except ConfigError as exc:
+            return _config_workspace(request, instance_id, path=path, error=str(exc))
+        message = f"{key} reset to {entry.default or 'empty'}." if changed else f"{key} was already default."
+    else:
+        changed = bool(document.reset_to_defaults())
+        message = (
+            f"{target.name} reset to defaults."
+            if changed
+            else f"{target.name} was already all defaults."
+        )
+
+    if changed:
+        modconfig.write_text(target, document.text)
+    return _config_workspace(request, instance_id, path=path, message=message)
+
+
+@router.post("/api/instances/{instance_id}/mods/config/delete", response_class=HTMLResponse)
+async def config_delete(request: Request, instance_id: str) -> HTMLResponse:
+    """Delete a config file so the mod writes a fresh one at the next boot."""
+    form = await request.form()
+    path = str(form.get("path") or "")
+    record = _manager(request).get(instance_id)
+    try:
+        target = modconfig.resolve_config_path(record.layout, path)
+    except ConfigError as exc:
+        return _config_workspace(request, instance_id, error=str(exc))
+    try:
+        target.unlink(missing_ok=True)
+    except OSError as exc:
+        return _config_workspace(request, instance_id, path=path, error=str(exc))
+    return _config_workspace(
+        request,
+        instance_id,
+        message=f"Deleted {target.name}. The mod writes a fresh one the next time the server starts.",
+    )
+
+
+@router.get("/api/instances/{instance_id}/mods/config/download")
+async def config_download(request: Request, instance_id: str, path: str = ""):
+    record = _manager(request).get(instance_id)
+    try:
+        target = modconfig.resolve_config_path(record.layout, path)
+    except ConfigError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not target.is_file():
+        raise HTTPException(404, f"{path} does not exist")
+    return FileResponse(target, filename=target.name, media_type="text/plain")
+
+
+@router.get("/api/instances/{instance_id}/mods/config")
+async def api_config(request: Request, instance_id: str, path: str = "") -> JSONResponse:
+    """The config catalogue as JSON, or one parsed file when *path* is given."""
+    manager = _manager(request)
+    record = manager.get(instance_id)
+    mods = manager.profile(instance_id).mods
+    if not path:
+        return JSONResponse(modconfig.summary(record.layout, mods))
+    try:
+        target = modconfig.resolve_config_path(record.layout, path)
+        document = modconfig.read_document(target)
+    except ConfigError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    payload = document.to_dict()
+    payload["path"] = target.relative_to(modconfig.config_root(record.layout)).as_posix()
+    return JSONResponse(payload)
 
 
 # --------------------------------------------------------------------------- #

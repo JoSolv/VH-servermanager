@@ -1,0 +1,156 @@
+{# The config editor. Files on the left grouped by the mod that owns them, the
+   open file on the right. Every action in here re-renders this whole block,
+   so the list, the badges and the editor can never disagree. #}
+<div id="config-workspace" class="config-workspace" hx-target="#config-workspace" hx-swap="outerHTML">
+  {% set instance_id = record.config.id %}
+
+  <div class="panel configfiles">
+    <div class="row spread" style="margin-bottom:12px">
+      <h2 style="margin:0">Config files</h2>
+      <span class="subtle">{{ file_count }}</span>
+    </div>
+
+    {% if file_count %}
+      <input type="search" class="filter" placeholder="Filter files…" data-filter="#config-groups .cfgfile"
+             aria-label="Filter config files">
+    {% endif %}
+
+    <div id="config-groups">
+      {% for group in groups %}
+        <div class="cfggroup {{ 'empty-group' if not group.files }}">
+          <div class="cfggroup-head">
+            {% if group.icon %}
+              <img src="{{ group.icon }}" alt="" loading="lazy" referrerpolicy="no-referrer">
+            {% else %}<span class="cfggroup-blank"></span>{% endif %}
+            <span class="cfggroup-name">{{ group.name }}</span>
+            {% if not group.enabled %}<span class="tag">disabled</span>{% endif %}
+          </div>
+          {% if group.files %}
+            {% for file in group.files %}
+              <button class="cfgfile {{ 'active' if selected and selected.relative == file.relative }}"
+                      hx-get="/api/instances/{{ instance_id }}/mods/config/view?path={{ file.relative | urlencode }}"
+                      title="{{ file.relative }}">
+                <span class="cfgfile-name">{{ file.name }}</span>
+                <span class="cfgfile-meta">
+                  {% if file.structured %}
+                    {{ file.entry_count }} setting{{ '' if file.entry_count == 1 else 's' }}
+                    {%- if file.modified_count %} &middot; <span class="changed-count">{{ file.modified_count }} changed</span>{% endif %}
+                  {% else %}
+                    {{ file.size | human_bytes }}
+                  {% endif %}
+                </span>
+              </button>
+            {% endfor %}
+          {% else %}
+            <p class="cfggroup-none">No config file yet</p>
+          {% endif %}
+        </div>
+      {% else %}
+        <div class="empty">
+          No mods installed, so there is nothing to configure.
+        </div>
+      {% endfor %}
+    </div>
+
+    {% if groups and not file_count %}
+      <p class="subtle" style="margin-bottom:0">
+        BepInEx writes a mod's config file the first time the server runs with that mod
+        enabled. Start the server once, then come back.
+      </p>
+    {% endif %}
+  </div>
+
+  <div class="panel configeditor">
+    {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
+    {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+    {% if selected and document %}
+      <div class="row spread" style="margin-bottom:6px">
+        <h2 style="margin:0">{{ selected.name }}</h2>
+        <div class="row">
+          {% if document.structured %}
+            <button class="small {{ 'primary' if mode == 'form' }}" type="button"
+                    hx-get="/api/instances/{{ instance_id }}/mods/config/view?path={{ selected.relative | urlencode }}&mode=form">Form</button>
+            <button class="small {{ 'primary' if mode == 'raw' }}" type="button"
+                    hx-get="/api/instances/{{ instance_id }}/mods/config/view?path={{ selected.relative | urlencode }}&mode=raw">Text</button>
+          {% endif %}
+          <a class="btn small" href="/api/instances/{{ instance_id }}/mods/config/download?path={{ selected.relative | urlencode }}">Download</a>
+        </div>
+      </div>
+
+      <div class="subtle" style="margin-bottom:14px">
+        {% if document.plugin_name %}
+          Written by {{ document.plugin_name }}{% if document.plugin_version %} v{{ document.plugin_version }}{% endif %} &middot;
+        {% endif %}
+        <code>BepInEx/config/{{ selected.relative }}</code> &middot; edited {{ selected.modified | timeago }}
+      </div>
+
+      {% if running %}
+        <div class="alert info">
+          The server is running. Saved settings are read at boot, so restart it for them to take effect.
+        </div>
+      {% endif %}
+
+      {% if mode == 'raw' %}
+        <form hx-post="/api/instances/{{ instance_id }}/mods/config/save">
+          <input type="hidden" name="path" value="{{ selected.relative }}">
+          <input type="hidden" name="mode" value="raw">
+          <textarea name="text" class="rawconfig" spellcheck="false" rows="26">{{ document.text }}</textarea>
+          <div class="row spread" style="margin-top:12px">
+            <button class="primary" type="submit">Save file</button>
+            <span class="spinner">saving…</span>
+            {% include "partials/config_danger.html" %}
+          </div>
+        </form>
+      {% else %}
+        <form hx-post="/api/instances/{{ instance_id }}/mods/config/save">
+          <input type="hidden" name="path" value="{{ selected.relative }}">
+          <input type="hidden" name="mode" value="form">
+
+          <div class="row spread cfgtoolbar">
+            <input type="search" class="filter" placeholder="Filter settings…" data-filter=".cfgentry"
+                   aria-label="Filter settings">
+            <span class="subtle">
+              {{ document.entries | length }} setting{{ '' if document.entries | length == 1 else 's' }}
+              {%- if document.modified_count %} &middot; {{ document.modified_count }} away from default{% endif %}
+            </span>
+          </div>
+
+          {% for section, entries in document.numbered_sections %}
+            <details class="section nested cfgsection" open>
+              <summary>{{ section or 'Ungrouped' }} <span class="muted">({{ entries | length }})</span></summary>
+              <div class="section-body">
+                {% for index, entry in entries %}
+                  {% include "partials/config_entry.html" %}
+                {% endfor %}
+              </div>
+            </details>
+          {% endfor %}
+
+          <div class="row spread cfgactions">
+            <div class="row">
+              <button class="primary" type="submit">Save changes</button>
+              <span class="spinner">saving…</span>
+            </div>
+            <div class="row">
+              <button class="small" type="button"
+                      hx-post="/api/instances/{{ instance_id }}/mods/config/reset"
+                      hx-vals='{"path": {{ selected.relative | tojson }}}'
+                      hx-confirm="Put every setting in {{ selected.name }} back to the mod's defaults?">
+                Reset all to defaults
+              </button>
+              {% include "partials/config_danger.html" %}
+            </div>
+          </div>
+        </form>
+      {% endif %}
+    {% elif file_count %}
+      <div class="empty">Pick a config file to edit it.</div>
+    {% else %}
+      <div class="empty">
+        Nothing to configure yet.<br>
+        <span class="subtle">Mods write their config file the first time they load.</span>
+      </div>
+    {% endif %}
+  </div>
+</div>

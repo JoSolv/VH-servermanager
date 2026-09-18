@@ -919,6 +919,98 @@ with TestClient(app) as c:
     check("uninstall ok", "Removed" in r.text)
     check("config survives uninstall", cfg.read_text() == "tuned=1")
 
+    print("\n[mod config]")
+    # Reinstall Jotunn: the config editor needs something to attribute files to.
+    c.post(f"/api/instances/{iid}/mods/install", data={"package_full_name": "ValheimModding-Jotunn"})
+    r = c.get(f"/instances/{iid}/mods/config")
+    check("config editor renders", r.status_code == 200 and "Config files" in r.text)
+    check("a mod with no config says so", "No config file yet" in r.text)
+
+    # BepInEx writes these at boot, so the editor has to read what it finds
+    # rather than what the package shipped.
+    cfgdir = prof/"BepInEx"/"config"; cfgdir.mkdir(parents=True, exist_ok=True)
+    (cfgdir/"com.jotunn.jotunn.cfg").write_text(
+        "## Settings file was created by plugin Jotunn v2.20.0\n"
+        "## Plugin GUID: com.jotunn.jotunn\n\n[General]\n\n"
+        "## Turn the mod on\n# Setting type: Boolean\n# Default value: true\nEnabled = true\n\n"
+        "## How much loot\n# Setting type: Single\n# Default value: 1\n"
+        "# Acceptable value range: From 0 to 10\nLoot = 1\n\n"
+        "## Where it spawns\n# Setting type: String\n# Default value: Meadows\n"
+        "# Acceptable values: Meadows, Swamp, Plains\nBiome = Meadows\n")
+    (cfgdir/"BepInEx.cfg").write_text("[Logging]\nLogLevel = Info\n")
+
+    r = c.get(f"/instances/{iid}/mods/config", params={"mod": "ValheimModding-Jotunn"})
+    check("config file found and attributed", "com.jotunn.jotunn.cfg" in r.text and "3 settings" in r.text)
+    # Jotunn owns two config files here; the button has to open the real one.
+    check("the mod's main config is the one that opened", "Turn the mod on" in r.text)
+    check("boolean became a checkbox", 'type="checkbox"' in r.text)
+    check("bounded number became a slider", 'type="range"' in r.text)
+    check("enum became a dropdown", '<option value="Swamp"' in r.text)
+    check("bepinex.cfg attributed to the pack", "BepInExPack_Valheim" in r.text)
+
+    r = c.post(f"/api/instances/{iid}/mods/config/save", data={
+        "path": "com.jotunn.jotunn.cfg", "mode": "form",
+        "s0": "General", "n0": "Enabled", "v0": ["false", "false"],
+        "s1": "General", "n1": "Loot", "v1": "4.5",
+        "s2": "General", "n2": "Biome", "v2": "Swamp"})
+    saved = (cfgdir/"com.jotunn.jotunn.cfg").read_text()
+    check("form save applied", all(x in saved for x in
+          ("Enabled = false", "Loot = 4.5", "Biome = Swamp")), saved)
+    check("comments and metadata survived the save",
+          "## Turn the mod on" in saved and "# Acceptable value range: From 0 to 10" in saved)
+    check("save reported", "Saved 3 setting" in r.text, r.text[:160])
+
+    r = c.post(f"/api/instances/{iid}/mods/config/save", data={
+        "path": "com.jotunn.jotunn.cfg", "mode": "form",
+        "s0": "General", "n0": "Loot", "v0": "99",
+        "s1": "General", "n1": "Biome", "v1": "Plains"})
+    saved = (cfgdir/"com.jotunn.jotunn.cfg").read_text()
+    check("a value outside its range is refused", "Loot = 4.5" in saved, saved)
+    check("the valid value beside it still saved", "Biome = Plains" in saved)
+    check("the refusal says which and why", "cannot be above 10" in r.text, r.text[:200])
+
+    c.post(f"/api/instances/{iid}/mods/config/reset",
+           data={"path": "com.jotunn.jotunn.cfg", "section": "General", "key": "Loot"})
+    check("one setting resets", "Loot = 1" in (cfgdir/"com.jotunn.jotunn.cfg").read_text())
+    c.post(f"/api/instances/{iid}/mods/config/reset", data={"path": "com.jotunn.jotunn.cfg"})
+    saved = (cfgdir/"com.jotunn.jotunn.cfg").read_text()
+    check("the whole file resets", "Enabled = true" in saved and "Biome = Meadows" in saved, saved)
+
+    r = c.post(f"/api/instances/{iid}/mods/config/save", data={
+        "path": "com.jotunn.jotunn.cfg", "mode": "raw", "text": "[General]\r\nEnabled = false\r\n"})
+    check("raw edit writes the file with unix endings",
+          (cfgdir/"com.jotunn.jotunn.cfg").read_text() == "[General]\nEnabled = false\n",
+          repr((cfgdir/"com.jotunn.jotunn.cfg").read_text()))
+
+    j = c.get(f"/api/instances/{iid}/mods/config").json()
+    check("config catalogue as json",
+          sorted(f["relative"] for f in j["files"]) ==
+          ["BepInEx.cfg", "Jotunn.cfg", "com.jotunn.jotunn.cfg"], j["files"])
+    check("every file names the mod it belongs to",
+          {f["relative"]: f["owner"] for f in j["files"]} == {
+              "BepInEx.cfg": "denikson-BepInExPack_Valheim",
+              "Jotunn.cfg": "ValheimModding-Jotunn",
+              "com.jotunn.jotunn.cfg": "ValheimModding-Jotunn"}, j["files"])
+    j = c.get(f"/api/instances/{iid}/mods/config", params={"path": "BepInEx.cfg"}).json()
+    check("one file as json", j["entries"][0]["key"] == "LogLevel", j)
+    r = c.get(f"/api/instances/{iid}/mods/config/download", params={"path": "BepInEx.cfg"})
+    check("config downloads", r.status_code == 200 and "LogLevel" in r.text)
+
+    # Every path here comes off a query string, so it must not reach outside
+    # the config folder.
+    for bad in ("../../instance.json", "/etc/passwd", "../mods.json"):
+        check(f"traversal refused: {bad}",
+              c.get(f"/api/instances/{iid}/mods/config", params={"path": bad}).status_code == 400)
+    r = c.post(f"/api/instances/{iid}/mods/config/save",
+               data={"path": "../../instance.json", "mode": "raw", "text": "wrecked"})
+    check("traversal refused on save", "outside the config folder" in r.text, r.text[:160])
+    check("instance.json untouched", json.loads((prof/"instance.json").read_text())["id"] == iid)
+
+    r = c.post(f"/api/instances/{iid}/mods/config/delete", data={"path": "com.jotunn.jotunn.cfg"})
+    check("config file deleted", not (cfgdir/"com.jotunn.jotunn.cfg").exists())
+    check("deletion explains what happens next", "writes a fresh one" in r.text)
+    c.post(f"/api/instances/{iid}/mods/ValheimModding-Jotunn/uninstall")
+
     print("\n[teardown]")
     c.post(f"/instances/{iid}/stop")
     snap = wait_status(c, iid, "stopped")

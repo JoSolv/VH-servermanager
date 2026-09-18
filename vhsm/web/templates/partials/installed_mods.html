@@ -17,6 +17,7 @@
           Prune unused
         </button>
       {% endif %}
+      <a class="btn small" href="/instances/{{ record.config.id }}/mods/config">Configure</a>
       <a class="btn small" href="/api/instances/{{ record.config.id }}/mods/export">Export</a>
     </div>
   </div>
@@ -48,6 +49,16 @@
               {% if not mod.enabled %}<span class="tag">disabled</span>{% endif %}
             </div>
             <div class="desc">{{ mod.description or mod.namespace }}</div>
+          </div>
+          <div class="row">
+            {% set owned = (config_files or {}).get(mod.package_full_name) %}
+            {# Straight to this mod's own settings: which file BepInEx wrote
+               them to is the manager's problem, not the operator's. #}
+            <a class="btn small {{ 'disabled-link' if not owned }}"
+               href="/instances/{{ record.config.id }}/mods/config?mod={{ mod.package_full_name | urlencode }}"
+               title="{{ 'Edit this mod\'s settings' if owned else 'No config file yet -- the mod writes one the first time it loads' }}">
+              Config{% if owned %} <span class="muted">({{ owned | length }})</span>{% endif %}
+            </a>
           </div>
           <div class="row" hx-target="#installed-mods" hx-swap="outerHTML">
             <button class="small"
