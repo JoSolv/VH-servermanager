@@ -491,3 +491,108 @@ h3 .h3-note { color: var(--muted); font-weight: 400; font-size: 12.5px; margin-l
 .exportlist .who { min-width: 0; display: flex; flex-direction: column; }
 .exportlist .who .muted { font-size: 12px; }
 .exportlist .btn { flex: none; }
+
+/* ---------- mod config editor ---------- */
+/* File list beside the open file. The list is the navigation, so it stays put
+   while the editor -- which can be hundreds of settings long -- scrolls. */
+.config-workspace { display: grid; gap: 20px; grid-template-columns: 320px minmax(0, 1fr); align-items: start; }
+.config-workspace > * { min-width: 0; }
+@media (max-width: 1000px) { .config-workspace { grid-template-columns: 1fr; } }
+
+.configfiles { position: sticky; top: 72px; max-height: calc(100vh - 110px); overflow-y: auto; }
+@media (max-width: 1000px) { .configfiles { position: static; max-height: 420px; } }
+.configfiles .filter { margin-bottom: 12px; }
+
+.cfggroup { margin-bottom: 14px; }
+.cfggroup:last-child { margin-bottom: 0; }
+.cfggroup-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.cfggroup-head img, .cfggroup-blank {
+  width: 22px; height: 22px; border-radius: 5px; flex: none;
+  background: #0d1014; object-fit: cover;
+}
+.cfggroup-name {
+  font-size: 13px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* A mod with no config file is still listed: "nothing here yet" is the answer
+   to the question the operator came to the page with. */
+.cfggroup.empty-group { opacity: .55; }
+.cfggroup-none { margin: 0 0 0 30px; font-size: 12.5px; color: var(--muted); }
+
+.cfgfile {
+  display: block; width: 100%; text-align: left; margin-bottom: 4px;
+  padding: 7px 10px; border-radius: 6px; font-weight: 500;
+  background: var(--panel-2); border: 1px solid transparent;
+}
+.cfgfile:hover { border-color: var(--accent); }
+.cfgfile.active { border-color: var(--accent); background: #1c2430; }
+.cfgfile-name { display: block; font-size: 13.5px; overflow-wrap: anywhere; }
+.cfgfile-meta { display: block; font-size: 11.5px; color: var(--muted); font-weight: 400; margin-top: 1px; }
+.cfgfile .changed-count { color: var(--accent); }
+
+.cfgtoolbar { align-items: center; gap: 12px; margin-bottom: 4px; }
+.cfgtoolbar .filter { flex: 1; min-width: 160px; max-width: 320px; }
+/* Saving is reachable from anywhere in a config that runs to a hundred
+   settings, so the action row rides the bottom of the viewport. It is opaque
+   because the form scrolls underneath it. */
+.cfgactions {
+  position: sticky; bottom: 0; z-index: 5;
+  margin: 18px -18px -18px; padding: 12px 18px;
+  background: var(--panel); border-top: 1px solid var(--border);
+}
+/* On a stacked, short screen a pinned bar costs more height than it saves. */
+@media (max-width: 1000px) {
+  .cfgactions { position: static; margin: 18px 0 0; padding: 12px 0 0; }
+}
+.cfgsection .section-body { padding-top: 4px; }
+
+.cfgentry {
+  padding: 10px 12px; margin-bottom: 8px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; border-left: 3px solid transparent;
+}
+/* The one thing an operator scanning a long config wants to see at a glance:
+   which settings are no longer what the mod shipped. */
+.cfgentry.changed { border-left-color: var(--accent); }
+.cfgentry-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 2px; }
+.cfgentry-head label { margin: 0; color: var(--text); font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.cfgtype {
+  font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 999px; padding: 0 7px;
+}
+.cfgdesc { margin: 0 0 8px; font-size: 12.5px; color: var(--muted); }
+.cfghint { margin: 6px 0 0; font-size: 11.5px; color: var(--muted); }
+.cfghint code { font-size: 11.5px; }
+.cfgentry .check { margin-bottom: 0; }
+.cfgentry .check label { font-size: 13.5px; font-weight: 500; }
+
+.cfgnumber { display: flex; align-items: center; gap: 12px; }
+.cfgnumber input[type=number] { width: 130px; flex: none; }
+.cfgslider { flex: 1; min-width: 110px; accent-color: var(--accent); }
+.cfgbounds { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+
+.cfgflags { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.cfgflag { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--text); font-size: 13.5px; }
+.cfgflag input { width: auto; }
+
+/* A button that reads as a link: used for per-setting actions that would be
+   too loud as a real button next to the setting's own name. */
+.link-btn {
+  background: none; border: none; padding: 0; margin-left: auto;
+  color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.link-btn:hover { text-decoration: underline; }
+
+.rawconfig {
+  width: 100%; resize: vertical; white-space: pre;
+  font: 12.5px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* Filtered out by the search boxes above the lists. */
+.filtered-out { display: none !important; }
+
+/* An action a mod cannot offer yet -- the link stays visible so the row does
+   not change shape when the mod finally writes its config. */
+.disabled-link { opacity: .4; pointer-events: none; }

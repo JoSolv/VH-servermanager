@@ -1,0 +1,79 @@
+{# One setting. The widget comes from what BepInEx wrote above the line:
+   a checkbox for a Boolean, a bounded number for a range, a dropdown for an
+   enum, tick boxes for a flags enum, and a plain field for everything else.
+   Every entry carries its own section and key so the save matches values to
+   settings by name rather than by position. #}
+{% set field = 'v' ~ index %}
+<div class="cfgentry {{ 'changed' if not entry.is_default }}" data-search="{{ entry.key }} {{ entry.description }}">
+  <input type="hidden" name="s{{ index }}" value="{{ entry.section }}">
+  <input type="hidden" name="n{{ index }}" value="{{ entry.key }}">
+
+  <div class="cfgentry-head">
+    <label for="{{ field }}">{{ entry.key }}</label>
+    {% if entry.setting_type %}<span class="cfgtype">{{ entry.setting_type }}</span>{% endif %}
+    {% if not entry.is_default %}
+      <button class="link-btn" type="button" title="Back to {{ entry.default or 'empty' }}"
+              hx-post="/api/instances/{{ record.config.id }}/mods/config/reset"
+              hx-vals='{"path": {{ selected.relative | tojson }}, "section": {{ entry.section | tojson }}, "key": {{ entry.key | tojson }}}'>
+        reset
+      </button>
+    {% endif %}
+  </div>
+
+  {% if entry.description %}<p class="cfgdesc">{{ entry.description }}</p>{% endif %}
+
+  {% if entry.kind == 'bool' %}
+    <div class="check">
+      {# Unticked checkboxes are not submitted at all, so the hidden field
+         carries the "off" answer and the checkbox overrides it when ticked. #}
+      <input type="hidden" name="{{ field }}" value="false">
+      <input type="checkbox" id="{{ field }}" name="{{ field }}" value="true"
+             {{ 'checked' if entry.value | lower == 'true' }}>
+      <label for="{{ field }}">{{ 'Enabled' if entry.value | lower == 'true' else 'Disabled' }}</label>
+    </div>
+
+  {% elif entry.kind == 'enum' %}
+    <select id="{{ field }}" name="{{ field }}">
+      {% for option in entry.options %}
+        <option value="{{ option }}" {{ 'selected' if option | lower == entry.value | lower }}>{{ option }}</option>
+      {% endfor %}
+      {% if entry.value and (entry.value | lower) not in (entry.options | map('lower') | list) %}
+        <option value="{{ entry.value }}" selected>{{ entry.value }} (not a listed value)</option>
+      {% endif %}
+    </select>
+
+  {% elif entry.kind == 'flags' %}
+    <div class="cfgflags">
+      {% for option in entry.options %}
+        <label class="cfgflag">
+          <input type="checkbox" name="{{ field }}" value="{{ option }}"
+                 {{ 'checked' if option in entry.selected }}>
+          <span>{{ option }}</span>
+        </label>
+      {% endfor %}
+    </div>
+
+  {% elif entry.numeric %}
+    <div class="cfgnumber">
+      <input type="number" id="{{ field }}" name="{{ field }}" value="{{ entry.value }}"
+             step="{{ entry.step }}"
+             {% if entry.minimum %}min="{{ entry.minimum }}"{% endif %}
+             {% if entry.maximum %}max="{{ entry.maximum }}"{% endif %}>
+      {% if entry.minimum and entry.maximum %}
+        {# The slider is a convenience over the same value; only the number
+           field is named, so there is one answer in the submission. #}
+        <input type="range" class="cfgslider" data-syncs="{{ field }}" value="{{ entry.value }}"
+               min="{{ entry.minimum }}" max="{{ entry.maximum }}" step="{{ entry.step }}"
+               aria-label="{{ entry.key }} slider">
+        <span class="cfgbounds">{{ entry.bounds_note }}</span>
+      {% endif %}
+    </div>
+
+  {% else %}
+    <input type="text" id="{{ field }}" name="{{ field }}" value="{{ entry.value }}" spellcheck="false">
+  {% endif %}
+
+  {% if entry.has_default %}
+    <p class="cfghint">Default: <code>{{ entry.default or '(empty)' }}</code></p>
+  {% endif %}
+</div>

@@ -177,6 +177,36 @@ tested end to end, and the structure is meant to be built on.
   profile export/import, and manual `.zip` upload for packages not on
   Thunderstore.
 
+**A config editor for each mod**
+
+BepInEx writes one `.cfg` file per plugin, and the format says more than
+`key = value`: every setting carries its description, its type, its default and
+often the values or the range it accepts. The editor reads all of that and
+builds a real form out of it, the way r2modman's config editor does, so tuning
+a mod is not an SSH session with `vi`.
+
+![mod config](docs/mod-config.png)
+
+- Config files are listed under the mod that owns them, matched by what the
+  package shipped, by the plugin header BepInEx writes, or by the file's name —
+  `com.jotunn.jotunn.cfg` finds Jotunn. A mod with no config file yet is still
+  listed, saying so, because that is the answer to the question you came with.
+- Each setting gets the widget its type asks for: a checkbox for a Boolean, a
+  number field and slider for a bounded number, a dropdown for a list of
+  accepted values, tick boxes for a flags enum, and a text field otherwise.
+  The description and default are shown beside it.
+- Values are checked against the same metadata before they are written, so a
+  number outside its range is refused with a reason instead of being silently
+  reset by the mod at the next boot. One bad field never costs you the rest of
+  your edits.
+- Everything the mod wrote is preserved: saving rewrites only the lines whose
+  values changed, leaving comments, ordering and unknown keys exactly as they
+  were. Settings that differ from the default are marked, and can be put back
+  one at a time or all at once.
+- A raw text mode for anything the form cannot express, a download link, and
+  file deletion for when you want the mod to write a clean one at the next
+  boot.
+
 ## Requirements
 
 - Linux, Python 3.11+
@@ -258,6 +288,7 @@ data/
     saves/                worlds and backups
     logs/console.log
     BepInEx/              this instance's mod profile
+      config/             per-mod settings, what the config editor edits
 ```
 
 One shared game install keeps updates to a single download no matter how many
@@ -272,7 +303,7 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 .venv/bin/python tests/smoke_test.py
 ```
 
-270 checks covering page rendering, instance creation and validation, the
+298 checks covering page rendering, instance creation and validation, the
 start/stop/restart lifecycle, the live-metrics and console websockets, CPU
 normalisation, version reporting, player detail, every moderation path, query
 socket discovery (including a socket bound to a single interface), the
@@ -285,10 +316,12 @@ and the replace-an-existing-world cases, snapshots and rollback of a 1.0 folder
 world and its undo, automatic snapshots and their pruning, the update endpoints
 (including that a failed update still restarts the servers), the player roster
 and its history export, the whitelist defaulting to off, the console log
-download, the server address and reachability probe, and the whole mod flow
+download, the server address and reachability probe, the whole mod flow
 (search, dependency resolution, disable/enable, config preservation,
-dependency-protected uninstall, export). Runs against the simulated server, so
-it needs no network and no Steam download.
+dependency-protected uninstall, export) and the config editor (parsing,
+typed validation, per-setting and whole-file resets, and the path guards on
+every file it touches). Runs against the simulated server, so it needs no
+network and no Steam download.
 
 The suite opens with a pyflakes pass over the whole tree, because compiling a
 module only proves it parses: a name referenced inside a rarely-taken branch
@@ -322,6 +355,13 @@ edit form, as the server needs them on its command line.
   Stop it first if the copy has to be exact.
 - Mod install runs inline in the request; large packages block that request.
   Moving it to a background job with progress in the UI is the natural next step.
+- A mod has no settings to edit until it has loaded once: BepInEx writes the
+  `.cfg` file at boot, so a freshly installed mod shows "no config file yet"
+  until the server has started with it enabled. The editor says so rather than
+  inventing a file the mod would overwrite.
+- Profile export carries the mod list, not the tuned config files, so importing
+  a profile elsewhere starts those mods at their defaults. Packing the config
+  tree into the export (as r2modman's `.r2z` does) is the next step.
 - `.r2x` files exported by r2modman itself are not yet parsed (our own JSON
   export/import is); the importer already understands its `{major, minor, patch}`
   version shape.

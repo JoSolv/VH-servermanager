@@ -575,6 +575,46 @@
     });
   });
 
+  // ----------------------------------------------------- mod config editor
+  // Three small conveniences over the server-rendered form: filter a long
+  // config down to the setting you came for, keep a slider and its number
+  // field in step, and say out loud what a checkbox now means. All delegated
+  // from the body, so they survive every htmx swap of the editor.
+  function applyFilter(box) {
+    var needle = (box.value || "").trim().toLowerCase();
+    document.querySelectorAll(box.dataset.filter).forEach(function (el) {
+      var hay = (el.dataset.search || el.textContent || "").toLowerCase();
+      el.classList.toggle("filtered-out", needle !== "" && hay.indexOf(needle) === -1);
+    });
+    // A section whose every setting is filtered away is just a heading.
+    document.querySelectorAll(".cfgsection").forEach(function (section) {
+      var visible = section.querySelectorAll(".cfgentry:not(.filtered-out)").length;
+      section.classList.toggle("filtered-out", needle !== "" && visible === 0);
+      if (needle !== "" && visible > 0) section.open = true;
+    });
+  }
+
+  document.body.addEventListener("input", function (event) {
+    var el = event.target;
+    if (!el || !el.matches) return;
+    if (el.matches("input.filter[data-filter]")) {
+      applyFilter(el);
+    } else if (el.matches("input[type=range][data-syncs]")) {
+      var number = document.getElementById(el.dataset.syncs);
+      if (number) number.value = el.value;
+    } else if (el.matches(".cfgnumber input[type=number]")) {
+      var slider = el.parentNode.querySelector("input[type=range]");
+      if (slider) slider.value = el.value;
+    }
+  });
+
+  document.body.addEventListener("change", function (event) {
+    var el = event.target;
+    if (!el || !el.matches || !el.matches(".cfgentry .check input[type=checkbox]")) return;
+    var label = el.parentNode.querySelector("label");
+    if (label) label.textContent = el.checked ? "Enabled" : "Disabled";
+  });
+
   // ------------------------------------------------- collapsible sections
   // Sections start closed, and htmx replaces whole panels, so the open ones
   // are remembered per browser rather than reset on every swap.

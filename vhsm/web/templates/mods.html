@@ -8,7 +8,10 @@
       Packages install into this instance's own BepInEx profile, downloaded once and cached for every server.
     </div>
   </div>
-  <a class="btn" href="/instances/{{ config.id }}">&larr; Back to instance</a>
+  <div class="row">
+    <a class="btn" href="/instances/{{ config.id }}/mods/config">Mod config</a>
+    <a class="btn" href="/instances/{{ config.id }}">&larr; Back to instance</a>
+  </div>
 </div>
 
 {% if index_error %}

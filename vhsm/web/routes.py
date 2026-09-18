@@ -14,6 +14,7 @@ from ..mods.cache import cache_size
 from ..manager import ManagerError
 from ..diagnostics import check_libraries, package_for
 from ..steam import server_status
+from .api import config_context, config_index
 from .templating import TEMPLATES
 
 log = logging.getLogger("vhsm.web.routes")
@@ -208,10 +209,28 @@ async def mods_page(request: Request, instance_id: str):
         config=record.config,
         mods=profile.summary(),
         orphans=[m.package_full_name for m in profile.orphans()],
+        config_files=config_index(record.layout, profile.mods),
         index_count=manager.index.count,
         index_error=index_error,
         categories=manager.index.categories(),
     )
+
+
+@router.get("/instances/{instance_id}/mods/config", response_class=HTMLResponse)
+async def mod_config_page(request: Request, instance_id: str, file: str = "", mod: str = ""):
+    """The config editor.
+
+    ``?mod=`` opens whatever the named package owns, which is what the Config
+    button on a mod row links to: from the operator's side they are editing a
+    mod's settings, and which file BepInEx happened to write is our problem.
+    """
+    manager = _manager(request)
+    record = manager.get(instance_id)
+    path = file
+    if not path and mod:
+        owned = config_index(record.layout, manager.profile(instance_id).mods).get(mod) or []
+        path = owned[0].relative if owned else ""
+    return _render(request, "mod_config.html", **config_context(request, instance_id, path=path))
 
 
 # --------------------------------------------------------------------------- #

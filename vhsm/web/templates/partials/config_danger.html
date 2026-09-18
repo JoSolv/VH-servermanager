@@ -1,0 +1,8 @@
+{# Deleting a config file is how you get a clean one: BepInEx rewrites it with
+   the mod's defaults at the next boot. Shared by both editor modes. #}
+<button class="small danger" type="button"
+        hx-post="/api/instances/{{ record.config.id }}/mods/config/delete"
+        hx-vals='{"path": {{ selected.relative | tojson }}}'
+        hx-confirm="Delete {{ selected.name }}? The mod writes a fresh one with its defaults the next time the server starts.">
+  Delete file
+</button>

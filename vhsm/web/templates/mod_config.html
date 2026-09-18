@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Mod config &middot; {{ config.name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Mod config &middot; {{ config.name }}</h1>
+    <div class="subtle">
+      Every setting a mod writes into this instance's BepInEx profile, with the description,
+      type and default the mod itself declared.
+    </div>
+  </div>
+  <div class="row">
+    <a class="btn" href="/instances/{{ config.id }}/mods">&larr; Mods</a>
+    <a class="btn" href="/instances/{{ config.id }}">Instance</a>
+  </div>
+</div>
+
+{% include "partials/mod_config.html" %}
+{% endblock %}
