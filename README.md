@@ -32,7 +32,6 @@ tested end to end, and the structure is meant to be built on.
   while the work is in flight.
 - Console output is streamed to the browser over a websocket and mirrored to
   `logs/console.log`.
-- `autostart` boots flagged instances with the manager.
 
 **Monitoring**
 - Per-instance CPU, RSS, memory share, thread count and disk I/O via `psutil`,
@@ -44,7 +43,7 @@ tested end to end, and the structure is meant to be built on.
 - Live player count from the Steam A2S query socket (`game port + 1`), with
   player *names* and platform ids parsed from the console log, since A2S does
   not report them reliably for Valheim. Each connected player shows their id,
-  platform, playtime and admin/ban/permit flags.
+  platform and playtime; admin/ban/permit state lives on the Players roster.
 - Per-instance network throughput via nftables counters on each instance's UDP
   port range. Linux has no per-process byte counters, so this is the honest way
   to get it; it needs root. Without it the UI says so and still shows host-wide
@@ -80,10 +79,11 @@ tested end to end, and the structure is meant to be built on.
   generations side by side; older worlds are still a `.db` + `.fwl` pair.
   Worlds are always copied whole — a partial copy of a 1.0 world is not a
   smaller world, it is a broken one.
-- Upload an existing world as a zipped folder or by picking the folder itself,
-  and the instance is repointed at it. The server only loads the world its
-  configuration names, so without that it would ignore the upload and generate
-  an empty world instead.
+- Import an existing world under *Transfer world*, from one field that takes
+  either shape it arrives in: a zipped world folder, or the folder itself
+  dropped in as-is. The instance is repointed at it, because the server only
+  loads the world its configuration names -- without that it would ignore the
+  import and generate an empty world instead.
 - Snapshots taken on demand or on a per-instance schedule, kept in `backups/`
   inside the instance rather than in `worlds_local`, where a backup folder would
   show up as another world. Automatic snapshots are pruned to a configured
@@ -96,7 +96,7 @@ tested end to end, and the structure is meant to be built on.
 - Export a whole instance as one `.vhsm.zip` — configuration, world, access
   lists and the exact mod versions — and import it here or on another host.
   An import gets a fresh identity, and its name and port move aside if taken,
-  so a server can be imported alongside itself. It never autostarts.
+  so a server can be imported alongside itself.
 
 **Updates**
 - The installed build id (from steamcmd's app manifest) is compared against the
@@ -119,8 +119,13 @@ tested end to end, and the structure is meant to be built on.
   server as unreachable, and the UI says so.
 
 **Interface**
-- The instance page's sections (world and backups, players, configuration,
-  danger zone) collapse, start collapsed, and remember what you opened.
+- The instance page's sections (backups, transfer world, players,
+  configuration, danger zone) collapse, start collapsed, and remember what you
+  opened.
+- The Players roster has a search box and All/Online/Admins/Banned filters, and
+  scrolls in a fixed-height box. Each row carries the one action it needs now --
+  Kick while online, Unban while banned -- with the rest behind a per-row
+  toggle.
 
 **Mods (r2modman-style)**
 - Browse and search the full Thunderstore catalogue for Valheim, cached to disk
@@ -290,9 +295,9 @@ From another dedicated server, or from single-player:
    `~/.config/unity3d/IronGate/Valheim/worlds_local/<World>/` when the old
    server ran without `-savedir`, otherwise under the `-savedir` it was given.
 2. Zip that folder (the folder itself, not just its contents).
-3. On the instance page, stop the server, then **Upload an existing world** →
-   *A zipped world folder*. Picking the folder directly works too, in browsers
-   that support directory selection.
+3. On the instance page, stop the server, then open **Transfer world** and
+   either browse for the zip or drop the world folder straight onto the import
+   field.
 
 The instance is repointed at whatever you upload, so the old trap of the
 configured world name not matching the folder on disk — which makes Valheim

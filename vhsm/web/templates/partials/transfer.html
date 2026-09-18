@@ -1,0 +1,79 @@
+{# Moving a world in and the whole instance out. One import field takes either
+   shape a world arrives in: a zip, or the world folder exactly as it sits on
+   the other server. #}
+<div id="transfer" hx-target="this" hx-swap="outerHTML">
+ <details class="section" data-remember="transfer">
+  <summary>
+    <span class="sec-title">Transfer world</span>
+    <span class="sec-note">import &middot; export</span>
+  </summary>
+  <div class="section-body">
+    {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
+    {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+    {% if backups.running %}
+      <div class="alert info">
+        The server is running, so importing is disabled: it holds the world in memory
+        and would overwrite the imported one at its next autosave. Stop it first.
+      </div>
+    {% endif %}
+
+    <div class="transfer">
+      <section class="transfer-half" data-world-drop>
+        <h3>Import</h3>
+        <p class="hint">
+          Replace this world with a folder from another server or single-player —
+          zipped or as-is.
+        </p>
+        <form hx-post="/api/instances/{{ record.config.id }}/world/upload"
+              hx-encoding="multipart/form-data" hx-disabled-elt="find button"
+              data-world-form
+              data-url="/api/instances/{{ record.config.id }}/world/upload">
+          {# Filled in only when a folder is dropped: a picked zip carries its own
+             world name, and loose files carry none at all. #}
+          <input type="hidden" name="name" value="" data-world-name>
+          <div class="row nowrap">
+            <input type="file" name="files" multiple
+                   aria-label="World zip, or the files inside a world folder"
+                   title="Pick a .zip, or the files inside a world folder — or drop the folder itself here"
+                   {{ 'disabled' if backups.running }} data-world-files>
+            <button class="primary" type="submit"
+                    {{ 'disabled' if backups.running }} data-world-submit>Upload</button>
+            <span class="spinner">uploading…</span>
+          </div>
+          <div class="check" style="margin-top:10px">
+            <input type="checkbox" id="world_overwrite" name="overwrite" value="1"
+                   {{ 'disabled' if backups.running }} data-world-overwrite>
+            <label for="world_overwrite">Replace a world of the same name</label>
+          </div>
+          <p class="hint" style="margin-bottom:0">
+            Drop the world folder here to send it as-is, or browse for a
+            <code>.zip</code> of it.
+          </p>
+        </form>
+        <div class="dropnote">Drop the world folder to import it</div>
+      </section>
+
+      <section class="transfer-half">
+        <h3>Export</h3>
+        <p class="hint">
+          One archive with config, world, access lists and mod list — for restoring or
+          moving this server.
+        </p>
+        <form action="/api/instances/{{ record.config.id }}/export" method="get">
+          <div class="row" style="margin-bottom:12px">
+            <div class="check" style="margin:0">
+              <input type="checkbox" id="exp_mods" name="include_mods" value="1">
+              <label for="exp_mods">Mod files</label>
+            </div>
+            <div class="check" style="margin:0">
+              <input type="checkbox" id="exp_backups" name="include_backups" value="1">
+              <label for="exp_backups">Old backups</label>
+            </div>
+          </div>
+          <button class="primary" type="submit">Download archive</button>
+        </form>
+      </section>
+    </div>
+  </div>
+ </details>
+</div>

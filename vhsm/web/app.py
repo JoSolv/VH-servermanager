@@ -32,7 +32,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "per-instance network accounting unavailable: %s",
                 manager.net.per_instance_reason,
             )
-        await manager.start_autostart()
         try:
             yield
         finally:

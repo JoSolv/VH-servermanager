@@ -1,16 +1,23 @@
-{# Live world, snapshots, rollback, world upload and instance export. #}
-<div id="backups" hx-target="this" hx-swap="outerHTML">
+{# Live world, restore points and rollback. Import/export live in transfer.html. #}
+{% set newest = backups.restores[0].taken_at if backups.restores else 0 %}
+<div id="backups" hx-get="/api/instances/{{ record.config.id }}/backups"
+     hx-trigger="vhsm:world-changed from:body"
+     hx-target="this" hx-swap="outerHTML">
  <details class="section" data-remember="backups">
   <summary>
-    <span class="sec-title">World &amp; backups</span>
+    <span class="sec-title">Backups</span>
+    {# The note answers "is anything saved, how much of it, and how stale is it":
+       the size of every restore point together, and the age of the newest one --
+       not the live world, which is what the server is about to overwrite. #}
     <span class="sec-note">
-      {% if backups.live.exists %}
+      {% if backups.restores %}
         {{ backups.restores | length }} restore point(s) &middot;
-        {{ backups.live.size | human_bytes }} &middot;
-        saved {{ backups.live.modified | timeago }}
+        {{ backups.restores | sum(attribute='size') | human_bytes }} &middot;
+        saved {{ newest | timeago }}
         {% if record.config.snapshot_interval %}
           &middot; auto every {{ record.config.snapshot_interval }} min
         {% endif %}
+      {% elif backups.live.exists %}no restore points yet
       {% else %}no world yet{% endif %}
     </span>
   </summary>
@@ -25,6 +32,12 @@
       </button>
       <span class="spinner">working…</span>
     </div>
+    {% if backups.live.exists %}
+      <span class="subtle">
+        Live world {{ backups.live.size | human_bytes }} &middot;
+        last written {{ backups.live.modified | timeago }}
+      </span>
+    {% endif %}
   </div>
 
   {% if backups.live.exists %}
@@ -41,18 +54,19 @@
         Worlds found there: {% for other in backups.live.other_worlds %}
           <code>{{ other }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.
         The name must match exactly — set this instance's world name to one of those,
-        or upload the world you want below.
+        or import the world you want under <em>Transfer world</em>.
       {% else %}
-        One is created the first time the server starts, or upload an existing world below.
+        One is created the first time the server starts, or import an existing world
+        under <em>Transfer world</em>.
       {% endif %}
     </div>
   {% endif %}
 
   {% if backups.running %}
     <div class="alert info">
-      The server is running. Rollback and world upload are disabled: a running server
-      holds the world in memory and would overwrite whatever is put in place at its
-      next autosave. Stop it first.
+      The server is running. Rollback is disabled: a running server holds the world in
+      memory and would overwrite whatever is put in place at its next autosave. Stop it
+      first.
     </div>
   {% endif %}
 
@@ -98,62 +112,6 @@
       No restore points yet. Take a snapshot, or let Valheim write one on its backup schedule.
     </div>
   {% endif %}
-
-  <hr style="border:none;border-top:1px solid var(--border);margin:18px 0">
-
-  <h3 style="margin:0 0 20px">Upload an existing world</h3>
-  <div class="toolbar">
-    <form hx-post="/api/instances/{{ record.config.id }}/world/upload"
-          hx-encoding="multipart/form-data" hx-disabled-elt="find button">
-      <label for="world-zip">A zipped world folder</label>
-      <div class="row">
-        <input type="file" id="world-zip" name="files" accept=".zip" required
-               {{ 'disabled' if backups.running }}>
-        <button class="small" type="submit" {{ 'disabled' if backups.running }}>Upload zip</button>
-        <span class="spinner">uploading…</span>
-      </div>
-      <div class="check" style="margin-top:8px">
-        <input type="checkbox" id="zip_overwrite" name="overwrite" value="1">
-        <label for="zip_overwrite">Replace a world of the same name</label>
-      </div>
-    </form>
-
-    <form hx-post="/api/instances/{{ record.config.id }}/world/upload"
-          hx-encoding="multipart/form-data" hx-disabled-elt="find button">
-
-      <label for="world-dir">Or the world folder itself</label>
-      <div class="row">
-        <input type="file" id="world-dir" name="files" webkitdirectory directory multiple required
-               data-folder-name="dir-world-name" {{ 'disabled' if backups.running }}>
-        <input type="hidden" name="name" id="dir-world-name" value="">
-        <button class="small" type="submit" {{ 'disabled' if backups.running }}>Upload folder</button>
-        <span class="spinner">uploading…</span>
-      </div>
-      <div class="check" style="margin-top:8px">
-        <input type="checkbox" id="dir_overwrite" name="overwrite" value="1">
-        <label for="dir_overwrite">Replace a world of the same name</label>
-      </div>
-    </form>
-  </div>
-
-  <hr style="border:none;border-top:1px solid var(--border);margin:18px 0">
-
-  <h3 style="margin:0 0 4px">Export this instance</h3>
-  <p class="subtle" style="margin-top:0">
-    A single archive with the configuration, world, access lists and mod list — enough to
-    restore this server or move it to another host.
-  </p>
-  <form action="/api/instances/{{ record.config.id }}/export" method="get" class="row">
-    <div class="check">
-      <input type="checkbox" id="exp_mods" name="include_mods" value="1">
-      <label for="exp_mods">Include mod files</label>
-    </div>
-    <div class="check">
-      <input type="checkbox" id="exp_backups" name="include_backups" value="1">
-      <label for="exp_backups">Include old backups</label>
-    </div>
-    <button class="primary" type="submit">Download archive</button>
-  </form>
   </div>
  </details>
 </div>

@@ -129,6 +129,9 @@ with TestClient(app) as c:
     check("instance page renders", r.status_code == 200 and "Midgard" in r.text)
     check("players panel present", "Loading players" in r.text)
     check("sections are collapsible", 'data-remember="configuration"' in r.text)
+    check("transfer panel present", "Loading transfer" in r.text)
+    check("config form drops start-with-manager", 'name="autostart"' not in r.text)
+    check("config summary describes the world rules", "hard combat" in r.text, r.text[:0])
     check("sections default to minimized",
           'data-remember="configuration">' in r.text.replace("\n", " ")
           and "data-remember=\"configuration\" open" not in r.text)
@@ -194,6 +197,13 @@ with TestClient(app) as c:
     pid = players[0]["player_id"] if players else "76561198000000001"
     r = c.get(f"/api/instances/{iid}/players")
     check("players partial renders", "Access lists" in r.text and "Players" in r.text)
+    check("roster offers search and filter chips",
+          "data-roster-search" in r.text and r.text.count('data-filter="') == 4, r.text[:120])
+    check("roster scrolls in its own box", "rosterbox" in r.text)
+    check("roster has no flags column", "<th>Flags</th>" not in r.text)
+    check("row actions collapse behind a toggle",
+          "data-more" in r.text and "action-strip" in r.text)
+    check("per-row activity list dropped", "recent activity" not in r.text)
     r = c.post(f"/api/instances/{iid}/players/{pid}/admin")
     check("make admin", "now an admin" in r.text, r.text[:90])
     check("admin file written", pid in (ROOT/"instances"/iid/"saves"/"adminlist.txt").read_text())
@@ -212,6 +222,16 @@ with TestClient(app) as c:
     r = c.post(f"/api/instances/{iid}/lists/permitted",
                data={"player_id": "76561198000000999", "action": "remove"})
     check("manual list remove", "removed from" in r.text)
+    r = c.post(f"/api/instances/{iid}/lists",
+               data={"key": "admins", "player_id": "76561198000000888", "action": "add"})
+    check("add by steam id picks its list",
+          "added to the admins list" in r.text
+          and "76561198000000888" in (ROOT/"instances"/iid/"saves"/"adminlist.txt").read_text(),
+          r.text[:100])
+    r = c.post(f"/api/instances/{iid}/lists",
+               data={"key": "admins", "player_id": "76561198000000888", "action": "remove"})
+    check("and removes from it again",
+          "76561198000000888" not in (ROOT/"instances"/iid/"saves"/"adminlist.txt").read_text())
 
     print("\n[item 8: players roster]")
     rows = app.state.manager.player_rows(iid)
@@ -517,7 +537,7 @@ with TestClient(app) as c:
     check("imported gets a fresh id", new_id != iid)
     check("imported name avoids the collision", imported["name"] != "Midgard", imported["name"])
     check("imported port avoids the collision", imported["port"] != 2456, imported["port"])
-    check("imported never autostarts", imported["autostart"] is False)
+    check("imported carries no autostart flag", "autostart" not in imported)
     check("imported world restored",
           (ROOT/"instances"/new_id/"saves"/"worlds_local"/"Midgard"/"_main.0.db2").read_bytes()
           == b"WORLD-ORIGINAL")
@@ -539,12 +559,23 @@ with TestClient(app) as c:
                files={"file": ("plain.zip", b"PK\x05\x06" + b"\x00"*18, "application/zip")})
     check("non-vhsm zip rejected", r.status_code == 400, r.status_code)
 
+    print("\n[transfer world]")
+    r = c.get(f"/api/instances/{new_id}/transfer")
+    check("transfer panel renders",
+          r.status_code == 200 and 'sec-title">Transfer world<' in r.text, r.status_code)
+    check("import and export live together",
+          "world/upload" in r.text and "Download archive" in r.text)
+    check("one import field takes either shape",
+          r.text.count('name="files"') == 1 and "webkitdirectory" not in r.text)
+
     print("\n[backups / rollback]")
     nd = ROOT/"instances"/new_id/"saves"/"worlds_local"
     r = c.get(f"/api/instances/{new_id}/backups")
-    check("backups panel renders", r.status_code == 200 and "World &amp; backups" in r.text)
-    check("1.0 folder world detected", "folder format" in r.text, r.text[:200])
-    check("save generations reported", "save generation" in r.text)
+    check("backups panel renders",
+          r.status_code == 200 and 'sec-title">Backups<' in r.text, r.text[:200])
+    check("backups panel describes the live world", "Live world" in r.text, r.text[:200])
+    check("import/export moved out of backups",
+          "Download archive" not in r.text and "world/upload" not in r.text)
 
     # The reported bug: this used to fail with "no world to snapshot".
     r = c.post(f"/api/instances/{new_id}/backups/snapshot")

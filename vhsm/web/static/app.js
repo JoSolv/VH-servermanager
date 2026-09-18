@@ -108,21 +108,30 @@
     var net = snapshot.net || {};
     var active = ["starting", "running", "stopping"].indexOf(snapshot.status) >= 0;
 
-    setText(scope, "players", players.count + (players.max ? " / " + players.max : ""));
+    setText(scope, "players", String(players.count));
+    setText(scope, "players-max", players.max ? "/ " + players.max : "");
     setText(scope, "uptime", active ? fmtDuration(snapshot.uptime) : "--");
     // metrics.cpu_percent is psutil's raw figure and is summed across cores
     // (300% = three cores). Show the share of the whole host instead, with the
-    // core count underneath, so the number and its meter agree.
+    // core count beside it, so the number and its meter agree.
     setText(scope, "cpu", active ? metrics.cpu_host_percent.toFixed(1) + "%" : "--");
     setText(
       scope, "cpu-cores",
-      active ? metrics.cpu_cores.toFixed(2) + " of " + metrics.cpu_count + " cores" : "\u00a0"
+      active ? metrics.cpu_cores.toFixed(2) + " / " + metrics.cpu_count + " cores" : "\u00a0"
     );
     setText(scope, "version", snapshot.version || "\u2014");
     applyReach(scope, snapshot);
     setText(scope, "mem", active ? fmtBytes(metrics.memory_rss) : "--");
     setText(scope, "threads", active ? String(metrics.threads) : "--");
     setText(scope, "pid", snapshot.pid ? String(snapshot.pid) : "--");
+    // Threads and pid are context for the numbers above, not numbers to watch,
+    // so they ride in one quiet line rather than two tiles of their own.
+    setText(
+      scope, "proc",
+      active && snapshot.pid
+        ? metrics.threads + " threads \u00b7 pid " + snapshot.pid
+        : ""
+    );
     setText(
       scope, "net",
       net.source === "unavailable" || !active
@@ -213,7 +222,7 @@
     if (!players.length) {
       var empty = document.createElement("tr");
       var td = document.createElement("td");
-      td.colSpan = 5; td.className = "muted"; td.textContent = "Nobody connected";
+      td.colSpan = 4; td.className = "muted"; td.textContent = "Nobody connected";
       empty.appendChild(td); body.appendChild(empty);
       return;
     }
@@ -238,12 +247,6 @@
       row.appendChild(idCell);
 
       cell(row, fmtDuration(p.playtime));
-
-      var flags = [];
-      if (p.admin) flags.push("admin");
-      if (p.permitted) flags.push("permitted");
-      if (p.banned) flags.push("banned");
-      cell(row, flags.join(", ") || "—", flags.length ? "" : "muted");
 
       var acts = document.createElement("td");
       var wrap = document.createElement("div");
@@ -364,6 +367,189 @@
     target.value = relative ? relative.split("/")[0] : "";
   });
 
+  // ------------------------------------------------------------- roster
+  // The players panel is re-rendered by htmx after every moderation action, so
+  // the search box and the active chip cannot live in the DOM: they are held
+  // here and put back on the fresh markup.
+  var roster = { query: "", filter: "all" };
+
+  function applyRoster() {
+    var rows = document.querySelectorAll('#players tr[data-row]');
+    var shown = 0;
+    Array.prototype.forEach.call(rows, function (row) {
+      var hit = !roster.query || (row.dataset.search || "").indexOf(roster.query) >= 0;
+      if (hit && roster.filter !== "all") hit = row.dataset[roster.filter] === "1";
+      row.hidden = !hit;
+      // A hidden row must take its action strip with it, or the strip is left
+      // floating under somebody else's name.
+      var strip = row.nextElementSibling;
+      if (!hit && strip && strip.hasAttribute("data-strip")) strip.hidden = true;
+      if (hit) shown++;
+    });
+    var none = document.querySelector("#players .roster-none");
+    if (none) none.hidden = shown > 0 || !rows.length;
+  }
+
+  function syncRoster() {
+    var box = document.querySelector("#players [data-roster-search]");
+    if (!box) return;
+    if (box.value !== roster.query) box.value = roster.query;
+    document.querySelectorAll("#players [data-filter]").forEach(function (chip) {
+      chip.classList.toggle("on", chip.dataset.filter === roster.filter);
+    });
+    applyRoster();
+  }
+
+  document.addEventListener("input", function (event) {
+    var box = event.target.closest && event.target.closest("[data-roster-search]");
+    if (!box) return;
+    roster.query = box.value.trim().toLowerCase();
+    applyRoster();
+  });
+
+  document.addEventListener("click", function (event) {
+    var chip = event.target.closest && event.target.closest("[data-filter]");
+    if (chip) {
+      roster.filter = chip.dataset.filter;
+      syncRoster();
+      return;
+    }
+    // The "..." toggle: one contextual action stays on the row, the rest live
+    // in a strip that opens under it.
+    var more = event.target.closest && event.target.closest("[data-more]");
+    if (!more) return;
+    var strip = more.closest("tr").nextElementSibling;
+    if (!strip || !strip.hasAttribute("data-strip")) return;
+    strip.hidden = !strip.hidden;
+    more.classList.toggle("on", !strip.hidden);
+  });
+
+  // --------------------------------------------------------- world import
+  // One field takes either shape a world arrives in. A picked .zip goes
+  // straight through the form; a dropped folder is walked and sent file by
+  // file with its path, which is exactly what a directory picker submits.
+  function syncUploadButton(scope) {
+    var form = (scope || document).querySelector("[data-world-form]");
+    if (!form) return;
+    var input = form.querySelector("[data-world-files]");
+    var button = form.querySelector("[data-world-submit]");
+    if (!input || !button || input.disabled) return;
+    button.disabled = !(input.files && input.files.length);
+  }
+
+  document.addEventListener("change", function (event) {
+    if (event.target.closest && event.target.closest("[data-world-files]")) syncUploadButton();
+  });
+
+  function walkEntry(entry, prefix, out) {
+    return new Promise(function (resolve) {
+      if (entry.isFile) {
+        entry.file(
+          function (file) { out.push({ file: file, path: prefix + entry.name }); resolve(); },
+          resolve
+        );
+        return;
+      }
+      // readEntries hands back at most a page of children at a time, so it has
+      // to be called until it returns nothing.
+      var reader = entry.createReader(), children = [];
+      (function readMore() {
+        reader.readEntries(function (batch) {
+          if (!batch.length) {
+            Promise.all(children.map(function (child) {
+              return walkEntry(child, prefix + entry.name + "/", out);
+            })).then(resolve);
+            return;
+          }
+          children = children.concat(Array.prototype.slice.call(batch));
+          readMore();
+        }, resolve);
+      })();
+    });
+  }
+
+  function fireTriggers(header) {
+    var events;
+    try { events = JSON.parse(header); } catch (e) { return; }
+    Object.keys(events).forEach(function (name) {
+      document.body.dispatchEvent(
+        new CustomEvent(name, { detail: events[name], bubbles: true })
+      );
+    });
+  }
+
+  function sendWorld(form, files, worldName) {
+    var panel = document.getElementById("transfer");
+    var payload = new FormData();
+    files.forEach(function (item) { payload.append("files", item.file, item.path); });
+    payload.append("name", worldName || "");
+    var overwrite = form.querySelector("[data-world-overwrite]");
+    if (overwrite && overwrite.checked) payload.append("overwrite", "1");
+
+    if (panel) panel.classList.add("htmx-request");
+    fetch(form.dataset.url, { method: "POST", body: payload })
+      .then(function (response) {
+        return response.text().then(function (text) {
+          return { text: text, trigger: response.headers.get("HX-Trigger") };
+        });
+      })
+      .then(function (result) {
+        if (window.htmx) {
+          window.htmx.swap("#transfer", result.text, { swapStyle: "outerHTML" });
+        }
+        if (result.trigger) fireTriggers(result.trigger);
+      })
+      .catch(function () {
+        if (panel) panel.classList.remove("htmx-request");
+      });
+  }
+
+  function dropZone(event) {
+    var zone = event.target.closest && event.target.closest("[data-world-drop]");
+    if (!zone) return null;
+    var input = zone.querySelector("[data-world-files]");
+    return input && !input.disabled ? zone : null;
+  }
+
+  document.addEventListener("dragover", function (event) {
+    var zone = dropZone(event);
+    if (!zone) return;
+    event.preventDefault();
+    zone.classList.add("dragging");
+  });
+
+  document.addEventListener("dragleave", function (event) {
+    var zone = dropZone(event);
+    if (zone && !zone.contains(event.relatedTarget)) zone.classList.remove("dragging");
+  });
+
+  document.addEventListener("drop", function (event) {
+    var zone = dropZone(event);
+    if (!zone) return;
+    event.preventDefault();
+    zone.classList.remove("dragging");
+    var form = zone.querySelector("[data-world-form]");
+    var items = event.dataTransfer && event.dataTransfer.items;
+    if (!form || !items) return;
+
+    var entries = [];
+    for (var i = 0; i < items.length; i++) {
+      var entry = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+      if (entry) entries.push(entry);
+    }
+    if (!entries.length) return;
+
+    var collected = [];
+    Promise.all(entries.map(function (entry) {
+      return walkEntry(entry, "", collected);
+    })).then(function () {
+      if (!collected.length) return;
+      // A dropped folder carries the world's name; a dropped zip carries its
+      // own, so leave it to the server to read out of the archive.
+      sendWorld(form, collected, entries[0].isDirectory ? entries[0].name : "");
+    });
+  });
+
   // ------------------------------------------------- collapsible sections
   // Sections start closed, and htmx replaces whole panels, so the open ones
   // are remembered per browser rather than reset on every swap.
@@ -399,6 +585,8 @@
 
   document.body.addEventListener("htmx:afterSwap", function (event) {
     restoreSections(event.target);
+    syncRoster();
+    syncUploadButton();
   });
 
   // Uploading a world repoints the instance at it. The configuration form
@@ -415,6 +603,8 @@
 
   document.addEventListener("DOMContentLoaded", function () {
     restoreSections();
+    syncRoster();
+    syncUploadButton();
     connect();
     attachConsole();
   });

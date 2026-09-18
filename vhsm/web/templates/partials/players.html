@@ -1,11 +1,14 @@
-{# Everyone who has ever joined, with moderation. Lists are a subsection. #}
+{# Everyone who has ever joined, with moderation. One contextual action per row;
+   the rest ride behind the row's ... toggle. #}
+{% set iid = record.config.id %}
+{% set admin_rows = players | selectattr('admin') | list | length %}
+{% set banned_rows = players | selectattr('banned') | list | length %}
 <div id="players" hx-target="this" hx-swap="outerHTML">
   <details class="section" data-remember="players">
     <summary>
       <span class="sec-title">Players</span>
       <span class="sec-note">
-        {{ players | length }} known
-        {% if online_count %}&middot; {{ online_count }} online now{% endif %}
+        {{ players | length }} known &middot; {{ online_count }} online
         {% if lists.permitted_enforced %}&middot; <span class="tag upd">whitelist on</span>{% endif %}
       </span>
     </summary>
@@ -14,81 +17,100 @@
       {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
       {% if players %}
-        <div class="tablewrap">
-          <table class="players">
+        <div class="roster-tools">
+          <input type="search" class="roster-search" data-roster-search
+                 placeholder="Search name or Steam ID" aria-label="Search the roster">
+          <div class="chips" data-roster-filters>
+            <button type="button" class="chip on" data-filter="all">All
+              <span class="n">{{ players | length }}</span></button>
+            <button type="button" class="chip" data-filter="online">Online
+              <span class="n">{{ online_count }}</span></button>
+            <button type="button" class="chip" data-filter="admin">Admins
+              <span class="n">{{ admin_rows }}</span></button>
+            <button type="button" class="chip" data-filter="banned">Banned
+              <span class="n">{{ banned_rows }}</span></button>
+          </div>
+        </div>
+
+        {# Fixed height, like the console: a server with months of history should
+           not push the rest of the page off the bottom. #}
+        <div class="rosterbox">
+          <table class="players roster">
             <thead>
-              <tr><th>Player</th><th>Steam Id</th><th>Last seen</th><th>Flags</th><th>Actions</th></tr>
+              <tr><th>Player</th><th>Steam Id</th><th>Last seen</th><th class="col-acts">Actions</th></tr>
             </thead>
             <tbody>
               {% for player in players %}
-                <tr class="{{ 'is-online' if player.online }}">
+                {% set who = player.display_name or player.player_id %}
+                <tr class="roster-row {{ 'is-online' if player.online }}"
+                    data-row
+                    data-search="{{ (player.display_name ~ ' ' ~ player.player_id) | lower }}"
+                    data-online="{{ 1 if player.online else 0 }}"
+                    data-admin="{{ 1 if player.admin else 0 }}"
+                    data-banned="{{ 1 if player.banned else 0 }}">
                   <td>
-                    <strong>{{ player.display_name or 'unknown' }}</strong>
-                    {% if player.online %}<span class="tag ok-tag">online</span>{% endif %}
-                    <div class="muted" style="font-size:11px">
-                      {{ player.sessions }} session(s)
+                    <span class="pname">{{ player.display_name or 'unknown' }}</span>
+                    {% if player.online %}<span class="chip tiny ok">Online</span>{% endif %}
+                    {% if player.admin %}<span class="chip tiny admin">Admin</span>{% endif %}
+                    {% if player.banned %}<span class="chip tiny banned">Banned</span>{% endif %}
+                    {% if player.permitted %}<span class="chip tiny">Permitted</span>{% endif %}
+                    <div class="psub">
+                      {{ player.sessions }} session{{ '' if player.sessions == 1 else 's' }}
                       {% if player.playtime %}&middot; {{ player.playtime | duration }} played{% endif %}
                     </div>
                   </td>
                   <td><code>{{ player.player_id }}</code></td>
-                  <td>
+                  <td title="{{ player.last_seen | datetime }}">
                     {% if player.online %}<span class="ok-text">now</span>
-                    {% else %}{{ player.last_seen | timeago }}
-                      <div class="muted" style="font-size:11px">
-                        {{ player.last_seen | datetime }}
-                      </div>
-                    {% endif %}
+                    {% else %}{{ player.last_seen | timeago }}{% endif %}
                   </td>
-                  <td>
-                    {% if player.admin %}<span class="tag dep">admin</span>{% endif %}
-                    {% if player.permitted %}<span class="tag">permitted</span>{% endif %}
-                    {% if player.banned %}<span class="tag upd">banned</span>{% endif %}
-                    {% if not (player.admin or player.permitted or player.banned) %}
-                      <span class="muted">&mdash;</span>
-                    {% endif %}
+                  <td class="col-acts">
+                    <div class="row-acts">
+                      {# One action, chosen by what the row actually needs now. #}
+                      {% if player.online %}
+                        <button class="small danger"
+                                hx-post="/api/instances/{{ iid }}/players/{{ player.player_id }}/kick"
+                                hx-confirm="Kick {{ who }}? They are banned for about a minute so the server drops them.">Kick</button>
+                      {% elif player.banned %}
+                        <button class="small"
+                                hx-post="/api/instances/{{ iid }}/players/{{ player.player_id }}/unban">Unban</button>
+                      {% endif %}
+                      <button type="button" class="small more" data-more
+                              aria-label="More actions for {{ who }}"
+                              title="More actions">&ctdot;</button>
+                    </div>
                   </td>
-                  <td>
+                </tr>
+                <tr class="action-strip" data-strip hidden>
+                  <td colspan="4">
                     <div class="acts">
                       <button class="small"
-                              hx-post="/api/instances/{{ record.config.id }}/players/{{ player.player_id }}/{{ 'unadmin' if player.admin else 'admin' }}">
-                        {{ 'Un-admin' if player.admin else 'Admin' }}
+                              hx-post="/api/instances/{{ iid }}/players/{{ player.player_id }}/{{ 'unadmin' if player.admin else 'admin' }}">
+                        {{ 'Remove admin' if player.admin else 'Make admin' }}
                       </button>
                       <button class="small"
-                              hx-post="/api/instances/{{ record.config.id }}/players/{{ player.player_id }}/{{ 'unpermit' if player.permitted else 'permit' }}">
+                              hx-post="/api/instances/{{ iid }}/players/{{ player.player_id }}/{{ 'unpermit' if player.permitted else 'permit' }}">
                         {{ 'Unpermit' if player.permitted else 'Permit' }}
                       </button>
-                      <button class="small danger"
-                              hx-post="/api/instances/{{ record.config.id }}/players/{{ player.player_id }}/{{ 'unban' if player.banned else 'ban' }}"
-                              {% if not player.banned %}hx-confirm="Ban {{ player.display_name or player.player_id }}?"{% endif %}>
-                        {{ 'Unban' if player.banned else 'Ban' }}
-                      </button>
+                      {% if not player.banned %}
+                        <button class="small danger"
+                                hx-post="/api/instances/{{ iid }}/players/{{ player.player_id }}/ban"
+                                hx-confirm="Ban {{ who }}?">Ban</button>
+                      {% endif %}
                       <a class="btn small"
-                         href="/api/instances/{{ record.config.id }}/players/{{ player.player_id }}/history">History</a>
+                         href="/api/instances/{{ iid }}/players/{{ player.player_id }}/history">History</a>
                       <button class="small"
-                              hx-post="/api/instances/{{ record.config.id }}/players/{{ player.player_id }}/forget"
-                              hx-confirm="Remove {{ player.display_name or player.player_id }} from the roster? Their admin/ban/permit entries stay.">
+                              hx-post="/api/instances/{{ iid }}/players/{{ player.player_id }}/forget"
+                              hx-confirm="Remove {{ who }} from the roster? Their admin/ban/permit entries stay.">
                         Forget
                       </button>
-                      {% if player.online %}
-                      <button class="small danger"
-                        hx-post="/api/instances/{{ record.config.id }}/players/{{ player.player_id }}/kick">Kick</button>
-                      {% endif %}
                     </div>
-                    {% if player.events %}
-                      <details class="events">
-                        <summary class="muted">recent activity</summary>
-                        <ul class="probe-list">
-                          {% for event in player.events[:8] %}
-                            <li><span class="muted">{{ event.at | datetime }}</span> {{ event.label }}</li>
-                          {% endfor %}
-                        </ul>
-                      </details>
-                    {% endif %}
                   </td>
                 </tr>
               {% endfor %}
             </tbody>
           </table>
+          <div class="empty roster-none" hidden>Nobody matches that.</div>
         </div>
       {% else %}
         <div class="empty">
@@ -97,76 +119,56 @@
         </div>
       {% endif %}
 
-      <details class="section nested" data-remember="access-lists">
-        <summary>
-          <span class="sec-title">Access lists</span>
-          <span class="sec-note">
-            {{ lists.admins | length }} admin &middot;
-            {{ lists.banned | length }} banned &middot;
-            {{ lists.permitted | length }} permitted
-          </span>
-        </summary>
-        <div class="section-body">
-          <form hx-post="/api/instances/{{ record.config.id }}/permitted" class="check"
-                style="margin-bottom:12px">
-            <input type="checkbox" id="permitted_enabled" name="enabled" value="1"
-                   {{ 'checked' if lists.permitted_enabled }}
-                   hx-post="/api/instances/{{ record.config.id }}/permitted"
-                   hx-trigger="change" hx-include="closest form">
-            <label for="permitted_enabled">
-              Enforce the permitted list
-              <span class="muted">
-                — when on, only listed players may join. When off the list is kept but
-                ignored.
-              </span>
-            </label>
-          </form>
-          {% if lists.permitted_enabled and not lists.permitted %}
-            <div class="alert info">
-              The permitted list is empty, so everyone can still join. Add at least one
-              player to actually restrict access.
-            </div>
-          {% endif %}
-
-          <div class="listgrid">
-            {% for key, label, hint in [
-                ('admins', 'Admins', 'Can use server commands in-game.'),
-                ('banned', 'Banned', 'Disconnected and refused entry.'),
-                ('permitted', 'Permitted', 'The whitelist, when enforced.')] %}
-              <div class="listcol">
-                <h3>{{ label }} <span class="muted">({{ lists[key] | length }})</span></h3>
-                <p class="hint">{{ hint }}</p>
-                <ul class="idlist">
-                  {% for player_id in lists[key] %}
-                    <li>
-                      <code>{{ player_id }}</code>
-                      {% if key == 'banned' and player_id in lists.temp_bans %}
-                        <span class="tag upd">kick &middot; {{ lists.temp_bans[player_id] }}s</span>
-                      {% endif %}
-                      <button class="small danger"
-                              hx-post="/api/instances/{{ record.config.id }}/lists/{{ key }}"
-                              hx-vals='{"player_id": "{{ player_id }}", "action": "remove"}'
-                              title="Remove">&times;</button>
-                    </li>
-                  {% else %}
-                    <li class="muted">Empty</li>
-                  {% endfor %}
-                </ul>
-                <form hx-post="/api/instances/{{ record.config.id }}/lists/{{ key }}" class="row">
-                  <input type="hidden" name="action" value="add">
-                  <input type="text" name="player_id" placeholder="Steam ID" required
-                         pattern="[A-Za-z0-9_]{3,64}">
-                  <button class="small" type="submit">Add</button>
-                </form>
-              </div>
-            {% endfor %}
+      <div class="accesslists">
+        <div class="row spread">
+          <h3>Access lists</h3>
+          <div class="chips">
+            <span class="chip static">{{ lists.admins | length }} admins</span>
+            <span class="chip static banned">{{ lists.banned | length }} banned</span>
+            <span class="chip static">{{ lists.permitted | length }} permitted</span>
           </div>
-          <p class="subtle" style="margin-bottom:0">
-            Valheim re-reads these files while running, so changes take effect within
-            seconds without a restart.
-          </p>
         </div>
-      </details>
+
+        <form hx-post="/api/instances/{{ iid }}/permitted" class="check">
+          <input type="checkbox" id="permitted_enabled" name="enabled" value="1"
+                 {{ 'checked' if lists.permitted_enabled }}
+                 hx-post="/api/instances/{{ iid }}/permitted"
+                 hx-trigger="change" hx-include="closest form">
+          <label for="permitted_enabled">
+            Enforce the permitted list
+            <span class="muted">
+              — only listed players may join. The list is kept but ignored when off.
+            </span>
+          </label>
+        </form>
+        {% if lists.permitted_enabled and not lists.permitted %}
+          <div class="alert info">
+            The permitted list is empty, so everyone can still join. Add at least one
+            player to actually restrict access.
+          </div>
+        {% endif %}
+
+        <form hx-post="/api/instances/{{ iid }}/lists" class="idform">
+          <label for="list_player_id">Add by Steam ID</label>
+          <div class="row nowrap">
+            <input type="text" id="list_player_id" name="player_id" required
+                   placeholder="7656119…" pattern="[A-Za-z0-9_]{3,64}">
+            <select name="key" aria-label="Which list">
+              <option value="admins">Admins</option>
+              <option value="banned">Banned</option>
+              <option value="permitted">Permitted</option>
+            </select>
+            <button class="small" type="submit" name="action" value="add">Add</button>
+            {# Someone who never joined has no roster row to undo this from. #}
+            <button class="small" type="submit" name="action" value="remove">Remove</button>
+          </div>
+        </form>
+        <p class="hint" style="margin-bottom:0">
+          For players who have never joined — everyone in the roster is handled from
+          their row. Valheim re-reads these lists while running, so changes take effect
+          in seconds.
+        </p>
+      </div>
     </div>
   </details>
 </div>

@@ -13,6 +13,7 @@ import logging
 import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
@@ -456,6 +457,20 @@ async def player_history(request: Request, instance_id: str, player_id: str):
     )
 
 
+@router.post("/api/instances/{instance_id}/lists", response_class=HTMLResponse)
+async def mutate_list_form(
+    request: Request,
+    instance_id: str,
+    key: str = Form(...),
+    player_id: str = Form(...),
+    action: str = Form(default="add"),
+) -> HTMLResponse:
+    """Same as the path form, with the list picked by a select in the panel."""
+    return await mutate_list(
+        request, instance_id, key, player_id=player_id, action=action
+    )
+
+
 @router.post("/api/instances/{instance_id}/lists/{key}", response_class=HTMLResponse)
 async def mutate_list(
     request: Request,
@@ -637,9 +652,35 @@ def _backups_partial(
     )
 
 
+def _transfer_partial(
+    request: Request, instance_id: str, message: str = "", error: str = ""
+) -> HTMLResponse:
+    """The world import/export panel.
+
+    It needs the same backup summary as the Backups panel -- chiefly whether the
+    server is running, which decides if importing is allowed at all.
+    """
+    manager = _manager(request)
+    return TEMPLATES.TemplateResponse(
+        request,
+        "partials/transfer.html",
+        {
+            "record": manager.get(instance_id),
+            "backups": manager.backup_summary(instance_id),
+            "message": message,
+            "error": error,
+        },
+    )
+
+
 @router.get("/api/instances/{instance_id}/backups", response_class=HTMLResponse)
 async def get_backups(request: Request, instance_id: str) -> HTMLResponse:
     return _backups_partial(request, instance_id)
+
+
+@router.get("/api/instances/{instance_id}/transfer", response_class=HTMLResponse)
+async def get_transfer(request: Request, instance_id: str) -> HTMLResponse:
+    return _transfer_partial(request, instance_id)
 
 
 @router.post("/api/instances/{instance_id}/backups/snapshot", response_class=HTMLResponse)
@@ -718,7 +759,7 @@ async def upload_world(
     try:
         uploads = [f for f in files if (f.filename or "").strip()]
         if not uploads:
-            return _backups_partial(request, instance_id, error="No files were uploaded.")
+            return _transfer_partial(request, instance_id, error="No files were uploaded.")
 
         single_zip = len(uploads) == 1 and uploads[0].filename.lower().endswith(".zip")
         total = 0
@@ -728,25 +769,25 @@ async def upload_world(
                 while chunk := await uploads[0].read(1 << 20):
                     total += len(chunk)
                     if total > MAX_ARCHIVE_UPLOAD:
-                        return _backups_partial(
+                        return _transfer_partial(
                             request, instance_id, error="That upload is too large."
                         )
                     sink.write(chunk)
             try:
                 extract_zip(payload, unpack)
             except ArchiveError as exc:
-                return _backups_partial(request, instance_id, error=str(exc))
+                return _transfer_partial(request, instance_id, error=str(exc))
         else:
             for upload in uploads:
                 relative = _safe_member(upload.filename)
                 if relative is None:
-                    return _backups_partial(
+                    return _transfer_partial(
                         request, instance_id,
                         error=f"Refusing a file with an unsafe name: {upload.filename!r}",
                     )
                 destination = (unpack / relative).resolve()
                 if unpack.resolve() not in destination.parents:
-                    return _backups_partial(
+                    return _transfer_partial(
                         request, instance_id,
                         error=f"Refusing a file that escapes the upload: {upload.filename!r}",
                     )
@@ -755,7 +796,7 @@ async def upload_world(
                     while chunk := await upload.read(1 << 20):
                         total += len(chunk)
                         if total > MAX_ARCHIVE_UPLOAD:
-                            return _backups_partial(
+                            return _transfer_partial(
                                 request, instance_id, error="That upload is too large."
                             )
                         sink.write(chunk)
@@ -769,7 +810,7 @@ async def upload_world(
                 adopt_name=bool(adopt_name),
             )
         except (WorldError, ValidationError) as exc:
-            return _backups_partial(request, instance_id, error=str(exc))
+            return _transfer_partial(request, instance_id, error=str(exc))
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -787,14 +828,16 @@ async def upload_world(
     if installed.issues:
         message += " Warning: " + "; ".join(installed.issues)
 
-    response = _backups_partial(request, instance_id, message=message)
+    response = _transfer_partial(request, instance_id, message=message)
+    # The Backups panel is a sibling of this one and now describes a world that
+    # has been replaced, so tell it to re-fetch itself.
+    events: dict[str, Any] = {"vhsm:world-changed": {"world": installed.name}}
     if renamed:
         # The configuration form was rendered with the old world name and is
         # still on screen; leaving it stale would let a later save silently
         # point the server back at a world that is no longer there.
-        response.headers["HX-Trigger"] = json.dumps(
-            {"vhsm:world-renamed": {"world": installed.name}}
-        )
+        events["vhsm:world-renamed"] = {"world": installed.name}
+    response.headers["HX-Trigger"] = json.dumps(events)
     return response
 
 

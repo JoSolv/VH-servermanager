@@ -80,7 +80,6 @@ def _config_from_form(form: dict[str, Any], base: InstanceConfig | None = None) 
             "backup_short": number("backup_short", payload["backup_short"]),
             "backup_long": number("backup_long", payload["backup_long"]),
             "extra_args": text("extra_args"),
-            "autostart": form.get("autostart") is not None,
             "mods_enabled": form.get("mods_enabled") is not None,
             "snapshot_interval": number("snapshot_interval", payload["snapshot_interval"]),
             "snapshot_keep": number("snapshot_keep", payload["snapshot_keep"]),

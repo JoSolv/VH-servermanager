@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi.templating import Jinja2Templates
 
@@ -59,6 +60,24 @@ def as_datetime(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
+#: Modifier keys read badly as-is in a one-line summary.
+MODIFIER_LABELS = {"deathpenalty": "death penalty"}
+
+
+def rules_note(config: Any) -> str:
+    """One line describing the world rules, for the Configuration summary.
+
+    The port and world name already sit in the page header, so the collapsed
+    section is more use saying what the world plays like.
+    """
+    bits: list[str] = []
+    if getattr(config, "preset", ""):
+        bits.append(f"{config.preset} preset")
+    for key, value in (getattr(config, "modifiers", None) or {}).items():
+        bits.append(f"{value} {MODIFIER_LABELS.get(key, key)}")
+    return " \u00b7 ".join(bits) if bits else "default world rules"
+
+
 def rate(bytes_per_second: float) -> str:
     return f"{human_bytes(bytes_per_second or 0)}/s"
 
@@ -69,3 +88,4 @@ TEMPLATES.env.filters["rate"] = rate
 TEMPLATES.env.globals["vhsm_build"] = build_info()
 TEMPLATES.env.filters["timeago"] = timeago
 TEMPLATES.env.filters["datetime"] = as_datetime
+TEMPLATES.env.filters["rules_note"] = rules_note
