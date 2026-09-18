@@ -39,7 +39,7 @@ from .steam import (
     write_steam_appid,
 )
 from .supervisor import Supervisor
-from .util import read_json, write_json
+from .util import read_json, slugify, write_json
 
 log = logging.getLogger("vhsm.manager")
 
@@ -212,6 +212,22 @@ class InstanceRecord:
             "metrics": self.metrics.to_dict(),
             "net": self.net.to_dict(),
         }
+
+
+@dataclass(slots=True)
+class WorldImport:
+    """What importing a world actually did, so the UI can say it plainly."""
+
+    world: worlds_mod.World
+    #: The name the upload carried, which differs from ``world.name`` when it
+    #: was installed over an existing world under that world's name.
+    source_name: str = ""
+    #: The rollback point taken of the world that was replaced, if any.
+    snapshot: backups_mod.Restore | None = None
+    #: True when an existing world was overwritten rather than filled in.
+    replaced: bool = False
+    #: Set when the instance was repointed at the uploaded world's name.
+    renamed_from: str = ""
 
 
 class Hub:
@@ -515,7 +531,11 @@ class InstanceManager:
         }
 
     def set_permitted_enabled(self, instance_id: str, enabled: bool) -> bool:
-        """Switch the whitelist on or off without discarding who is on it."""
+        """Switch the whitelist on or off without discarding who is on it.
+
+        Off is the default and only an operator turns it on: see
+        :class:`~vhsm.playerlists.PlayerList`.
+        """
         record = self.get(instance_id)
         changed = record.lists.permitted.set_enabled(enabled)
         record.roster.save(force=True)
@@ -622,36 +642,34 @@ class InstanceManager:
         return f"{name} {uuid.uuid4().hex[:6]}"
 
     def _free_port(self, preferred: int) -> int:
-        """First port whose 3-port range does not overlap an existing instance."""
+        """The preferred port, or the next free 3-port range above it.
+
+        A clone or an import wants to keep the address players already know, so
+        the original port is tried first and only moved when something else
+        holds it. The search then walks *upwards* from there rather than
+        restarting at 2456, so a server imported beside itself lands next to
+        the original instead of somewhere unrelated.
+        """
         used = [r.config.port for r in self._records.values()]
 
         def clashes(port: int) -> bool:
             return any(abs(port - other) < 3 for other in used)
 
-        if not clashes(preferred):
-            return preferred
-        port = 2456
-        while clashes(port) and port < 65500:
-            port += 3
-        return port
+        for start in (preferred, 2456):
+            port = max(start, 1024)
+            while port < 65500:
+                if not clashes(port):
+                    return port
+                port += 3
+        raise ValidationError("No free port range is left on this host.")
 
-    def export_archive(
-        self,
-        instance_id: str,
-        *,
-        include_mods: bool = False,
-        include_backups: bool = False,
-    ) -> Path:
-        """Write an archive of one instance and return the file path."""
+    def export_archive(self, instance_id: str, *, include_logs: bool = False) -> Path:
+        """Write an archive of one whole instance and return the file path."""
         record = self.get(instance_id)
         staging = Path(tempfile.mkdtemp(prefix="vhsm-export-"))
         destination = staging / archive_mod.suggested_filename(record.config)
         return archive_mod.export_instance(
-            record.layout,
-            record.config,
-            destination,
-            include_mods=include_mods,
-            include_backups=include_backups,
+            record.layout, record.config, destination, include_logs=include_logs
         )
 
     def inspect_archive(self, archive_path: Path) -> archive_mod.ArchiveInfo:
@@ -685,6 +703,54 @@ class InstanceManager:
 
         record = self._register(config)
         log.info("imported instance %s as %s (%s)", info.name, config.name, config.id)
+        return record
+
+    def _clone_config(self, source: InstanceConfig, suffix: str) -> InstanceConfig:
+        """A copy of *source*'s configuration with its own identity."""
+        config = InstanceConfig.from_dict(source.to_dict())
+        config.id = uuid.uuid4().hex[:12]
+        config.name = self._unique_name(f"{source.name} {suffix}".strip())
+        config.port = self._free_port(source.port)
+        config.created_at = time.time()
+        config.validate()
+        return config
+
+    async def clone(self, instance_id: str) -> InstanceRecord:
+        """Duplicate an instance, files and all.
+
+        The directory *is* the instance, so a clone is a copy of it: same
+        world, same access lists, same roster, same mods, same snapshots. Only
+        the three things that cannot be shared change -- the id, the name and,
+        if the original still holds it, the port.
+
+        The copy runs off the event loop because a world can be gigabytes, and
+        blocking here would stall every other instance's sampling tick.
+        """
+        source = self.get(instance_id)
+        config = self._clone_config(source.config, "(clone)")
+
+        layout = InstanceLayout.for_instance(self.settings, config.id)
+        try:
+            await asyncio.to_thread(
+                shutil.copytree,
+                source.layout.root,
+                layout.root,
+                # The console transcript belongs to the original's runs, not to
+                # the copy, which has not run yet.
+                ignore=shutil.ignore_patterns("logs"),
+                symlinks=True,
+            )
+        except OSError as exc:
+            shutil.rmtree(layout.root, ignore_errors=True)
+            raise ManagerError(f"Could not copy {source.config.name}: {exc}") from exc
+
+        layout.ensure()
+        write_json(layout.config_file, config.to_dict())
+        record = self._register(config)
+        log.info(
+            "cloned instance %s as %s (%s) on port %d",
+            source.config.name, config.name, config.id, config.port,
+        )
         return record
 
     # ------------------------------------------------------------------ #
@@ -733,23 +799,53 @@ class InstanceManager:
         )
 
     # ------------------------------------------------------------------ #
-    # world upload
+    # world import / export
+    #
+    # A world is the Valheim save on its own -- terrain, structures, the map.
+    # Moving one in or out deliberately leaves everything wrapped around it
+    # alone: the configuration, the players, the mods and the access lists all
+    # stay as they are. Moving the *server* is export_archive / import_archive
+    # above.
     # ------------------------------------------------------------------ #
+    def export_world_archive(self, instance_id: str) -> Path:
+        """Zip the instance's live world and return the file path."""
+        record = self.get(instance_id)
+        world = worlds_mod.find(record.layout.savedir, record.config.world)
+        if world is None:
+            raise worlds_mod.WorldError(
+                f"{record.config.name} has no world named {record.config.world!r} yet. "
+                "One is created the first time the server starts."
+            )
+        staging = Path(tempfile.mkdtemp(prefix="vhsm-world-export-"))
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        destination = staging / f"{slugify(world.name)}-{stamp}.zip"
+        return worlds_mod.export_world(world, destination)
+
     def install_world(
         self,
         instance_id: str,
         staging: Path,
         *,
         name: str = "",
-        overwrite: bool = False,
+        confirm: bool = False,
         adopt_name: bool = True,
-    ) -> worlds_mod.World:
+    ) -> "WorldImport":
         """Install an uploaded world into an instance.
 
-        The server loads the world named by ``-world``, which for a 1.0 save is
-        the folder name, so an uploaded world whose name differs from the
-        instance's would be ignored and a fresh one generated instead. By
-        default the instance is pointed at what was actually uploaded.
+        Two cases, and they are genuinely different:
+
+        *No world yet* -- a freshly created instance, or one that has never
+        been started. The upload simply becomes the world, and the instance is
+        pointed at it: the server loads the world named by ``-world``, which
+        for a 1.0 save is the folder name, so an upload whose name differs
+        would otherwise be ignored and an empty world generated beside it.
+
+        *A world already there* -- replacing it destroys hours of play, so it
+        needs the operator's word first and a snapshot before the fact. The
+        upload is installed under the instance's *existing* world name rather
+        than its own, which is what makes the replacement a replacement: the
+        server keeps loading the same world name, and the snapshot just taken
+        sits in the Backups panel beside it as a one-click way back.
         """
         record = self.get(instance_id)
         if record.supervisor.status.is_active or record.busy:
@@ -758,12 +854,36 @@ class InstanceManager:
                 "would overwrite it at its next autosave."
             )
 
-        installed = worlds_mod.install(
-            record.layout.savedir, staging, name=name, overwrite=overwrite
-        )
+        savedir = record.layout.savedir
+        # What the upload calls itself, read before anything is installed, so
+        # the UI can say which world went where when the two names differ.
+        detected = name.strip() or worlds_mod.identify(staging)[0]
+        current = worlds_mod.find(savedir, record.config.world)
+        if current is not None:
+            if not confirm:
+                raise worlds_mod.WorldError(
+                    f"{record.config.name} already has a world "
+                    f"({record.config.world!r}). Confirm the replacement to import "
+                    "over it."
+                )
+            taken = backups_mod.snapshot(
+                record.layout.root, savedir, record.config.world, kind="pre-import"
+            )
+            installed = worlds_mod.install(
+                savedir, staging, name=record.config.world, overwrite=True
+            )
+            return WorldImport(
+                world=installed, source_name=detected, snapshot=taken, replaced=True
+            )
+
+        installed = worlds_mod.install(savedir, staging, name=name, overwrite=confirm)
+        renamed_from = ""
         if adopt_name and installed.name != record.config.world:
+            renamed_from = record.config.world
             self.update(instance_id, {"world": installed.name})
-        return installed
+        return WorldImport(
+            world=installed, source_name=detected, renamed_from=renamed_from
+        )
 
     # ------------------------------------------------------------------ #
     # updates

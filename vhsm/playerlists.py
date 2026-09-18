@@ -49,10 +49,16 @@ PARKED_SUFFIX = ".disabled"
 class PlayerList:
     """One of Valheim's three list files.
 
-    The permitted list doubles as an on/off switch: Valheim treats a non-empty
-    ``permittedlist.txt`` as a whitelist, so the only way to stop enforcing it
-    without discarding its contents is to move the file out of the way.
-    ``active`` is the name Valheim reads; ``parked`` is where it waits.
+    The permitted list doubles as a whitelist switch: Valheim treats a
+    non-empty ``permittedlist.txt`` as a whitelist, so the only way to stop
+    enforcing it without discarding its contents is to move the file out of the
+    way. ``active`` is the name Valheim reads; ``parked`` is where it waits.
+
+    A parkable list is **off until it is switched on**. Locking a server down
+    is a decision, never a default: a new server, or one restored onto a host
+    where the file has not been written yet, lets everybody in, and permitting
+    a player writes to the parked copy rather than quietly turning the
+    whitelist on behind the operator's back.
     """
 
     key: str
@@ -67,14 +73,12 @@ class PlayerList:
     @property
     def enabled(self) -> bool:
         """True when Valheim is reading this list."""
-        return not self.parkable or self.active.is_file() or not self.parked.is_file()
+        return not self.parkable or self.active.is_file()
 
     @property
     def path(self) -> Path:
         """Whichever file currently holds the entries."""
-        if self.parkable and not self.active.is_file() and self.parked.is_file():
-            return self.parked
-        return self.active
+        return self.parked if self.parkable and not self.enabled else self.active
 
     def set_enabled(self, enabled: bool) -> bool:
         if not self.parkable:
@@ -87,8 +91,9 @@ class PlayerList:
             source.rename(target)
         elif enabled:
             # Nothing stored yet; an empty active file means "allow everyone",
-            # which is what Valheim does with an empty whitelist.
-            self.write([])
+            # which is what Valheim does with an empty whitelist. Written to
+            # the active path by name -- self.path still reads "off" here.
+            self._write_to(self.active, [])
         return True
 
     def read(self) -> list[str]:
@@ -108,7 +113,9 @@ class PlayerList:
         return entries
 
     def write(self, entries: Iterable[str]) -> None:
-        target = self.path
+        self._write_to(self.path, entries)
+
+    def _write_to(self, target: Path, entries: Iterable[str]) -> None:
         unique: list[str] = []
         for entry in entries:
             entry = normalise_id(entry)

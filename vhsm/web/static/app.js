@@ -190,6 +190,27 @@
       "report a working server as unreachable.";
   }
 
+  // ------------------------------------------------------------ card menu
+  // The menus are plain <details>, so opening and closing is free; all that is
+  // left is making them behave like menus -- one open at a time, and a click
+  // anywhere else puts them away.
+  document.addEventListener("click", function (event) {
+    var inside = event.target.closest && event.target.closest("details.menu");
+    document.querySelectorAll("details.menu[open]").forEach(function (menu) {
+      if (menu !== inside) menu.open = false;
+    });
+    // A menu item was picked: close the menu rather than leave it hanging over
+    // the page while the action runs.
+    if (inside && event.target.closest(".menu-body")) inside.open = false;
+  });
+
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape") return;
+    document.querySelectorAll("details.menu[open]").forEach(function (menu) {
+      menu.open = false;
+    });
+  });
+
   // Copy an address without needing to select it by hand.
   document.addEventListener("click", function (event) {
     var button = event.target.closest("[data-copy]");
@@ -480,11 +501,15 @@
 
   function sendWorld(form, files, worldName) {
     var panel = document.getElementById("transfer");
+    // Replacing a world that is already there is destructive, so a drop asks
+    // exactly what the browse-and-submit path asks through hx-confirm.
+    var ask = form.dataset.worldConfirm;
+    if (ask && !confirm(ask)) return;
+
     var payload = new FormData();
     files.forEach(function (item) { payload.append("files", item.file, item.path); });
     payload.append("name", worldName || "");
-    var overwrite = form.querySelector("[data-world-overwrite]");
-    if (overwrite && overwrite.checked) payload.append("overwrite", "1");
+    if (ask) payload.append("confirm", "1");
 
     if (panel) panel.classList.add("htmx-request");
     fetch(form.dataset.url, { method: "POST", body: payload })

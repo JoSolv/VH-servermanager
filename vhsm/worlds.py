@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -200,6 +201,27 @@ def copy_world(world: World, destination: Path) -> None:
             shutil.copy2(path, target)
 
 
+def export_world(world: World, destination: Path) -> Path:
+    """Zip *world* whole into *destination* and return the archive path.
+
+    The archive holds the world folder itself, not its contents, which is
+    exactly the shape :func:`identify` reads back -- so a world exported from
+    one instance imports into another with nothing to unwrap by hand. A legacy
+    pair is written as the two files it is.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in world.paths:
+            if path.is_dir():
+                for child in sorted(path.rglob("*")):
+                    if child.is_file() and not child.is_symlink():
+                        relative = child.relative_to(path).as_posix()
+                        archive.write(child, f"{world.name}/{relative}")
+            elif path.is_file():
+                archive.write(path, path.name)
+    return destination
+
+
 def remove_world(world: World) -> None:
     for path in world.paths:
         if path.is_dir():
@@ -256,7 +278,8 @@ def install(savedir: Path, staging: Path, *, name: str = "", overwrite: bool = F
     existing = find(savedir, final_name)
     if existing is not None and not overwrite:
         raise WorldError(
-            f"A world named {final_name!r} is already here. Tick overwrite to replace it."
+            f"A world named {final_name!r} is already here. Confirm the "
+            "replacement to overwrite it."
         )
     if existing is not None:
         remove_world(existing)

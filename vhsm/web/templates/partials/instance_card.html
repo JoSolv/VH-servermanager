@@ -1,9 +1,27 @@
 {% set config = record.config %}
 {% set status = record.supervisor.status.value %}
 <article class="card" data-instance="{{ config.id }}">
-  <div class="row spread">
+  <div class="row spread nowrap">
     <h3><a href="/instances/{{ config.id }}">{{ config.name }}</a></h3>
-    <span class="pill {{ status }}" data-f="status">{{ status }}</span>
+    {# Status, then the actions that are about the instance as a whole rather
+       than about the process: managing, copying and moving it. #}
+    <div class="row nowrap" style="gap:8px">
+      <span class="pill {{ status }}" data-f="status">{{ status }}</span>
+      <details class="menu">
+        <summary aria-label="More actions for {{ config.name }}"
+                 title="More actions">&vellip;</summary>
+        <div class="menu-body">
+          <a href="/instances/{{ config.id }}/mods">Manage mods</a>
+          <a href="/api/instances/{{ config.id }}/export">Export server</a>
+          <button type="button"
+                  hx-post="/api/instances/{{ config.id }}/clone"
+                  hx-target="#dashboard-note" hx-swap="innerHTML"
+                  hx-confirm="Clone {{ config.name }}? The copy gets the same world, players, mods and backups, its own port, and is left stopped.">
+            Clone server
+          </button>
+        </div>
+      </details>
+    </div>
   </div>
 
   <div class="row" style="gap:8px">
@@ -66,6 +84,5 @@
 
   <div class="row">
     <a class="btn small" href="/instances/{{ config.id }}">Details</a>
-    <a class="btn small" href="/instances/{{ config.id }}/mods">Mods</a>
   </div>
 </article>

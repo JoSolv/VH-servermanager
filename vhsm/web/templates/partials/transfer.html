@@ -1,6 +1,10 @@
-{# Moving a world in and the whole instance out. One import field takes either
-   shape a world arrives in: a zip, or the world folder exactly as it sits on
-   the other server. #}
+{# Moving a *world* in and out of this instance -- the Valheim save on its own.
+   Configuration, players, access lists and mods are untouched by everything
+   here; moving the whole server is on the dashboard, under Transfer servers.
+
+   One import field takes either shape a world arrives in: a zip, or the world
+   folder exactly as it sits on the other server. #}
+{% set has_world = backups.live.exists %}
 <div id="transfer" hx-target="this" hx-swap="outerHTML">
  <details class="section" data-remember="transfer">
   <summary>
@@ -19,33 +23,46 @@
 
     <div class="transfer">
       <section class="transfer-half" data-world-drop>
-        <h3>Import</h3>
+        <h3>Import world</h3>
         <p class="hint">
-          Replace this world with a folder from another server or single-player —
-          zipped or as-is.
+          Bring in a world from another server or from single-player &mdash; zipped or
+          as-is. Only the world changes: this server's configuration, players and mods
+          stay exactly as they are.
         </p>
+        {% if has_world %}
+          <div class="alert info">
+            <strong>{{ backups.world }}</strong> already exists here, so importing
+            <em>replaces</em> it. You will be asked to confirm, and the world as it
+            stands is snapshotted first so it can be rolled back to under
+            <em>Backups</em>.
+          </div>
+        {% endif %}
         <form hx-post="/api/instances/{{ record.config.id }}/world/upload"
               hx-encoding="multipart/form-data" hx-disabled-elt="find button"
               data-world-form
-              data-url="/api/instances/{{ record.config.id }}/world/upload">
+              data-url="/api/instances/{{ record.config.id }}/world/upload"
+              {% if has_world %}
+                {# Both paths in: htmx asks for the browse-and-submit route, the
+                   same wording is used by the drop handler in app.js. #}
+                hx-confirm="Replace {{ backups.world }} with the world you are importing? The current world is snapshotted first, so this can be rolled back."
+                data-world-confirm="Replace {{ backups.world }} with the world you are importing? The current world is snapshotted first, so this can be rolled back."
+              {% endif %}>
           {# Filled in only when a folder is dropped: a picked zip carries its own
              world name, and loose files carry none at all. #}
           <input type="hidden" name="name" value="" data-world-name>
+          {% if has_world %}<input type="hidden" name="confirm" value="1">{% endif %}
           <div class="row nowrap">
             <input type="file" name="files" multiple
                    aria-label="World zip, or the files inside a world folder"
                    title="Pick a .zip, or the files inside a world folder — or drop the folder itself here"
                    {{ 'disabled' if backups.running }} data-world-files>
             <button class="primary" type="submit"
-                    {{ 'disabled' if backups.running }} data-world-submit>Upload</button>
+                    {{ 'disabled' if backups.running }} data-world-submit>
+              {{ 'Replace world' if has_world else 'Import world' }}
+            </button>
             <span class="spinner">uploading…</span>
           </div>
-          <div class="check" style="margin-top:10px">
-            <input type="checkbox" id="world_overwrite" name="overwrite" value="1"
-                   {{ 'disabled' if backups.running }} data-world-overwrite>
-            <label for="world_overwrite">Replace a world of the same name</label>
-          </div>
-          <p class="hint" style="margin-bottom:0">
+          <p class="hint" style="margin:10px 0 0">
             Drop the world folder here to send it as-is, or browse for a
             <code>.zip</code> of it.
           </p>
@@ -54,24 +71,32 @@
       </section>
 
       <section class="transfer-half">
-        <h3>Export</h3>
+        <h3>Export world</h3>
         <p class="hint">
-          One archive with config, world, access lists and mod list — for restoring or
-          moving this server.
+          Download <strong>{{ backups.world }}</strong> as a zip of its world folder
+          &mdash; the save on its own, ready to import into another instance or to play
+          in single-player.
         </p>
-        <form action="/api/instances/{{ record.config.id }}/export" method="get">
-          <div class="row" style="margin-bottom:12px">
-            <div class="check" style="margin:0">
-              <input type="checkbox" id="exp_mods" name="include_mods" value="1">
-              <label for="exp_mods">Mod files</label>
-            </div>
-            <div class="check" style="margin:0">
-              <input type="checkbox" id="exp_backups" name="include_backups" value="1">
-              <label for="exp_backups">Old backups</label>
-            </div>
+        {% if has_world %}
+          <p class="subtle" style="margin-top:0">
+            {{ backups.live.size | human_bytes }} &middot;
+            {{ backups.live.file_count }} files &middot;
+            last written {{ backups.live.modified | timeago }}
+          </p>
+          <a class="btn primary" href="/api/instances/{{ record.config.id }}/world/export">
+            Download world
+          </a>
+        {% else %}
+          <div class="alert info" style="margin-bottom:0">
+            No world named <strong>{{ backups.world }}</strong> here yet, so there is
+            nothing to export. One is created the first time the server starts, or
+            import one on the left.
           </div>
-          <button class="primary" type="submit">Download archive</button>
-        </form>
+        {% endif %}
+        <p class="hint" style="margin-bottom:0">
+          To move the whole server &mdash; players, mods, backups and all &mdash; use
+          <a href="/#transfer-instances">Transfer servers</a> on the dashboard.
+        </p>
       </section>
     </div>
   </div>

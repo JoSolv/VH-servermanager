@@ -155,4 +155,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        # A stop that lands before main() installs its SIGINT handler -- during
+        # interpreter start-up, say -- would otherwise write an import
+        # traceback into the console log, where it reads as a crash.
+        log("Received signal 2 during startup, shutting down")
+        sys.exit(0)

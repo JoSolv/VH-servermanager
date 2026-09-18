@@ -135,15 +135,16 @@
                  hx-post="/api/instances/{{ iid }}/permitted"
                  hx-trigger="change" hx-include="closest form">
           <label for="permitted_enabled">
-            Enforce the permitted list
+            Use Whitelist
             <span class="muted">
-              — only listed players may join. The list is kept but ignored when off.
+              — only permitted players may join. Off unless you turn it on; the list
+              is kept but ignored while it is off.
             </span>
           </label>
         </form>
         {% if lists.permitted_enabled and not lists.permitted %}
           <div class="alert info">
-            The permitted list is empty, so everyone can still join. Add at least one
+            The whitelist is on but empty, so everyone can still join. Add at least one
             player to actually restrict access.
           </div>
         {% endif %}
