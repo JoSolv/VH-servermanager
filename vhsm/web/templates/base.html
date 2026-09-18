@@ -14,12 +14,8 @@
   <a class="brand" href="/"><span class="rune">&#9968;</span> Valheim Server Manager</a>
   <nav>
     <a href="/" class="{{ 'active' if nav == 'dashboard' }}">Dashboard</a>
-    <a href="/instances/new" class="{{ 'active' if nav == 'new' }}">New instance</a>
     <a href="/settings" class="{{ 'active' if nav == 'settings' }}">Settings</a>
   </nav>
-  <div class="conn" id="conn-state" title="Live metrics stream">
-    <span class="dot"></span><span class="label">connecting</span>
-  </div>
 </header>
 
 <main>
@@ -30,7 +26,6 @@
   <span title="{{ vhsm_build.source }}{% if vhsm_build.built_at %}, built {{ vhsm_build.built_at }}{% endif %}">
     vhsm {{ vhsm_build.version }}{% if vhsm_build.short_commit %} &middot; {{ vhsm_build.short_commit }}{% endif %}
   </span>
-  <span id="host-summary" class="muted"></span>
 </footer>
 </body>
 </html>

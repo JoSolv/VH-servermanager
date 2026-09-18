@@ -1,7 +1,7 @@
 /* Valheim Server Manager - dark, high-contrast, no framework. */
 :root {
-  --bg: #12151a;
-  --panel: #1a1f27;
+  --bg: #0d0e11;
+  --panel: #151a20;
   --panel-2: #212833;
   --border: #2e3744;
   --text: #e6e9ef;
@@ -12,7 +12,7 @@
   --warn: #e0a33e;
   --err: #e0574f;
   --info: #5b9bd5;
-  --radius: 10px;
+  --radius: 5px;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
@@ -96,9 +96,9 @@ main { flex: 1; width: min(1240px, 100%); margin: 0 auto; padding: 24px 20px 40p
 .card h3 a { color: var(--text); }
 .card .meta { font-size: 13px; color: var(--muted); }
 .metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
-.metric { background: var(--panel-2); border-radius: 8px; padding: 8px 10px; }
-.metric .k { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
-.metric .v { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.metric {border-radius: 8px; padding: 8px 10px; }
+.metric .k { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.metric .v { font-size: 23px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .metric .sub { font-size: 11px; line-height: 1.3; }
 
 .meter { height: 5px; background: #0d1014; border-radius: 3px; overflow: hidden; margin-top: 6px; }
@@ -157,7 +157,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 
 /* ---------- console ---------- */
 .console {
-  background: #0b0e12; border: 1px solid var(--border); border-radius: var(--radius);
+  background: #000; border: 1px solid var(--border); border-radius: var(--radius);
   padding: 12px; height: 420px; overflow-y: auto;
   font: 12.5px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   white-space: pre-wrap; word-break: break-word;

@@ -4,8 +4,10 @@
   <summary>
     <span class="sec-title">World &amp; backups</span>
     <span class="sec-note">
-      {% if backups.live.exists %}{{ backups.world }} &middot;
-        {{ backups.restores | length }} restore point(s)
+      {% if backups.live.exists %}
+        {{ backups.restores | length }} restore point(s) &middot;
+        {{ backups.live.size | human_bytes }} &middot;
+        saved {{ backups.live.modified | timeago }}
         {% if record.config.snapshot_interval %}
           &middot; auto every {{ record.config.snapshot_interval }} min
         {% endif %}
@@ -17,7 +19,6 @@
   {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
   <div class="row spread" style="margin-bottom:10px">
-    <span class="subtle">Snapshots are this manager's own, kept inside the instance.</span>
     <div class="row">
       <button class="small" hx-post="/api/instances/{{ record.config.id }}/backups/snapshot">
         Snapshot now
@@ -27,16 +28,6 @@
   </div>
 
   {% if backups.live.exists %}
-    <p class="subtle" style="margin-top:0">
-      Live world <strong>{{ backups.world }}</strong> &middot;
-      {% if backups.live.format == 'folder' %}
-        folder format &middot; {{ backups.live.file_count }} files &middot;
-        {{ backups.live.generations | length }} save generation(s)
-      {% else %}
-        legacy <code>.db</code> + <code>.fwl</code>
-      {% endif %}
-      &middot; {{ backups.live.size | human_bytes }} &middot; saved {{ backups.live.modified | timeago }}
-    </p>
     {% if backups.live.issues %}
       <div class="alert error">
         This world looks incomplete: {{ backups.live.issues | join('; ') }}.
@@ -68,11 +59,11 @@
   {% if backups.restores %}
     <div class="tablewrap">
       <table>
-        <thead><tr><th>Taken</th><th>Kind</th><th>Size</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Taken</th><th>Type</th><th>Size</th><th>Actions</th></tr></thead>
         <tbody>
           {% for restore in backups.restores %}
             <tr>
-              <td>{{ restore.taken_at | timeago }}<div class="muted" style="font-size:11px">{{ restore.label }}</div></td>
+              <td title="Timestamp: {{ restore.label }}">{{ restore.taken_at | timeago }}</td>
               <td>
                 {% if restore.source == 'vhsm' %}<span class="tag dep">snapshot</span>
                 {% else %}<span class="tag">Valheim {{ restore.kind }}</span>{% endif %}
@@ -84,7 +75,7 @@
                           {{ 'disabled' if backups.running }}
                           hx-post="/api/instances/{{ record.config.id }}/backups/restore"
                           hx-vals='{"key": "{{ restore.key }}"}'
-                          hx-confirm="Roll {{ backups.world }} back to {{ restore.label }}? The current world is snapshotted first, so this can be undone.">
+                          hx-confirm="Roll {{ backups.world }} back to {{ restore.label }}? The current world is snapshotted first.">
                     Roll back
                   </button>
                   <button class="small danger"
@@ -98,7 +89,7 @@
         </tbody>
       </table>
     </div>
-    <p class="subtle" style="margin-bottom:0">
+    <p class="muted" style="margin-bottom:0; font-size:11px;">
       Snapshots are taken by this manager and kept in <code>backups/</code> inside the
       instance. Entries marked <em>Valheim</em> are the server's own rotating backups.
     </p>
@@ -110,14 +101,7 @@
 
   <hr style="border:none;border-top:1px solid var(--border);margin:18px 0">
 
-  <h3 style="margin:0 0 4px">Upload an existing world</h3>
-  <p class="subtle" style="margin-top:0">
-    Bring a world over from another server or from single-player. Since Valheim 1.0 a world
-    is a <strong>folder</strong> named after it, holding <code>_main.&lt;N&gt;.db2</code>,
-    <code>_main.&lt;N&gt;.fwl2</code> and many <code>.chunk</code> files — upload the whole
-    folder, zipped or directly. Legacy <code>.db</code> + <code>.fwl</code> worlds work too.
-  </p>
-
+  <h3 style="margin:0 0 20px">Upload an existing world</h3>
   <div class="toolbar">
     <form hx-post="/api/instances/{{ record.config.id }}/world/upload"
           hx-encoding="multipart/form-data" hx-disabled-elt="find button">
@@ -136,8 +120,7 @@
 
     <form hx-post="/api/instances/{{ record.config.id }}/world/upload"
           hx-encoding="multipart/form-data" hx-disabled-elt="find button">
-      {# A directory picker sends every file in the folder; the folder's own
-         name is only in webkitRelativePath, so app.js copies it here. #}
+
       <label for="world-dir">Or the world folder itself</label>
       <div class="row">
         <input type="file" id="world-dir" name="files" webkitdirectory directory multiple required
@@ -152,10 +135,6 @@
       </div>
     </form>
   </div>
-  <p class="subtle">
-    The server only loads the world its configuration names, so this instance is repointed
-    at whatever you upload — otherwise it would ignore it and generate an empty world.
-  </p>
 
   <hr style="border:none;border-top:1px solid var(--border);margin:18px 0">
 

@@ -7,5 +7,6 @@
           {{ 'disabled' if not active }}>Stop</button>
   <button hx-post="/instances/{{ record.config.id }}/restart"
           {{ 'disabled' if not active }}>Restart</button>
+  <a href="/instances/{{ record.config.id }}/mods"><button> Manage mods</button></a>
   <span class="spinner">working…</span>
 </div>

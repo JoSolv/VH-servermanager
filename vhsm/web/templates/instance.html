@@ -7,9 +7,10 @@
   <div>
     <h1>{{ config.name }}</h1>
     <div class="subtle">
-      World <strong>{{ config.world }}</strong> &middot; UDP {{ config.port }}&ndash;{{ config.port + 2 }}
-      &middot; query {{ config.query_port }}
-      &middot; version <span data-f="version">{{ record.version or '—' }}</span>
+      World <strong>{{ config.world }}</strong>
+      {%- if mods.count %} &middot; Modded ({{mods.count}})
+      {% endif -%} &middot;
+      Server version: <span data-f="version">{{ record.version or '—' }}</span>
     </div>
     <div class="row" style="margin-top:8px">
       <span class="addr">
@@ -17,8 +18,7 @@
         <button type="button" data-copy="{{ address }}" title="Copy">copy</button>
       </span>
       {% set reach = 'yes' if record.reachable else ('warn' if record.listening else ('no' if record.reachable is sameas false else '')) %}
-      <span class="reach {{ reach }}" data-f="reach"
-            title="{{ record.reachable_detail or 'Probed from this host; a router that does not loop traffic back can report a working server as unreachable.' }}">
+      <span class="reach {{ reach }}" data-f="reach">
         {%- if not record.supervisor.status.is_active %}not running
         {%- elif record.reachable %}reachable
         {%- elif record.reachable is sameas false %}{% if record.listening %}up, query silent{% else %}not reachable{% endif %}
@@ -29,7 +29,6 @@
   </div>
   <div class="row">
     <span class="pill {{ status }}" data-f="status">{{ status }}</span>
-    <a class="btn" href="/instances/{{ config.id }}/mods">Manage mods ({{ mods.count }})</a>
   </div>
 </div>
 
@@ -55,10 +54,6 @@
       <div class="metric"><div class="k">Threads</div><div class="v" data-f="threads">--</div></div>
       <div class="metric"><div class="k">PID</div><div class="v" data-f="pid">--</div></div>
     </div>
-    <div class="metric" style="margin-top:10px">
-      <div class="k">Network</div>
-      <div class="v" style="font-size:15px" data-f="net">--</div>
-    </div>
     <svg class="spark" data-spark="cpu" viewBox="0 0 100 30" preserveAspectRatio="none" style="margin-top:10px">
       <polyline points=""></polyline>
     </svg>
@@ -72,11 +67,6 @@
     <div class="panel">
       <div class="row spread" style="margin-bottom:10px">
         <h2 style="margin:0">Connected players</h2>
-        <button class="small" hx-get="/api/instances/{{ config.id }}/connectivity"
-                hx-target="#connectivity" hx-swap="innerHTML"
-                title="Check what a Valheim client sees when it probes this server">
-          Test client visibility
-        </button>
       </div>
       <div class="tablewrap">
         <table class="players">
@@ -88,10 +78,6 @@
           </tbody>
         </table>
       </div>
-      <div id="connectivity"></div>
-      <p class="subtle" style="margin-top:14px">
-        Counts come from the Steam query port; ids and names are read from the server
-        console. Valheim reports no per-player latency, so ping is not shown.
       </p>
     </div>
   </div>

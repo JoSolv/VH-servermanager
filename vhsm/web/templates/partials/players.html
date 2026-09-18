@@ -17,7 +17,7 @@
         <div class="tablewrap">
           <table class="players">
             <thead>
-              <tr><th>Player</th><th>Id</th><th>Last seen</th><th>Flags</th><th>Actions</th></tr>
+              <tr><th>Player</th><th>Steam Id</th><th>Last seen</th><th>Flags</th><th>Actions</th></tr>
             </thead>
             <tbody>
               {% for player in players %}
@@ -62,12 +62,6 @@
                               {% if not player.banned %}hx-confirm="Ban {{ player.display_name or player.player_id }}?"{% endif %}>
                         {{ 'Unban' if player.banned else 'Ban' }}
                       </button>
-                      {% if player.online %}
-                        <button class="small danger"
-                                hx-post="/api/instances/{{ record.config.id }}/players/{{ player.player_id }}/kick">Kick</button>
-                      {% endif %}
-                    </div>
-                    <div class="acts" style="margin-top:4px">
                       <a class="btn small"
                          href="/api/instances/{{ record.config.id }}/players/{{ player.player_id }}/history">History</a>
                       <button class="small"
@@ -75,6 +69,10 @@
                               hx-confirm="Remove {{ player.display_name or player.player_id }} from the roster? Their admin/ban/permit entries stay.">
                         Forget
                       </button>
+                      {% if player.online %}
+                      <button class="small danger"
+                        hx-post="/api/instances/{{ record.config.id }}/players/{{ player.player_id }}/kick">Kick</button>
+                      {% endif %}
                     </div>
                     {% if player.events %}
                       <details class="events">

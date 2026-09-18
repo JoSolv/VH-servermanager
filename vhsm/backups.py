@@ -55,7 +55,7 @@ class Restore:
     @property
     def label(self) -> str:
         when = datetime.fromtimestamp(self.taken_at).strftime("%Y-%m-%d %H:%M:%S")
-        return f"{when} ({self.kind})"
+        return f"{when}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
