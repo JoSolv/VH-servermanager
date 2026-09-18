@@ -68,9 +68,11 @@ tested end to end, and the structure is meant to be built on.
 - Kick is a brief ban that lifts itself, because a stock server exposes no RCON
   and ignores stdin. The pending expiry is written to disk, so a manager restart
   mid-kick still clears it rather than stranding the player on the banned list.
-- The permitted list has an on/off switch. Valheim treats a non-empty
+- **Use Whitelist** is off until you turn it on. Valheim treats a non-empty
   `permittedlist.txt` as a whitelist, so switching it off parks the file rather
-  than deleting it — the list survives to be switched back on.
+  than deleting it — the list survives to be switched back on. Permitting a
+  player while it is off writes to the parked copy, so adding somebody never
+  locks the server down behind your back.
 
 **Worlds, backups and portability**
 - Both save formats are handled. Since Valheim 1.0 a world is a **folder**
@@ -79,11 +81,25 @@ tested end to end, and the structure is meant to be built on.
   generations side by side; older worlds are still a `.db` + `.fwl` pair.
   Worlds are always copied whole — a partial copy of a 1.0 world is not a
   smaller world, it is a broken one.
-- Import an existing world under *Transfer world*, from one field that takes
-  either shape it arrives in: a zipped world folder, or the folder itself
-  dropped in as-is. The instance is repointed at it, because the server only
-  loads the world its configuration names -- without that it would ignore the
-  import and generate an empty world instead.
+- **A world and a server are separate things**, and so are the two ways of
+  moving them. A *world* is the Valheim save — terrain, structures, the map —
+  and is moved from the instance that owns it, under *Transfer world*. A
+  *server instance* is that world plus everything wrapped around it, and is
+  moved from the dashboard, under *Transfer servers*. Moving a world never
+  touches configuration, players or mods.
+- Import a world under *Transfer world*, from one field that takes either shape
+  it arrives in: a zipped world folder, or the folder itself dropped in as-is.
+  On an instance with no world yet the instance is repointed at the upload,
+  because the server only loads the world its configuration names — without
+  that it would ignore the import and generate an empty world instead.
+- Importing into an instance that **already has a world** replaces it, so it
+  asks first and snapshots the current world before overwriting it. The upload
+  is installed under the instance's existing world name, which is what makes it
+  a replacement rather than a second world sitting beside the first: the server
+  keeps loading the same world, and the snapshot just taken is one click away
+  under *Backups*.
+- Export a world as a zip of its world folder — the save on its own, ready to
+  import into another instance or to play in single-player.
 - Snapshots taken on demand or on a per-instance schedule, kept in `backups/`
   inside the instance rather than in `worlds_local`, where a backup folder would
   show up as another world. Automatic snapshots are pruned to a configured
@@ -93,22 +109,36 @@ tested end to end, and the structure is meant to be built on.
   rollback can itself be undone, and it is refused while the server is running:
   a running server holds the world in memory and would overwrite the restored
   copy at its next autosave.
-- Export a whole instance as one `.vhsm.zip` — configuration, world, access
-  lists and the exact mod versions — and import it here or on another host.
-  An import gets a fresh identity, and its name and port move aside if taken,
-  so a server can be imported alongside itself.
+- Export a whole server instance as one `.vhsm.zip` and import it here or on
+  another host, from the single *Transfer servers* section on the dashboard or
+  from a card's **⋮** menu. The archive is everything the instance uses —
+  configuration, world, access lists, the player roster, mods and their config,
+  and the snapshots — so an import is a *clone* of the server it came from
+  rather than a reconstruction of it. Only the console transcript is left out:
+  it records the original's runs, not anything the copy will use.
+- **Clone** a server from the same menu, without a round trip through a file.
+  The copy is named `<original> (clone)`, keeps the original's port if it is
+  free and otherwise takes the next free 3-port range above it, and is left
+  stopped — two servers loading one world would be two servers fighting over
+  the same save.
+- An import gets a fresh identity, its name gains a number if that name is
+  taken, and its port moves aside the same way a clone's does, so a server can
+  be imported alongside itself.
 
 **Updates**
 - The installed build id (from steamcmd's app manifest) is compared against the
-  newest published build, so the dashboard can say whether an update exists
-  rather than guessing from file dates, with an update button beside it.
+  newest published build, so Settings can say whether an update exists rather
+  than guessing from file dates, with an update button beside it. The dashboard
+  stays about the host, and says one line when an update is waiting.
 - One-click update that stops running instances, updates, and starts them again
   — including when the update fails, since that is a bad reason to leave servers
   down.
 - Optional daily scheduled update at a chosen time, with the same stop/start
   handling.
 - The full steamcmd transcript is written to `steamcmd.log` and downloadable,
-  so a failed install can still be read after its output has scrolled away.
+  so a failed install can still be read after its output has scrolled away. Each
+  instance's own console log is downloadable from its page for the same reason:
+  the box on screen shows a tail, and the file is the whole thing.
 
 **Addressing**
 - A global server address (hostname or IP) that players connect to, shown as
@@ -122,6 +152,9 @@ tested end to end, and the structure is meant to be built on.
 - The instance page's sections (backups, transfer world, players,
   configuration, danger zone) collapse, start collapsed, and remember what you
   opened.
+- Each dashboard card carries a **⋮** menu in its top corner for the actions
+  that are about the instance rather than its process — manage mods, export it,
+  clone it — leaving Start/Stop/Restart as the only buttons that move a server.
 - The Players roster has a search box and All/Online/Admins/Banned filters, and
   scrolls in a fixed-height box. Each row carries the one action it needs now --
   Kick while online, Unban while banned -- with the rest behind a per-row
@@ -239,19 +272,23 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 .venv/bin/python tests/smoke_test.py
 ```
 
-166 checks covering page rendering, instance creation and validation, the
+270 checks covering page rendering, instance creation and validation, the
 start/stop/restart lifecycle, the live-metrics and console websockets, CPU
 normalisation, version reporting, player detail, every moderation path, query
 socket discovery (including a socket bound to a single interface), the
-connectivity probe, instance export/import (including rejection of a
-traversing archive), world upload in both save formats (zipped folder, loose
-files, and rejection of a traversing filename), snapshots and rollback of a 1.0
-folder world and its undo, automatic snapshots and their pruning, the update
-endpoints (including that a failed update still restarts the servers), the
-player roster and its history export, the whitelist on/off switch, the server
-address and reachability probe, and the whole mod flow (search, dependency resolution, disable/enable, config
-preservation, dependency-protected uninstall, export). Runs against the
-simulated server, so it needs no network and no Steam download.
+connectivity probe, instance export/import (including that the world, access
+lists, player roster and snapshots all come across, and rejection of a
+traversing archive), cloning (naming, port allocation and what is and is not
+copied), world export and world import in both save formats (zipped folder,
+loose files, and rejection of a traversing filename) in both the fresh-instance
+and the replace-an-existing-world cases, snapshots and rollback of a 1.0 folder
+world and its undo, automatic snapshots and their pruning, the update endpoints
+(including that a failed update still restarts the servers), the player roster
+and its history export, the whitelist defaulting to off, the console log
+download, the server address and reachability probe, and the whole mod flow
+(search, dependency resolution, disable/enable, config preservation,
+dependency-protected uninstall, export). Runs against the simulated server, so
+it needs no network and no Steam download.
 
 The suite opens with a pyflakes pass over the whole tree, because compiling a
 module only proves it parses: a name referenced inside a rarely-taken branch
@@ -278,7 +315,11 @@ edit form, as the server needs them on its command line.
 - No RCON-style console input — commands would need a server-side mod.
 - No scheduled *restarts* (scheduled updates exist) and no crash auto-restart.
 - Backups are Valheim's own; the manager does not run its own backup schedule
-  beyond the snapshot it takes before a rollback.
+  beyond the snapshots it takes before a rollback and before an import
+  overwrites a world.
+- Exporting or cloning a *running* server copies its world while the server
+  still holds it in memory, so the copy can be a moment behind or mid-write.
+  Stop it first if the copy has to be exact.
 - Mod install runs inline in the request; large packages block that request.
   Moving it to a background job with progress in the UI is the natural next step.
 - `.r2x` files exported by r2modman itself are not yet parsed (our own JSON
@@ -299,11 +340,14 @@ From another dedicated server, or from single-player:
    either browse for the zip or drop the world folder straight onto the import
    field.
 
-The instance is repointed at whatever you upload, so the old trap of the
-configured world name not matching the folder on disk — which makes Valheim
-silently generate a fresh empty world — does not apply. Upload the whole
-folder: one complete `_main.<N>` generation and its `.ok` marker must be
-present, and the panel says so if they are not.
+On an instance that has not generated a world yet, it is repointed at whatever
+you upload, so the old trap of the configured world name not matching the
+folder on disk — which makes Valheim silently generate a fresh empty world —
+does not apply. On one that already has a world you are asked to confirm, the
+current world is snapshotted, and the upload takes its place under the same
+world name. Upload the whole folder either way: one complete `_main.<N>`
+generation and its `.ok` marker must be present, and the panel says so if they
+are not.
 
 Copying files in by hand still works. Put the world folder in
 `<data_root>/instances/<id>/saves/worlds_local/` and set the instance's world

@@ -28,6 +28,8 @@
     </div>
   </div>
   <div class="row">
+    <a class="btn" href="/instances/{{ config.id }}/mods">Manage mods{% if mods.count %}
+      <span class="muted">({{ mods.count }})</span>{% endif %}</a>
     <span class="pill {{ status }}" data-f="status">{{ status }}</span>
   </div>
 </div>
@@ -69,7 +71,13 @@
 
   <div class="two-col">
     <div class="panel">
-      <h2>Console</h2>
+      <div class="row spread" style="margin-bottom:10px">
+        <h2 style="margin:0">Console</h2>
+        {# The box below holds a tail and the in-memory buffer is trimmed, so
+           the file is the only complete record of what this server did. #}
+        <a class="btn small" href="/api/instances/{{ config.id }}/console-log"
+           title="Download the complete console log for this instance">Download log</a>
+      </div>
       <div class="console" id="console" data-instance-id="{{ config.id }}"></div>
     </div>
     <div class="panel">

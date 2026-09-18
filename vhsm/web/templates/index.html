@@ -14,6 +14,14 @@
     simulated server, not the real Valheim binary.
   </div>
 {% endif %}
+{% if build.available %}
+  {# The build tile is gone from the metrics strip; an update that exists is
+     still worth one line, because nothing else on this page would say so. #}
+  <div class="alert info">
+    A newer Valheim server build is available (running {{ build.installed }}, newest
+    {{ build.latest }}). <a href="/settings">Update it from the Settings page</a>.
+  </div>
+{% endif %}
 {% if not net_available %}
   <div class="alert info">
     Per-instance network accounting is off &mdash; {{ net_reason or 'nftables is unavailable' }}.
@@ -46,39 +54,15 @@
       <div class="v">{{ records | length }}</div>
       <div class="sub">{{ status.install_size | human_bytes }} of server files</div>
     </div>
-    <div class="stat">
-      <div class="k">Server build</div>
-      <div class="v" style="font-size:15px">
-        {% if build.available %}
-          <span class="tag upd">update available</span>
-        {% elif build.installed and build.latest %}
-          <span class="tag ok-tag">up to date</span>
-        {% else %}
-          <span class="muted">unknown</span>
-        {% endif %}
-      </div>
-      <div class="sub">
-        {% if build.installed %}build {{ build.installed }}{% else %}not installed{% endif %}
-      </div>
-      <div class="row" style="margin-top:6px">
-        <button class="small" hx-post="/settings/check-update"
-                hx-target="#build-note" hx-swap="innerHTML">Check</button>
-        <button class="small {{ 'primary' if build.available }}"
-                hx-post="/api/update/run" hx-target="#build-note" hx-swap="innerHTML"
-                hx-confirm="Update the shared server files? Running instances are stopped and started again.">
-          Update now
-        </button>
-      </div>
-    </div>
   </div>
 </div>
 
-<div id="build-note"></div>
+<div id="dashboard-note"></div>
 
 <div class="page-head">
   <h1>Instances</h1>
   <div class="row">
-    <a class="btn" href="#import-instance">Import archive</a>
+    <a class="btn" href="#transfer-instances">Import / export</a>
     <a class="btn primary" href="/instances/new">+ New instance</a>
   </div>
 </div>
@@ -94,30 +78,62 @@
   </div>
 {% endif %}
 
-<div class="panel" id="import-instance" style="margin-top:20px">
-  <h2>Import a server</h2>
+{# One place for moving whole servers in and out. A world on its own is moved
+   from the instance that owns it, under Transfer world. #}
+<div class="panel" id="transfer-instances">
+  <h2>Transfer servers</h2>
   <p class="subtle" style="margin-top:0">
-    Restore a <code>.vhsm.zip</code> archive exported from this or another host. The
-    import gets a fresh identity, and its name and port are moved aside if they are
-    already taken, so a server can be imported alongside itself. It is never started
-    automatically.
+    A server archive is the whole instance &mdash; configuration, world, access lists,
+    the player roster, mods and snapshots &mdash; so importing one gives you a clone of
+    the server it came from. An import gets a fresh identity, and its name and port move
+    aside if they are already taken, so a server can be imported alongside itself. It is
+    never started automatically.
   </p>
-  <form hx-post="/api/instances/import" hx-target="#import-result" hx-swap="innerHTML"
-        hx-encoding="multipart/form-data">
-    <div class="form-grid">
-      <div class="field">
-        <label for="import_file">Archive</label>
-        <input type="file" id="import_file" name="file" accept=".zip" required>
-      </div>
-      <div class="field">
-        <label for="import_name">Name it (optional)</label>
-        <input type="text" id="import_name" name="name" placeholder="keep the archive's name">
-      </div>
-    </div>
-    <button class="primary" type="submit">Import</button>
-    <span class="spinner">importing…</span>
-  </form>
-  <div id="import-result"></div>
+
+  <div class="transfer">
+    <section class="transfer-half">
+      <h3>Import a server</h3>
+      <p class="hint">Restore a <code>.vhsm.zip</code> archive from this or another host.</p>
+      <form hx-post="/api/instances/import" hx-target="#import-result" hx-swap="innerHTML"
+            hx-encoding="multipart/form-data">
+        <div class="field">
+          <label for="import_file">Archive</label>
+          <input type="file" id="import_file" name="file" accept=".zip" required>
+        </div>
+        <div class="field">
+          <label for="import_name">Name it (optional)</label>
+          <input type="text" id="import_name" name="name" placeholder="keep the archive's name">
+        </div>
+        <button class="primary" type="submit">Import</button>
+        <span class="spinner">importing…</span>
+      </form>
+      <div id="import-result"></div>
+    </section>
+
+    <section class="transfer-half">
+      <h3>Export a server</h3>
+      <p class="hint">
+        Download one instance as a single archive. Also on each card's
+        <span class="dots">&vellip;</span> menu, beside <em>Clone</em>.
+      </p>
+      {% if records %}
+        <ul class="exportlist">
+          {% for record in records %}
+            <li>
+              <span class="who">
+                <strong>{{ record.config.name }}</strong>
+                <span class="muted">world {{ record.config.world }} &middot;
+                  port {{ record.config.port }}</span>
+              </span>
+              <a class="btn small" href="/api/instances/{{ record.config.id }}/export">Export</a>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <div class="empty" style="padding:20px">Nothing to export yet.</div>
+      {% endif %}
+    </section>
+  </div>
 </div>
 
 {% endblock %}

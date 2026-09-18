@@ -12,6 +12,7 @@ import json
 import logging
 import shutil
 import tempfile
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -20,6 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from starlette.background import BackgroundTask
 
 from ..instance import InstanceConfig, ValidationError
+from ..manager import ManagerError
 from ..playerlists import KICK_BAN_SECONDS, PlayerListError
 from ..archive import ArchiveError, SUFFIX, extract_zip
 from ..backups import BackupError
@@ -422,19 +424,19 @@ async def get_players(request: Request, instance_id: str) -> HTMLResponse:
 async def toggle_permitted(
     request: Request, instance_id: str, enabled: str = Form(default="")
 ) -> HTMLResponse:
-    """Enforce the whitelist, or stop enforcing it without losing the list."""
+    """Turn the whitelist on, or off again without losing the list."""
     try:
         _manager(request).set_permitted_enabled(instance_id, bool(enabled))
     except (PlayerListError, OSError) as exc:
         return _players_partial(request, instance_id, error=str(exc))
     state = "on" if enabled else "off"
     detail = (
-        "only listed players may join"
+        "only permitted players may join"
         if enabled
         else "anyone may join; the list is kept for later"
     )
     return _players_partial(
-        request, instance_id, message=f"Permitted list {state} — {detail}."
+        request, instance_id, message=f"Whitelist {state} — {detail}."
     )
 
 
@@ -571,21 +573,22 @@ async def api_update_status(request: Request, force: str = "") -> JSONResponse:
 
 
 # --------------------------------------------------------------------------- #
-# instance export / import
+# instance export / import / clone
+#
+# A server *instance* is the world plus everything around it -- configuration,
+# players, access lists, mods and snapshots -- so these three move all of it.
+# Moving a world on its own lives further down under "world import / export".
 # --------------------------------------------------------------------------- #
 @router.get("/api/instances/{instance_id}/export")
 async def export_instance_archive(
     request: Request,
     instance_id: str,
-    include_mods: str = "",
-    include_backups: str = "",
+    include_logs: str = "",
 ):
     """Download the whole instance as a single archive."""
     manager = _manager(request)
-    path = manager.export_archive(
-        instance_id,
-        include_mods=bool(include_mods),
-        include_backups=bool(include_backups),
+    path = await asyncio.to_thread(
+        manager.export_archive, instance_id, include_logs=bool(include_logs)
     )
 
     def cleanup() -> None:
@@ -628,6 +631,25 @@ async def import_instance_archive(
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
+    return HTMLResponse(
+        "", headers={"HX-Redirect": f"/instances/{record.config.id}"}
+    )
+
+
+@router.post("/api/instances/{instance_id}/clone", response_class=HTMLResponse)
+async def clone_instance(request: Request, instance_id: str) -> HTMLResponse:
+    """Duplicate an instance and open the copy.
+
+    Deliberately not started: two servers loading the same world would be two
+    servers fighting over the same save.
+    """
+    manager = _manager(request)
+    try:
+        record = await manager.clone(instance_id)
+    except (ManagerError, ValidationError, OSError) as exc:
+        # 200 with a banner rather than a 4xx: htmx only swaps successful
+        # responses, and an error nobody can see is worse than no error.
+        return HTMLResponse(f'<div class="alert error">{exc}</div>')
     return HTMLResponse(
         "", headers={"HX-Redirect": f"/instances/{record.config.id}"}
     )
@@ -740,17 +762,49 @@ def _safe_member(filename: str) -> Path | None:
     return Path(*parts)
 
 
+@router.get("/api/instances/{instance_id}/world/export")
+async def export_world_archive(request: Request, instance_id: str):
+    """Download this instance's live world as a zip.
+
+    The world only -- configuration, players and mods stay behind, because
+    this is the file you hand to someone who wants to play *this map* on their
+    own server. Moving the server itself is the instance archive.
+    """
+    manager = _manager(request)
+    try:
+        path = await asyncio.to_thread(manager.export_world_archive, instance_id)
+    except (WorldError, OSError) as exc:
+        return PlainTextResponse(str(exc) + "\n", status_code=404)
+
+    def cleanup() -> None:
+        shutil.rmtree(path.parent, ignore_errors=True)
+
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        filename=path.name,
+        background=BackgroundTask(cleanup),
+    )
+
+
 @router.post("/api/instances/{instance_id}/world/upload", response_class=HTMLResponse)
 async def upload_world(
     request: Request,
     instance_id: str,
     files: list[UploadFile] = File(...),
     name: str = Form(default=""),
+    confirm: str = Form(default=""),
     overwrite: str = Form(default=""),
     adopt_name: str = Form(default="1"),
 ) -> HTMLResponse:
-    """Install a world from a zipped world folder or the folder's files."""
+    """Install a world from a zipped world folder or the folder's files.
+
+    ``confirm`` is the operator agreeing to overwrite a world that is already
+    there; ``overwrite`` is the older spelling of the same thing, kept so a
+    scripted caller does not break.
+    """
     manager = _manager(request)
+    replace = bool(confirm) or bool(overwrite)
     previous_world = manager.get(instance_id).config.world
     staging = Path(tempfile.mkdtemp(prefix="vhsm-world-"))
     unpack = staging / "unpacked"
@@ -802,23 +856,40 @@ async def upload_world(
                         sink.write(chunk)
 
         try:
-            installed = manager.install_world(
-                instance_id,
-                unpack,
-                name=name.strip(),
-                overwrite=bool(overwrite),
-                adopt_name=bool(adopt_name),
+            result = await asyncio.to_thread(
+                partial(
+                    manager.install_world,
+                    instance_id,
+                    unpack,
+                    name=name.strip(),
+                    confirm=replace,
+                    adopt_name=bool(adopt_name),
+                )
             )
-        except (WorldError, ValidationError) as exc:
+        except (WorldError, BackupError, ValidationError) as exc:
             return _transfer_partial(request, instance_id, error=str(exc))
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
+    installed = result.world
     record = manager.get(instance_id)
     message = (
         f"Installed world {installed.name!r} "
         f"({installed.file_count} files, {installed.format} format)."
     )
+    if result.replaced:
+        # Say plainly when the upload was called something else: it now lives
+        # under this server's world name, which is what makes it a replacement.
+        came_as = (
+            f" {result.source_name} was installed as {installed.name}, which is the "
+            "world this server loads."
+            if result.source_name and result.source_name != installed.name
+            else ""
+        )
+        message += (
+            f"{came_as} The world that was here has been replaced; it was "
+            "snapshotted first, so it can be rolled back to under Backups."
+        )
     renamed = record.config.world == installed.name and previous_world != installed.name
     if renamed:
         message += (
@@ -839,6 +910,26 @@ async def upload_world(
         events["vhsm:world-renamed"] = {"world": installed.name}
     response.headers["HX-Trigger"] = json.dumps(events)
     return response
+
+
+@router.get("/api/instances/{instance_id}/console-log")
+async def console_log(request: Request, instance_id: str):
+    """Download one instance's complete console transcript.
+
+    The page shows the tail and the in-memory buffer is trimmed, so the file on
+    disk is the only full record of what a server did -- which is what a crash
+    that scrolled past needs.
+    """
+    record = _manager(request).get(instance_id)
+    filename = f"{record.config.slug}-console.log"
+    path = record.layout.console_log
+    if not path.is_file():
+        return PlainTextResponse(
+            f"{record.config.name} has not written any console output yet.\n",
+            status_code=404,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    return FileResponse(path, media_type="text/plain", filename=filename)
 
 
 # --------------------------------------------------------------------------- #

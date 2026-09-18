@@ -1,4 +1,7 @@
-{# Action buttons for one instance. Re-fetched whenever the status changes. #}
+{# Lifecycle buttons for one instance, and only those: everything that acts on
+   the instance rather than on its process lives in the card's ... menu on the
+   dashboard and in the header on the instance page. Re-fetched whenever the
+   status changes. #}
 <div class="row" data-controls hx-target="this" hx-swap="outerHTML">
   {% set active = record.supervisor.status.value in ('starting', 'running', 'stopping') %}
   <button class="primary" hx-post="/instances/{{ record.config.id }}/start"
@@ -7,6 +10,5 @@
           {{ 'disabled' if not active }}>Stop</button>
   <button hx-post="/instances/{{ record.config.id }}/restart"
           {{ 'disabled' if not active }}>Restart</button>
-  <a href="/instances/{{ record.config.id }}/mods"><button> Manage mods</button></a>
   <span class="spinner">working…</span>
 </div>

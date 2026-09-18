@@ -253,19 +253,38 @@ with TestClient(app) as c:
     check("history carries the events", "connected" in r.text, r.text[:120])
     check("history is an attachment", "attachment" in r.headers.get("content-disposition", ""))
 
-    print("\n[item 8: permitted list toggle]")
+    print("\n[minor fix 1: whitelist]")
     lists = app.state.manager.get(iid).lists
     saved = ROOT/"instances"/iid/"saves"
+    # Locking a server down is a decision, never a default: a server nobody has
+    # touched lets everyone in.
+    check("whitelist starts off", lists.permitted.enabled is False)
+    check("nothing for valheim to read yet", not (saved/"permittedlist.txt").is_file())
+    r = c.get(f"/api/instances/{iid}/players")
+    check("switch is named Use Whitelist", "Use Whitelist" in r.text)
+    check("old enforce wording gone", "Enforce the permitted list" not in r.text)
+    switch = r.text.split('id="permitted_enabled"', 1)[-1].split(">", 1)[0]
+    check("switch rendered unticked", "checked" not in switch, switch[:120])
+
+    # Permitting somebody must not turn the whitelist on behind the operator's
+    # back: the entry is kept for when they do.
     lists.permitted.add("76561198000000123")
+    check("permitting does not switch it on", lists.permitted.enabled is False)
+    check("the entry waits in the parked file",
+          "76561198000000123" in (saved/"permittedlist.txt.disabled").read_text())
+    check("valheim still reads no whitelist", not (saved/"permittedlist.txt").is_file())
+
+    r = c.post(f"/api/instances/{iid}/permitted", data={"enabled": "1"})
+    check("whitelist can be switched on", "on —" in r.text, r.text[:110])
+    check("valheim reads it once on", (saved/"permittedlist.txt").is_file())
+    check("entries survived the round trip", "76561198000000123" in lists.permitted.read())
     r = c.post(f"/api/instances/{iid}/permitted", data={"enabled": ""})
-    check("whitelist can be switched off", "off" in r.text, r.text[:110])
+    check("whitelist can be switched off again", "off" in r.text, r.text[:110])
     check("valheim no longer reads it", not (saved/"permittedlist.txt").is_file())
     check("entries are kept, not discarded",
           "76561198000000123" in (saved/"permittedlist.txt.disabled").read_text())
-    r = c.post(f"/api/instances/{iid}/permitted", data={"enabled": "1"})
-    check("whitelist can be switched back on", "on —" in r.text, r.text[:110])
-    check("valheim reads it again", (saved/"permittedlist.txt").is_file())
-    check("entries survived the round trip", "76561198000000123" in lists.permitted.read())
+    # Back on, so the rest of the suite exercises the enforced path.
+    c.post(f"/api/instances/{iid}/permitted", data={"enabled": "1"})
 
     r = c.post(f"/api/instances/{iid}/players/{pid}/forget")
     check("player can be forgotten", "Removed" in r.text, r.text[:100])
@@ -440,8 +459,11 @@ with TestClient(app) as c:
 
     print("\n[item 4: update indicator]")
     r = c.get("/")
-    check("dashboard shows build state", "Server build" in r.text)
-    check("dashboard offers an update button", "/api/update/run" in r.text)
+    # The build tile is gone from the metrics strip: the numbers there are about
+    # this host, and which Valheim build is installed is a Settings matter.
+    check("build card dropped from the dashboard metrics", "Server build" not in r.text)
+    check("host metrics still on the dashboard", "Host CPU" in r.text and "Load average" in r.text)
+    check("settings still owns the build state", "Installed build" in c.get("/settings").text)
     r = c.post("/api/update/run")
     check("update can be triggered", r.status_code == 200 and "Update started" in r.text,
           r.text[:110])
@@ -507,12 +529,30 @@ with TestClient(app) as c:
     check("probe lists the process's sockets", "UDP sockets this server process holds" in r.text)
     check("probe reports which address answered", "answered on" in r.text, r.text[:140])
 
-    print("\n[export / import]")
+    print("\n[export / import a whole server]")
     world_dir = ROOT/"instances"/iid/"saves"/"worlds_local"
     world_dir.mkdir(parents=True, exist_ok=True)
     make_folder_world(world_dir, "Midgard", generations=2)
     (world_dir/"Midgard"/"_main.0.db2").write_bytes(b"WORLD-ORIGINAL")
     (ROOT/"instances"/iid/"saves"/"adminlist.txt").write_text("// admins\n76561198000000042\n")
+    # A player base to carry across: an instance is its world *plus* who has
+    # played on it, and an export that loses them is not a clone.
+    from vhsm.monitor.players import LogEvent
+    veteran = "76561198000000777"
+    roster = app.state.manager.get(iid).roster
+    roster.observe(LogEvent(kind="connect", player_id=veteran))
+    roster.observe(LogEvent(kind="named", player_id=veteran, name="Freyja"))
+    roster.save(force=True)
+
+    r = c.get("/")
+    check("dashboard has one transfer section", r.text.count('id="transfer-instances"') == 1)
+    check("that section imports and exports",
+          "/api/instances/import" in r.text and f"/api/instances/{iid}/export" in r.text)
+    check("cards carry a context menu", r.text.count('class="menu"') >= 2, r.text.count('class="menu"'))
+    check("the menu holds mods, export and clone",
+          all(x in r.text for x in ("Manage mods", "Export server", "Clone server")))
+    check("manage mods left the lifecycle row",
+          c.get(f"/instances/{iid}/controls").text.count("mods") == 0)
 
     r = c.get(f"/api/instances/{iid}/export")
     check("export downloads", r.status_code == 200 and r.content[:2] == b"PK", r.status_code)
@@ -527,7 +567,13 @@ with TestClient(app) as c:
           sum(1 for n in names if n.startswith("saves/worlds_local/Midgard/")) >= 14,
           sum(1 for n in names if n.startswith("saves/worlds_local/Midgard/")))
     check("archive carries access lists", "saves/adminlist.txt" in names)
-    check("archive excludes logs", not any(n.startswith("logs/") for n in names))
+    # An export is a clone, so the things that make this server *this* server
+    # travel with it: who has played here, and what has been saved of it.
+    check("archive carries the player roster", "players.json" in names, names[:8])
+    check("archive carries the snapshots",
+          any(n.startswith("backups/") for n in names), [n for n in names[:20]])
+    check("archive still excludes the console log",
+          not any(n.startswith("logs/") for n in names))
 
     r = c.post("/api/instances/import",
                files={"file": ("midgard.vhsm.zip", archive_bytes, "application/zip")})
@@ -537,12 +583,56 @@ with TestClient(app) as c:
     check("imported gets a fresh id", new_id != iid)
     check("imported name avoids the collision", imported["name"] != "Midgard", imported["name"])
     check("imported port avoids the collision", imported["port"] != 2456, imported["port"])
+    # The original's port is kept when it can be, and otherwise the next free
+    # range above it -- not somewhere unrelated at the bottom of the range.
+    check("imported port lands next to the original", imported["port"] == 2459, imported["port"])
     check("imported carries no autostart flag", "autostart" not in imported)
     check("imported world restored",
           (ROOT/"instances"/new_id/"saves"/"worlds_local"/"Midgard"/"_main.0.db2").read_bytes()
           == b"WORLD-ORIGINAL")
     check("imported admin list restored",
           "76561198000000042" in (ROOT/"instances"/new_id/"saves"/"adminlist.txt").read_text())
+    restored = app.state.manager.player_rows(new_id)["players"]
+    check("imported player base restored",
+          any(x["player_id"] == veteran for x in restored), restored)
+    check("imported roster keeps the names", 
+          any(x["display_name"] == "Freyja" for x in restored), restored)
+    check("imported backups restored",
+          bool(app.state.manager.backup_summary(new_id)["restores"]))
+
+    print("\n[clone a server]")
+    r = c.post(f"/api/instances/{iid}/clone")
+    check("clone accepted", r.status_code == 200 and "hx-redirect" in r.headers, r.status_code)
+    clone_id = r.headers["hx-redirect"].rsplit("/", 1)[-1]
+    cloned = c.get(f"/api/instances/{clone_id}").json()
+    check("clone is a new instance", clone_id not in (iid, new_id))
+    check("clone is named after the original", cloned["name"] == "Midgard (clone)", cloned["name"])
+    check("clone takes the next free port range", cloned["port"] == 2462, cloned["port"])
+    check("clone is left stopped", cloned["status"] == "stopped", cloned["status"])
+    clone_root = ROOT/"instances"/clone_id
+    check("clone copied the world",
+          (clone_root/"saves"/"worlds_local"/"Midgard"/"_main.0.db2").read_bytes()
+          == b"WORLD-ORIGINAL")
+    check("clone copied the access lists",
+          "76561198000000042" in (clone_root/"saves"/"adminlist.txt").read_text())
+    check("clone copied the player base",
+          any(x["player_id"] == veteran
+              for x in app.state.manager.player_rows(clone_id)["players"]))
+    check("clone copied the backups",
+          bool(app.state.manager.backup_summary(clone_id)["restores"]))
+    check("clone did not copy the original's console log",
+          not (clone_root/"logs"/"console.log").exists())
+    check("clone kept its own identity in instance.json",
+          json.loads((clone_root/"instance.json").read_text())["id"] == clone_id)
+    # Cloning twice must not collide on the name that the first clone took.
+    r = c.post(f"/api/instances/{iid}/clone")
+    second = c.get(f"/api/instances/{r.headers['hx-redirect'].rsplit('/', 1)[-1]}").json()
+    check("a second clone gets its own name", second["name"] == "Midgard (clone) (2)",
+          second["name"])
+    check("a second clone gets its own ports",
+          second["port"] not in (2456, 2459, 2462), second["port"])
+    c.post(f"/instances/{second['id']}/delete", data={"remove_files": "on"})
+    c.post(f"/instances/{clone_id}/delete", data={"remove_files": "on"})
 
     evil = _io.BytesIO()
     with _zip.ZipFile(evil, "w") as z:
@@ -563,10 +653,17 @@ with TestClient(app) as c:
     r = c.get(f"/api/instances/{new_id}/transfer")
     check("transfer panel renders",
           r.status_code == 200 and 'sec-title">Transfer world<' in r.text, r.status_code)
-    check("import and export live together",
-          "world/upload" in r.text and "Download archive" in r.text)
+    check("world import and export live together",
+          "world/upload" in r.text and "world/export" in r.text)
     check("one import field takes either shape",
           r.text.count('name="files"') == 1 and "webkitdirectory" not in r.text)
+    # The instance page moves worlds; the dashboard moves whole servers. Mixing
+    # the two here is what made "export" ambiguous in the first place.
+    check("the instance panel no longer exports the whole server",
+          "instances/import" not in r.text and "/export\"" not in r.text.replace(
+              f"/api/instances/{new_id}/world/export", ""))
+    check("panel points at the dashboard for whole servers",
+          "transfer-instances" in r.text)
 
     print("\n[backups / rollback]")
     nd = ROOT/"instances"/new_id/"saves"/"worlds_local"
@@ -577,13 +674,21 @@ with TestClient(app) as c:
     check("import/export moved out of backups",
           "Download archive" not in r.text and "world/upload" not in r.text)
 
+    # The import brought the original's snapshots with it, which is the point of
+    # an instance archive -- so measure what this snapshot adds rather than
+    # assuming an empty slate.
+    snapdir = ROOT/"instances"/new_id/"backups"
+    inherited = {x.name for x in snapdir.glob("manual-*")}
+    check("snapshots came across with the instance", bool(inherited), inherited)
+
     # The reported bug: this used to fail with "no world to snapshot".
     r = c.post(f"/api/instances/{new_id}/backups/snapshot")
     check("snapshot of a 1.0 world works", "Snapshot taken" in r.text, r.text[:140])
-    snaps = list((ROOT/"instances"/new_id/"backups").glob("manual-*"))
-    check("snapshot stored under the instance", len(snaps) == 1, [x.name for x in snaps])
+    taken = {x.name for x in snapdir.glob("manual-*")} - inherited
+    check("snapshot stored under the instance", len(taken) == 1, taken)
     check("snapshot copied the whole world folder",
-          (snaps[0]/"payload"/"Midgard"/"_main.0.db2").read_bytes() == b"WORLD-ORIGINAL")
+          (snapdir/taken.pop()/"payload"/"Midgard"/"_main.0.db2").read_bytes()
+          == b"WORLD-ORIGINAL")
     check("snapshot kept out of worlds_local",
           not any(p.name.startswith("manual-") for p in nd.iterdir()))
 
@@ -597,24 +702,41 @@ with TestClient(app) as c:
 
     (nd/"Midgard"/"_main.0.db2").write_bytes(b"CORRUPTED")
     (nd/"Midgard"/"junk.chunk").write_bytes(b"junk")
-    key = [x["key"] for x in summary["restores"] if x["source"] == "vhsm"][0]
+    ours = [x["key"] for x in summary["restores"] if x["source"] == "vhsm"]
+    # The newest one is the snapshot just taken, of the world as it should be.
+    key = ours[0]
     r = c.post(f"/api/instances/{new_id}/backups/restore", data={"key": key})
     check("rollback reported", "Rolled back" in r.text, r.text[:110])
     check("world rolled back", (nd/"Midgard"/"_main.0.db2").read_bytes() == b"WORLD-ORIGINAL")
     check("stale files removed by rollback", not (nd/"Midgard"/"junk.chunk").exists())
     after = app.state.manager.backup_summary(new_id)["restores"]
     check("rollback is itself undoable",
-          len([x for x in after if x["source"] == "vhsm"]) == 2,
+          len([x for x in after if x["source"] == "vhsm"]) == len(ours) + 1,
           [x["key"] for x in after])
 
     r = c.post(f"/instances/{new_id}/start"); wait_status(c, new_id, "running")
     r = c.post(f"/api/instances/{new_id}/backups/restore", data={"key": key})
     check("rollback refused while running", "Stop the server" in r.text, r.text[:110])
 
-    print("\n[world upload]")
+    print("\n[world export]")
+    r = c.get(f"/api/instances/{new_id}/world/export")
+    check("world export downloads", r.status_code == 200 and r.content[:2] == b"PK", r.status_code)
+    check("world export is a plain zip, not an instance archive",
+          ".vhsm.zip" not in r.headers.get("content-disposition", ""),
+          r.headers.get("content-disposition"))
+    exported_world = r.content
+    wnames = _zip.ZipFile(_io.BytesIO(exported_world)).namelist()
+    check("world export wraps the world folder",
+          all(n.startswith("Midgard/") for n in wnames), wnames[:4])
+    check("world export carries every file", len(wnames) >= 14, len(wnames))
+    check("world export carries the world only",
+          not any("instance.json" in n or "adminlist" in n for n in wnames))
+
+    print("\n[world import]")
     # a running server would overwrite whatever we put down
     zipped = _io.BytesIO()
     src = make_folder_world(Path(tempfile.mkdtemp()), "Jotunheim", generations=2)
+    (src/"_main.0.db2").write_bytes(b"WORLD-JOTUNHEIM")
     with _zip.ZipFile(zipped, "w") as z:
         for f in src.rglob("*"):
             if f.is_file():
@@ -625,65 +747,154 @@ with TestClient(app) as c:
     check("upload refused while running", "Stop the server" in r.text, r.text[:110])
     c.post(f"/instances/{new_id}/stop"); wait_status(c, new_id, "stopped")
 
+    # This instance already has a world, so replacing it needs the operator's
+    # word rather than happening because a file was picked.
     r = c.post(f"/api/instances/{new_id}/world/upload",
                files={"files": ("Jotunheim.zip", world_zip, "application/zip")})
-    check("zipped world folder installs", "Installed world" in r.text, r.text[:140])
-    check("world files landed", (nd/"Jotunheim"/"_main.0.fwl2").is_file())
-    check("instance repointed at the upload",
-          c.get(f"/api/instances/{new_id}").json()["world"] == "Jotunheim",
-          c.get(f"/api/instances/{new_id}").json()["world"])
-    check("uploaded world is now the live one",
-          app.state.manager.backup_summary(new_id)["live"]["exists"])
+    check("replacing an existing world needs confirmation",
+          "already has a world" in r.text, r.text[:160])
+    check("nothing was replaced without it",
+          (nd/"Midgard"/"_main.0.db2").read_bytes() == b"WORLD-ORIGINAL")
+    r = c.get(f"/api/instances/{new_id}/transfer")
+    check("the panel asks before replacing", "hx-confirm" in r.text and "confirm" in r.text)
+    check("the panel says the world will be replaced", "Replace world" in r.text, r.text[:0])
 
-    r = c.post(f"/api/instances/{new_id}/world/upload",
-               files={"files": ("Jotunheim.zip", world_zip, "application/zip")})
-    check("refuses to clobber without overwrite", "already here" in r.text, r.text[:120])
+    before = len(app.state.manager.backup_summary(new_id)["restores"])
     r = c.post(f"/api/instances/{new_id}/world/upload",
                files={"files": ("Jotunheim.zip", world_zip, "application/zip")},
-               data={"overwrite": "1"})
-    check("overwrite accepted when asked", "Installed world" in r.text, r.text[:120])
+               data={"confirm": "1"})
+    check("confirmed import installs", "Installed world" in r.text, r.text[:200])
+    check("the world was replaced in place",
+          (nd/"Midgard"/"_main.0.db2").read_bytes() == b"WORLD-JOTUNHEIM")
+    check("the instance still loads the same world name",
+          c.get(f"/api/instances/{new_id}").json()["world"] == "Midgard",
+          c.get(f"/api/instances/{new_id}").json()["world"])
+    check("the message says where the upload landed",
+          "Jotunheim was installed as Midgard" in r.text, r.text[:260])
+
+    after = app.state.manager.backup_summary(new_id)["restores"]
+    check("the replaced world was snapshotted first", len(after) == before + 1,
+          f"{before} -> {len(after)}")
+    check("the snapshot is labelled as taken before an import",
+          any(x["kind"] == "pre-import" for x in after), [x["kind"] for x in after])
+    rollback = next(x["key"] for x in after if x["kind"] == "pre-import")
+    r = c.post(f"/api/instances/{new_id}/backups/restore", data={"key": rollback})
+    check("a replaced world can be rolled back", "Rolled back" in r.text, r.text[:120])
+    check("rollback brought the old world back",
+          (nd/"Midgard"/"_main.0.db2").read_bytes() == b"WORLD-ORIGINAL")
+
+    # Importing into an instance whose world has not been generated yet is the
+    # other case, and still works the way it always did: the upload becomes the
+    # world and the instance is repointed at it.
+    fresh = c.post("/instances", data={"name":"Vanaheim","world":"Vanaheim","password":"ymirflesh",
+                   "port":"2480","save_interval":"1800","backups":"4","backup_short":"7200",
+                   "backup_long":"43200"}, follow_redirects=False)
+    fresh_id = fresh.headers["location"].rsplit("/", 1)[-1]
+    r = c.get(f"/api/instances/{fresh_id}/transfer")
+    check("a world-less instance is not asked to confirm", "hx-confirm" not in r.text)
+    check("and its button says import, not replace",
+          "Import world" in r.text and "Replace world" not in r.text)
+    r = c.post(f"/api/instances/{fresh_id}/world/upload",
+               files={"files": ("Jotunheim.zip", world_zip, "application/zip")})
+    check("importing into a fresh instance needs no confirmation",
+          "Installed world" in r.text, r.text[:160])
+    check("instance repointed at the upload",
+          c.get(f"/api/instances/{fresh_id}").json()["world"] == "Jotunheim",
+          c.get(f"/api/instances/{fresh_id}").json()["world"])
+    fd = ROOT/"instances"/fresh_id/"saves"/"worlds_local"
+    check("world files landed", (fd/"Jotunheim"/"_main.0.fwl2").is_file())
+    check("uploaded world is now the live one",
+          app.state.manager.backup_summary(fresh_id)["live"]["exists"])
+    check("importing a world left the rest of the server alone",
+          c.get(f"/api/instances/{fresh_id}").json()["port"] == 2480)
 
     # a directory upload: every file posted separately, name carried alongside
     loose = [("files", (f"Vanaheim/{f.relative_to(src)}", f.read_bytes(), "application/octet-stream"))
              for f in sorted(src.rglob("*")) if f.is_file()]
-    r = c.post(f"/api/instances/{new_id}/world/upload", files=loose, data={"name": "Vanaheim"})
+    r = c.post(f"/api/instances/{fresh_id}/world/upload", files=loose,
+               data={"name": "Vanaheim", "confirm": "1"})
     check("folder upload installs", "Installed world" in r.text, r.text[:140])
-    check("folder upload landed", (nd/"Vanaheim"/"_main.0.db2").is_file())
+    check("folder upload replaced the live world",
+          (fd/"Jotunheim"/"_main.0.db2").read_bytes() == b"WORLD-JOTUNHEIM")
 
     evil = [("files", ("../../escaped.txt", b"pwned", "text/plain"))]
-    r = c.post(f"/api/instances/{new_id}/world/upload", files=evil)
+    r = c.post(f"/api/instances/{fresh_id}/world/upload", files=evil, data={"confirm": "1"})
     check("traversing filename rejected", "unsafe name" in r.text, r.text[:120])
     check("nothing escaped", not (ROOT.parent/"escaped.txt").exists())
 
     notworld = _io.BytesIO()
     with _zip.ZipFile(notworld, "w") as z:
         z.writestr("holiday.jpg", "not a world")
-    r = c.post(f"/api/instances/{new_id}/world/upload",
-               files={"files": ("random.zip", notworld.getvalue(), "application/zip")})
+    r = c.post(f"/api/instances/{fresh_id}/world/upload",
+               files={"files": ("random.zip", notworld.getvalue(), "application/zip")},
+               data={"confirm": "1"})
     check("non-world zip rejected with guidance", "No Valheim world found" in r.text, r.text[:140])
 
     # legacy worlds still work
     legacy = _io.BytesIO()
     with _zip.ZipFile(legacy, "w") as z:
         z.writestr("OldWorld.db", "LEGACY-DB"); z.writestr("OldWorld.fwl", "LEGACY-FWL")
-    r = c.post(f"/api/instances/{new_id}/world/upload",
-               files={"files": ("old.zip", legacy.getvalue(), "application/zip")})
+    r = c.post(f"/api/instances/{fresh_id}/world/upload",
+               files={"files": ("old.zip", legacy.getvalue(), "application/zip")},
+               data={"confirm": "1"})
     check("legacy .db/.fwl upload still works", "Installed world" in r.text, r.text[:140])
-    check("legacy world on disk", (nd/"OldWorld.db").is_file() and (nd/"OldWorld.fwl").is_file())
+    check("legacy world installed under the instance's world name",
+          (fd/"Jotunheim.db").is_file() and (fd/"Jotunheim.fwl").is_file(),
+          sorted(x.name for x in fd.iterdir()))
+    c.post(f"/instances/{fresh_id}/delete", data={"remove_files": "on"})
 
-    # Backups are per-world, and the uploads repointed this instance, so the
-    # earlier Midgard snapshot is deliberately no longer listed here.
-    stale = c.post(f"/api/instances/{new_id}/backups/delete", data={"key": key})
-    check("a snapshot of another world is not offered", "no backup" in stale.text, stale.text[:100])
+    # A world exported from one instance imports into another as-is.
+    r = c.post(f"/api/instances/{new_id}/world/upload",
+               files={"files": ("Midgard-export.zip", exported_world, "application/zip")},
+               data={"confirm": "1"})
+    check("an exported world imports straight back",
+          "Installed world" in r.text, r.text[:160])
 
+    print("\n[backup housekeeping]")
     c.post(f"/api/instances/{new_id}/backups/snapshot")
     current = app.state.manager.backup_summary(new_id)
-    check("snapshot of the uploaded world", len(current["restores"]) >= 1, current["restores"])
+    check("snapshot of the live world", len(current["restores"]) >= 1, current["restores"])
     own = current["restores"][0]["key"]
     r = c.post(f"/api/instances/{new_id}/backups/delete", data={"key": own})
     check("backup deleted", "Backup deleted" in r.text, r.text[:100])
     check("snapshot directory removed",
           not (ROOT/"instances"/new_id/"backups"/own).exists())
+    stale = c.post(f"/api/instances/{new_id}/backups/delete", data={"key": own})
+    check("deleting a backup twice is refused, not silent",
+          "no backup" in stale.text, stale.text[:100])
+
+    print("\n[minor fix 3: console log download]")
+    r = c.get(f"/instances/{new_id}")
+    check("instance page offers the log", f"/api/instances/{new_id}/console-log" in r.text)
+    # An instance that has never run has no transcript, and saying so beats
+    # handing back an empty file that looks like a lost log.
+    never = c.post("/instances", data={"name":"Quiet","world":"Quiet","password":"ymirflesh",
+                   "port":"2490","save_interval":"1800","backups":"4","backup_short":"7200",
+                   "backup_long":"43200"}, follow_redirects=False)
+    quiet_id = never.headers["location"].rsplit("/", 1)[-1]
+    r = c.get(f"/api/instances/{quiet_id}/console-log")
+    check("no log yet is reported as such",
+          r.status_code == 404 and "has not written any console output" in r.text,
+          r.status_code)
+    c.post(f"/instances/{quiet_id}/delete", data={"remove_files": "on"})
+
+    # Run it long enough to have said something: the version line comes from the
+    # server's own output, which is exactly what the file is supposed to hold.
+    c.post(f"/instances/{new_id}/start")
+    snap = wait_status(c, new_id, "running")
+    for _ in range(60):
+        if c.get(f"/api/instances/{new_id}").json()["version"]:
+            break
+        time.sleep(0.25)
+    r = c.get(f"/api/instances/{new_id}/console-log")
+    check("console log downloads", r.status_code == 200, r.status_code)
+    check("log carries the server's own output", "Valheim version" in r.text, r.text[:200])
+    check("log is the whole file, not the visible tail",
+          r.text.count("\n") >= 2, r.text.count("\n"))
+    check("log is an attachment",
+          "console.log" in r.headers.get("content-disposition", ""),
+          r.headers.get("content-disposition"))
+    c.post(f"/instances/{new_id}/stop"); wait_status(c, new_id, "stopped")
     c.post(f"/instances/{new_id}/delete", data={"remove_files": "on"})
 
     print("\n[mods]")

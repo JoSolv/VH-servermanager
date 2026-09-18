@@ -1,20 +1,20 @@
-"""Exporting and importing a whole server instance.
+"""Exporting and importing a whole server **instance**.
+
+An instance is a world *plus* everything wrapped around it: its configuration,
+its access lists, the roster of everyone who has played on it, its mods and
+their tuning, and its snapshots. A world on its own is handled by
+:mod:`vhsm.worlds`; this module moves the server that owns one.
 
 One instance is already a self-contained directory, so an export is that
-directory in a zip with a manifest describing what is inside. The same file
-serves as a backup, as a way to move a server between hosts, and as a way to
-clone a configuration.
+directory in a zip with a manifest describing what is inside. Importing one
+therefore yields a *clone* of the original rather than a reconstruction of it,
+which is the whole point: a restored server has the same players, the same
+mods and the same rollback history as the one it came from.
 
-What is deliberately *not* included by default:
-
-* mod binaries -- ``mods.json`` records exactly which package versions were
-  installed, and they reinstall from the shared cache or Thunderstore, so
-  shipping the DLLs only makes the archive large. Mod *config* is always
-  included, because that is tuning the operator cannot get back.
-* rotating world backups -- the live world is what a restore needs; the
-  historical ones can multiply the size many times over.
-
-Both can be turned on when the archive has to stand alone.
+The only thing left out by default is ``logs/`` -- the console transcript of
+the original server's past runs, which is a record of that machine rather than
+state the clone uses, and which can dwarf the world it sits beside. It can be
+asked for when the archive is meant as a forensic copy.
 """
 
 from __future__ import annotations
@@ -73,22 +73,19 @@ def _walk(root: Path) -> Iterator[Path]:
             yield path
 
 
-def _should_include(relative: PurePosixPath, include_mods: bool, include_backups: bool) -> bool:
+def _should_include(relative: PurePosixPath, include_logs: bool) -> bool:
+    """Whether one instance-relative path belongs in the archive.
+
+    An export is a clone, so the default is to take everything. Only the
+    console transcript is held back, and only because it describes the runs of
+    the server being copied rather than anything the copy will use.
+    """
     parts = relative.parts
     if not parts:
         return False
-    if parts[0] == "saves":
-        if not include_backups and "_backup_" in relative.name:
-            return False
-        return True
-    if parts[0] == "BepInEx":
-        # Config is the operator's work; binaries are reproducible.
-        if len(parts) > 1 and parts[1] == "config":
-            return True
-        return include_mods
-    if parts[0] in ("logs", "doorstop_libs", "unstripped_corlib"):
-        return include_mods and parts[0] != "logs"
-    return relative.name in ("instance.json", "mods.json", "tempbans.json")
+    if parts[0] == "logs":
+        return include_logs
+    return True
 
 
 def export_instance(
@@ -96,8 +93,7 @@ def export_instance(
     config: InstanceConfig,
     destination: Path,
     *,
-    include_mods: bool = False,
-    include_backups: bool = False,
+    include_logs: bool = False,
     progress: ProgressHook | None = None,
 ) -> Path:
     """Write an archive of *layout* to *destination*."""
@@ -111,7 +107,7 @@ def export_instance(
         "world": config.world,
         "config": config.to_dict(),
         "mods": mods.get("mods", []),
-        "includes": {"mods": include_mods, "backups": include_backups},
+        "includes": {"mods": True, "backups": True, "players": True, "logs": include_logs},
     }
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -120,7 +116,7 @@ def export_instance(
         archive.writestr(MANIFEST_NAME, json.dumps(manifest, indent=2, sort_keys=True))
         for path in _walk(layout.root):
             relative = PurePosixPath(path.relative_to(layout.root).as_posix())
-            if not _should_include(relative, include_mods, include_backups):
+            if not _should_include(relative, include_logs):
                 continue
             archive.write(path, str(relative))
             written += 1
