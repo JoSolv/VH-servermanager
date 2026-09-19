@@ -34,13 +34,47 @@
   </div>
 {% endif %}
 
+{% if probe.crossplay %}
+  <div class="alert {{ 'ok' if probe.join_code else ('error' if probe.playfab and not probe.playfab.ok else 'info') }}"
+       style="margin-top:12px">
+    {% if probe.join_code %}
+      <strong>Crossplay is registered. Join code <code>{{ probe.join_code }}</code>.</strong>
+      That code is what console and Game Pass players use; it is reissued every
+      time the server boots.
+    {% elif probe.status != 'running' %}
+      <strong>No join code — the server is {{ probe.status }}.</strong>
+      A crossplay server is issued one shortly after it finishes loading.
+    {% else %}
+      <strong>Crossplay has not been issued a join code.</strong>
+      Logging into PlayFab and registering this server's address are plain HTTPS
+      calls; the join code comes from the step after them, building a PlayFab
+      Party network over UDP to Azure relays. Until that finishes, no console or
+      Game Pass player can reach this server however well the Steam side works.
+      Look in the console for <code>PlayFab reconnect server</code> repeating
+      every 30 seconds — that is this step failing and starting over.
+    {% endif %}
+    {% if probe.playfab %}
+      <br><span class="subtle">
+        PlayFab from inside this container: {{ probe.playfab.detail }}
+        {%- if probe.playfab.ok %} Reaching the API does not prove the Party
+        network will build — that part is UDP and cannot be tested from out
+        here — but it rules out a DNS filter on the HTTPS half.{% endif %}
+        {% if probe.ipv6 %}This host's routable IPv6 address is
+          <code>{{ probe.ipv6 }}</code>.{% else %}This host has no routable IPv6
+          address, which is fine for crossplay but is why an IPv6-only address
+          lookup fails when the game reaches for one.{% endif %}
+      </span>
+    {% endif %}
+  </div>
+{% endif %}
+
 {% if probe.crossplay and not probe.query_ok %}
   <div class="alert info" style="margin-top:12px">
-    <strong>Crossplay is on for this server.</strong>
+    <strong>The Steam query port is silent, which is expected here.</strong>
     A crossplay server reaches players through Microsoft's PlayFab relay and is joined
     by its <em>join code</em>, not by address — so it needs no port forwarding and there
-    is usually no Steam query socket to answer here. A silent query port is expected in
-    this mode and does not mean the server is unreachable.
+    is usually no Steam query socket to answer here. A silent query port does not mean
+    the server is unreachable.
     {% if probe.game_port_bound %}
       The process is holding UDP {{ probe.game_port }}, so it is up and listening.
     {% endif %}

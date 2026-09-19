@@ -163,11 +163,19 @@ class KnownIssue:
     """A failure the console cannot explain on its own."""
 
     key: str
-    pattern: re.Pattern[str]
+    #: What the failure looks like in the console, or None when nothing in the
+    #: log says it -- some of these are only knowable from a check the manager
+    #: runs itself, and are raised through :meth:`IssueWatcher.raise_now`.
+    pattern: re.Pattern[str] | None
     #: Matches needed before it is reported. One is noise; a loop is not.
     threshold: int
     title: str
     detail: str
+    #: A line proving the failure is over, which drops the notice and starts
+    #: the count again. Some of these are only failures until they are not:
+    #: a crossplay server reconnects for a while and then succeeds, and a
+    #: notice still on screen after that would be a lie.
+    clears: re.Pattern[str] | None = None
 
 
 @dataclass(slots=True)
@@ -208,33 +216,105 @@ CROSSPLAY_PUBLIC_IP_LOOP = KnownIssue(
     #: A handful of these at boot is ordinary; a loop passes this in a blink.
     threshold=15,
     title=(
-        "This server cannot look up its public IPv6 address and is retrying "
-        "it in a tight loop."
+        "This server cannot look its public IP address up, and is retrying it "
+        "in a tight loop."
     ),
     detail=(
-        "A crossplay server asks an outside service for its public IPv6 address "
-        "on the way to the PlayFab relay. Only the first of those requests can "
-        "ever reach the network: the game reuses one HttpClient and sets a "
-        "timeout on it before each request, which .NET refuses once that client "
-        "has sent anything, so every retry throws InvalidOperationException "
-        "immediately instead of waiting. On a host with a routable IPv6 address "
-        "the first lookup succeeds and the matter ends there; on a host without "
-        "one it fails, and the retries then spin as fast as the CPU allows.\n"
-        "This is in the game binary and nothing here can patch it. The repeats "
-        "are left out of the console so the rest of the log stays "
-        "readable, and the server itself carries on -- this is a background "
-        "lookup, not the game loop -- though a server spinning like this can be "
-        "slow to shut down.\n"
-        "To end it, give this host a routable IPv6 address: with Docker's "
-        "default bridge network the container has none, so either use host "
-        "networking on an IPv6-capable host or turn IPv6 on for the network. "
-        "Turning crossplay off also ends it, since crossplay is what wants the "
-        "address, at the cost of console and Game Pass players."
+        "The server asks an outside service what its public address is. Only "
+        "the first of those requests can ever reach the network: the game "
+        "reuses one HttpClient and sets a timeout on it before each request, "
+        "which .NET refuses once that client has sent anything, so every retry "
+        "throws InvalidOperationException immediately instead of waiting. When "
+        "the first lookup succeeds none of that matters. When it fails, the "
+        "retries spin as fast as the CPU allows.\n"
+        "So the thing to fix is the first lookup, and what usually stops it is "
+        "something on this host's network path refusing the request -- a DNS "
+        "filter, an ad blocker or an egress firewall. Those block by domain, "
+        "and the lookup services the game uses (ipify, icanhazip, myip.wtf) sit "
+        "squarely in the lists such tools ship with. Check from this host "
+        "whether those names resolve and answer. An IPv6-only lookup service "
+        "also fails on a host with no routable IPv6 address, which is worth "
+        "ruling out second.\n"
+        "The loop itself is in the game binary and nothing here can patch it. "
+        "The repeats are left out of the console so the rest of the log stays "
+        "readable, and the server carries on -- this is a background lookup, "
+        "not the game loop -- though a server spinning like this can be slow to "
+        "shut down. Turning crossplay off also ends it, at the cost of console "
+        "and Game Pass players."
+    ),
+)
+
+CROSSPLAY_PLAYFAB_UNREACHABLE = KnownIssue(
+    key="crossplay-playfab-unreachable",
+    # Raised from a preflight check rather than from the console: by the time
+    # the server has anything to say about it, it is already retrying.
+    pattern=None,
+    threshold=1,
+    title="PlayFab did not answer from this host, and crossplay needs it.",
+    detail=(
+        "Crossplay logs in, registers this server and finds its relay through "
+        "playfabapi.com. That name did not resolve or did not answer when this "
+        "server was started, so crossplay is unlikely to come up: no join code, "
+        "and no console or Game Pass player able to reach the server.\n"
+        "A DNS filter or ad blocker on this host's path is the usual reason, "
+        "and it is worth checking before anything else -- exactly that is what "
+        "kept this server from looking its own address up once before. Test "
+        "client visibility on this page repeats the check and prints what it "
+        "got back."
+    ),
+)
+
+#: The join code a crossplay server is issued once its PlayFab Party network
+#: is up. Two phrasings appear across builds -- "... registered with join code
+#: 665832" and "... that has join code 665832, now 0 player(s)" -- and both end
+#: the same way. The length floor is what separates a real code from the line
+#: the server prints *before* it has one, which reads "join code , now".
+RE_JOIN_CODE = re.compile(r"join code\s+([A-Za-z0-9]{4,})")
+
+CROSSPLAY_NO_JOIN_CODE = KnownIssue(
+    key="crossplay-no-join-code",
+    # One of these every 30s is the server giving up on a Party network and
+    # starting over. It is the failure itself, not a symptom of one.
+    pattern=re.compile(r"PlayFab reconnect server", re.IGNORECASE),
+    clears=RE_JOIN_CODE,
+    #: Three is 90 seconds of retrying, past anything transient.
+    threshold=3,
+    title=(
+        "Crossplay registered with PlayFab but never got a join code, and is "
+        "retrying every 30 seconds."
+    ),
+    detail=(
+        "The log shows how far it got. Logging in and registering the server's "
+        "address are plain HTTPS calls to playfabapi.com, and those succeeded. "
+        "What repeats is the step after them, creating the PlayFab Party "
+        "network -- and until that finishes there is no join code, so no "
+        "console or Game Pass player can reach this server however well the "
+        "Steam side works.\n"
+        "That step is the one part of crossplay that is not HTTPS from C#. It "
+        "runs in libparty.so, Microsoft's native Party library under "
+        "valheim_server_Data/Plugins, and it talks to Azure relays over UDP. So "
+        "it fails for two kinds of reason, and they look identical from here: "
+        "the library cannot load (it is documented as failing on Linux for "
+        "missing symbols such as __atomic_load, i.e. for want of libatomic1), "
+        "or its UDP traffic to the relays and quality-of-service beacons never "
+        "gets out.\n"
+        "Test client visibility on this page separates them: it runs ldd "
+        "against libparty.so and reports anything unresolved, and it checks "
+        "that playfabapi.com resolves and answers from inside this container. "
+        "In the console itself, PARTY_STATE_CHANGE_RESULT_INTERNET_"
+        "CONNECTIVITY_ERROR or a quality-of-service beacon timing out points "
+        "at the network rather than the library -- a DNS filter or ad blocker "
+        "on this host's path is the usual culprit, since it can allow the "
+        "HTTPS that worked and still block the rest."
     ),
 )
 
 #: Every issue the watcher knows how to recognise.
-ISSUES: tuple[KnownIssue, ...] = (CROSSPLAY_PUBLIC_IP_LOOP,)
+ISSUES: tuple[KnownIssue, ...] = (
+    CROSSPLAY_PUBLIC_IP_LOOP,
+    CROSSPLAY_NO_JOIN_CODE,
+    CROSSPLAY_PLAYFAB_UNREACHABLE,
+)
 
 
 class IssueWatcher:
@@ -248,7 +328,11 @@ class IssueWatcher:
     def observe(self, line: str) -> Notice | None:
         """Feed one console line in. Returns a notice only when it is new."""
         for issue in self._issues:
-            if not issue.pattern.search(line):
+            if issue.clears is not None and issue.clears.search(line):
+                self._counts.pop(issue.key, None)
+                self._notices.pop(issue.key, None)
+                continue
+            if issue.pattern is None or not issue.pattern.search(line):
                 continue
             count = self._counts.get(issue.key, 0) + 1
             self._counts[issue.key] = count

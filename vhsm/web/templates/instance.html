@@ -17,6 +17,21 @@
         <span data-f="address">{{ address }}</span>
         <button type="button" data-copy="{{ address }}" title="Copy">copy</button>
       </span>
+      {# Crossplay players join by code, not by address, so the code is the
+         address as far as they are concerned. It only exists once PlayFab has
+         issued it, which is the thing worth being able to see at a glance. #}
+      {% if config.crossplay %}
+        <span class="addr" data-f="join-code-box"
+              {{ 'hidden' if not record.supervisor.join_code }}>
+          join code <span data-f="join-code">{{ record.supervisor.join_code }}</span>
+          <button type="button" data-copy="{{ record.supervisor.join_code }}"
+                  title="Copy">copy</button>
+        </span>
+        <span class="reach" data-f="join-pending"
+              {{ 'hidden' if record.supervisor.join_code or not record.supervisor.status.is_active }}>
+          waiting for a join code&hellip;
+        </span>
+      {% endif %}
       {% set reach = 'yes' if record.reachable else ('warn' if record.listening else ('no' if record.reachable is sameas false else '')) %}
       <span class="reach {{ reach }}" data-f="reach">
         {%- if not record.supervisor.status.is_active %}not running

@@ -19,14 +19,14 @@ from . import archive as archive_mod
 from . import backups as backups_mod
 from . import worlds as worlds_mod
 from .config import Settings, settings as default_settings
-from .diagnostics import check_libraries
+from .diagnostics import check_libraries, check_playfab_egress
 from .instance import InstanceConfig, InstanceLayout, ValidationError
 from .mods.profile import ModProfile
 from .mods.thunderstore import ThunderstoreIndex
 from .monitor.a2s import A2SError, query as a2s_query
 from .monitor.metrics import ProcMetrics, ProcessSampler, host_metrics
 from .monitor.net import NetworkMonitor, NetSample
-from .monitor.ports import Endpoint, bound_udp_sockets, primary_host_ip, query_candidates
+from .monitor.ports import Endpoint, bound_udp_sockets, global_ipv6, primary_host_ip, query_candidates
 from .monitor.players import PlayerTracker
 from .playerlists import PlayerLists
 from .roster import Roster
@@ -208,6 +208,7 @@ class InstanceRecord:
             # matters, because these are raised while a server is running.
             "notices": supervisor.notices,
             "version": self.version,
+            "join_code": supervisor.join_code,
             "reachable": self.reachable,
             "listening": self.listening,
             "reachable_at": self.reachable_at,
@@ -1075,7 +1076,19 @@ class InstanceManager:
             # like a firewall problem from the outside, so it is checked here.
             "libraries": check_libraries(self.settings).to_dict(),
             "notices": record.supervisor.notices,
+            "join_code": record.supervisor.join_code,
         }
+
+        if record.config.crossplay:
+            # Only asked for crossplay servers, because it is the only mode
+            # that needs PlayFab -- and off the event loop, since it resolves
+            # a name and opens a socket that a filtered network will sit on
+            # until it times out.
+            payload["playfab"] = (await asyncio.to_thread(check_playfab_egress)).to_dict()
+            # Reported as a fact rather than as a verdict: a crossplay server
+            # is fine on an IPv4-only host, but when the game does reach for an
+            # IPv6-only lookup service, this is why that one fails.
+            payload["ipv6"] = global_ipv6()
 
         for candidate in query_candidates(record.supervisor.pid, record.config.port)[:4]:
             attempt = {"ip": candidate.probe_ip, "port": candidate.port}

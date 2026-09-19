@@ -20,9 +20,9 @@ from typing import Callable, TextIO
 
 from .config import Settings, VALHEIM_CLIENT_APPID
 from .instance import InstanceConfig, InstanceLayout
-from .logspam import CROSSPLAY_PUBLIC_IP_LOOP, IssueWatcher, LogThrottle
+from .diagnostics import check_playfab_egress
+from .logspam import CROSSPLAY_PLAYFAB_UNREACHABLE, RE_JOIN_CODE, IssueWatcher, LogThrottle
 from .mods import bepinex
-from .monitor.ports import global_ipv6
 
 #: Lines of console output kept in memory per instance.
 LOG_BUFFER_LINES = 1000
@@ -70,6 +70,11 @@ class Supervisor:
         self.last_error: str | None = None
         #: Build reported by the running server, from its own console output.
         self.server_version: str = ""
+        #: Join code issued once a crossplay server's PlayFab Party network is
+        #: up. It is how console and Game Pass players reach the server -- the
+        #: address is no use to them -- and it is reissued on every boot, so it
+        #: belongs on screen rather than buried in a console that has scrolled.
+        self.join_code: str = ""
 
         self._process: asyncio.subprocess.Process | None = None
         self._pump: asyncio.Task[None] | None = None
@@ -117,6 +122,9 @@ class Supervisor:
         match = RE_VERSION.search(line)
         if match:
             self.server_version = match.group(1)
+        code = RE_JOIN_CODE.search(line)
+        if code:
+            self.join_code = code.group(1)
         for hook in self._log_hooks:
             try:
                 hook(line)
@@ -195,23 +203,28 @@ class Supervisor:
             self._emit(f"[manager] could not write the console log: {exc}")
         self._emit(line)
 
-    def _preflight(self) -> None:
+    async def _preflight(self) -> None:
         """Say up front what this host will make the server do wrong.
 
-        The alternative is finding out from the console, and the console is
-        the one place a failure like the crossplay IP loop is unreadable --
-        by the time anyone looks, its own repeats have scrolled everything
-        else away.
+        Only crossplay gets checked, because it is the only mode that depends
+        on somewhere other than this machine answering. The check is the one
+        that would have caught the failure this project has actually hit: a
+        filter on the network path swallowing the requests the server makes on
+        its way up, leaving it retrying forever with nothing in the log that
+        says why.
+
+        Run off the event loop -- a filtered network does not refuse a
+        connection, it sits on it until the timeout.
         """
-        if not self.config.crossplay or global_ipv6():
+        if not self.config.crossplay:
             return
-        notice = self._issues.raise_now(CROSSPLAY_PUBLIC_IP_LOOP)
+        egress = await asyncio.to_thread(check_playfab_egress)
+        if egress.ok:
+            return
+        notice = self._issues.raise_now(CROSSPLAY_PLAYFAB_UNREACHABLE)
         if notice is None:
             return
-        self._say(
-            "[manager] crossplay is on and this host has no routable IPv6 "
-            "address, which the server does not cope with:"
-        )
+        self._say(f"[manager] {egress.detail}")
         for text in notice.console_lines():
             self._say(text)
 
@@ -233,13 +246,15 @@ class Supervisor:
             self.status = Status.STARTING
             self.exit_code = None
             self.last_error = None
+            # Reissued on every boot, so last run's code is worse than none.
+            self.join_code = ""
             # Both describe this run of this process, not the instance, so a
             # restart starts them over rather than carrying the last run's
             # complaints forward.
             self._throttle.reset()
             self._issues.clear()
             self._say(f"[manager] starting {self.config.name!r} on port {self.config.port}")
-            self._preflight()
+            await self._preflight()
 
             try:
                 self._process = await asyncio.create_subprocess_exec(
@@ -302,6 +317,10 @@ class Supervisor:
         if self.status is Status.CRASHED:
             self.last_error = f"Process exited with code {self.exit_code}."
         self._emit(f"[manager] process exited with code {self.exit_code}")
+        # The PlayFab session died with the process, so the code it was issued
+        # is no longer one anybody can join with. Keeping it on screen would
+        # only get it handed out.
+        self.join_code = ""
         self.pid = None
         self.started_at = None
         self._process = None

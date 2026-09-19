@@ -414,6 +414,7 @@ with TestClient(app) as c:
     from vhsm.logspam import (
         CROSSPLAY_PUBLIC_IP_LOOP, IssueWatcher, LogThrottle, signature)
     from vhsm.monitor.ports import global_ipv6
+    from vhsm.diagnostics import EgressReport
     from vhsm.supervisor import Supervisor
     from vhsm.instance import InstanceConfig, InstanceLayout
 
@@ -475,40 +476,47 @@ with TestClient(app) as c:
           all(watcher.observe(FAILED) is None for _ in range(50)))
     check("while the count keeps rising",
           watcher.notices[0].hits > CROSSPLAY_PUBLIC_IP_LOOP.threshold, watcher.notices[0].hits)
-    check("the notice names the cause and the way out",
-          "IPv6" in raised.detail and "crossplay off" in raised.detail)
+    check("the notice leads with the cause this actually turned out to be",
+          "ad blocker" in raised.detail and "IPv6" in raised.detail
+          and raised.detail.index("ad blocker") < raised.detail.index("no routable IPv6"),
+          raised.detail)
     check("it reaches the console as manager lines",
           all(line.startswith("[manager] ") for line in raised.console_lines()))
     check("ordinary output raises nothing",
           IssueWatcher().observe("Game server connected") is None)
 
-    # Preflight: said before the server starts, so it is not buried by the very
-    # loop it is about. Pinned rather than read off this host, which may have
-    # IPv6 of its own.
-    def preflight_notices(crossplay, ipv6):
+    # Preflight: said before the server starts, so it is not buried by the
+    # very loop it is about. The check is the one that would have caught the
+    # real failure -- something on the network path swallowing the requests
+    # the server makes on its way up.
+    import asyncio as _asyncio
+    from vhsm.logspam import CROSSPLAY_PLAYFAB_UNREACHABLE
+
+    def preflight(crossplay, reachable):
         config = InstanceConfig(name="Vanaheim", world="Vanaheim", password="hammertime",
                                 port=2600, public=False, crossplay=crossplay)
         layout = InstanceLayout.for_instance(settings, config.id)
         sup = Supervisor(config, layout, settings)
-        real, supervisor_mod.global_ipv6 = supervisor_mod.global_ipv6, lambda: ipv6
+        report = EgressReport(ok=reachable, detail="pretend" if reachable else "nothing answered")
+        real = supervisor_mod.check_playfab_egress
+        supervisor_mod.check_playfab_egress = lambda *a, **k: report
         try:
-            sup._preflight()
+            _asyncio.run(sup._preflight())
         finally:
-            supervisor_mod.global_ipv6 = real
-        transcript = layout.console_log.read_text() if layout.console_log.is_file() else ""
-        return sup.notices, sup.recent_logs(), transcript
+            supervisor_mod.check_playfab_egress = real
+        written = layout.console_log.read_text() if layout.console_log.is_file() else ""
+        return sup.notices, sup.recent_logs(), written
 
-    flagged, logged, written = preflight_notices(crossplay=True, ipv6="")
-    check("crossplay without IPv6 is flagged before launch",
-          [n["key"] for n in flagged] == ["crossplay-public-ip-loop"], flagged)
-    check("and explained in the console the user is watching",
-          any("no routable IPv6" in line for line in logged), logged)
+    flagged, logged, written = preflight(crossplay=True, reachable=False)
+    check("a crossplay server that cannot reach PlayFab is flagged before launch",
+          [n["key"] for n in flagged] == [CROSSPLAY_PLAYFAB_UNREACHABLE.key], flagged)
+    check("and told why, in the console the user is watching",
+          any("nothing answered" in line for line in logged), logged)
     check("and in the transcript they would download",
-          "no routable IPv6" in written and "Turning crossplay off" in written, written[:120])
-    check("crossplay with IPv6 is left alone",
-          preflight_notices(crossplay=True, ipv6="2001:db8::1")[0] == [])
-    check("a non-crossplay server is never flagged",
-          preflight_notices(crossplay=False, ipv6="")[0] == [])
+          "nothing answered" in written and "ad blocker" in written, written[:120])
+    check("a reachable PlayFab is left alone", preflight(True, reachable=True)[0] == [])
+    check("a non-crossplay server is never checked at all",
+          preflight(False, reachable=False)[0] == [])
     check("the host IPv6 probe answers without raising", isinstance(global_ipv6(), str))
 
     snap = c.get(f"/api/instances/{iid}").json()
@@ -555,6 +563,109 @@ with TestClient(app) as c:
     c.post(f"/instances/{loop_id}/stop")
     wait_status(c, loop_id, "stopped")
     c.post(f"/instances/{loop_id}/delete", data={"remove_files": "on"})
+
+    print("\n[crossplay: the join code]")
+    from vhsm.logspam import CROSSPLAY_NO_JOIN_CODE, RE_JOIN_CODE
+    from vhsm.diagnostics import PLAYFAB_HOST, check_playfab_egress, plugin_libraries
+
+    # Verbatim from a server that had not been issued one yet, and from one
+    # that had. Telling them apart is the whole job.
+    check("an empty join code is not a join code",
+          RE_JOIN_CODE.search('New session server "x" that has join code , now 0 player(s)') is None)
+    check("a join code is read from the session line",
+          RE_JOIN_CODE.search('... that has join code 665832, now 0 player(s)').group(1) == "665832")
+    check("and from the registration line",
+          RE_JOIN_CODE.search('Session "Odin\'s Rest" registered with join code 665832'
+                              ).group(1) == "665832")
+
+    # PlayFab login and address registration succeed over HTTPS; what repeats
+    # is the Party network, so that repeat is what gets recognised.
+    stuck = IssueWatcher()
+    raised = None
+    for _ in range(CROSSPLAY_NO_JOIN_CODE.threshold):
+        raised = stuck.observe("PlayFab reconnect server 'my crossplay server'") or raised
+    check("a PlayFab reconnect loop is recognised",
+          raised is not None and raised.key == "crossplay-no-join-code", raised)
+    check("the notice separates the library cause from the network one",
+          "libparty.so" in raised.detail and "UDP" in raised.detail)
+    check("a join code clears it, because then it was not a failure",
+          stuck.observe("... that has join code 665832, now 0 player(s)") is None
+          and stuck.notices == [], stuck.notices)
+    check("and the count starts over rather than resuming",
+          stuck.observe("PlayFab reconnect server 'x'") is None and stuck.notices == [])
+
+    # libparty.so is loaded by name at run time, so a missing dependency there
+    # is invisible except that crossplay never comes up -- the same shape the
+    # library check already exists for, and it was not looking at it.
+    plugins = Path(tempfile.mkdtemp(prefix="vhsm-plugins-"))
+    (plugins / "valheim_server_Data" / "Plugins" / "x86_64").mkdir(parents=True)
+    (plugins / "valheim_server_Data" / "Plugins" / "libparty.so").write_bytes(b"\x7fELF")
+    (plugins / "valheim_server_Data" / "Plugins" / "x86_64" / "libsteam.so").write_bytes(b"\x7fELF")
+    (plugins / "valheim_server_Data" / "Plugins" / "notes.txt").write_text("ignored")
+    found = plugin_libraries(plugins)
+    check("the crossplay backend is checked now",
+          "valheim_server_Data/Plugins/libparty.so" in found, found)
+    check("so is everything beside it", any("libsteam.so" in f for f in found), found)
+    check("and nothing that is not a library", not any(f.endswith(".txt") for f in found), found)
+    shutil.rmtree(plugins, ignore_errors=True)
+
+    # An ad blocker answering for a name is not the same as a name that does
+    # not exist, and it is the shape that broke the public-IP lookup here.
+    import vhsm.diagnostics as diagnostics_mod
+    real_getaddrinfo = diagnostics_mod.socket.getaddrinfo
+    diagnostics_mod.socket.getaddrinfo = lambda *a, **k: [(2, 1, 6, "", ("0.0.0.0", 443))]
+    try:
+        blocked = check_playfab_egress()
+    finally:
+        diagnostics_mod.socket.getaddrinfo = real_getaddrinfo
+    check("a DNS sinkhole is called what it is",
+          not blocked.ok and "blocking the name" in blocked.detail, blocked.detail)
+
+    diagnostics_mod.socket.getaddrinfo = lambda *a, **k: (_ for _ in ()).throw(OSError("nope"))
+    try:
+        unresolved = check_playfab_egress()
+    finally:
+        diagnostics_mod.socket.getaddrinfo = real_getaddrinfo
+    check("so is a name that does not resolve at all",
+          not unresolved.ok and "does not resolve" in unresolved.detail, unresolved.detail)
+    check("the report says which host it asked about",
+          EgressReport().host == PLAYFAB_HOST and PLAYFAB_HOST.endswith(".playfabapi.com"))
+    live = check_playfab_egress(timeout=3.0)
+    check("the real check returns a verdict either way",
+          isinstance(live.ok, bool) and bool(live.detail), live.to_dict())
+
+    # End to end: a crossplay server, and the code players need off it.
+    r = c.post("/instances", data={"name":"Jotunheim","world":"Jotunheim","password":"hammertime",
+               "port":"2520","crossplay":"on","save_interval":"1800","backups":"4",
+               "backup_short":"7200","backup_long":"43200"}, follow_redirects=False)
+    cross_id = r.headers["location"].rsplit("/", 1)[-1]
+    c.post(f"/instances/{cross_id}/start")
+    wait_status(c, cross_id, "running")
+    deadline, code = time.time() + 25, ""
+    while time.time() < deadline:
+        code = c.get(f"/api/instances/{cross_id}").json()["join_code"]
+        if code:
+            break
+        time.sleep(0.5)
+    check("a crossplay server's join code is read off the console",
+          code.isdigit() and len(code) == 6, repr(code))
+    check("and shown on the instance page",
+          code in c.get(f"/instances/{cross_id}").text)
+    probe = c.get(f"/api/instances/{cross_id}/connectivity").text
+    check("the connectivity panel reports it registered",
+          "Crossplay is registered" in probe and code in probe)
+    check("and says whether PlayFab is reachable from in here",
+          "PlayFab from inside this container" in probe)
+    check("a server that got a code is not flagged as stuck",
+          "crossplay-no-join-code" not in
+          [n["key"] for n in c.get(f"/api/instances/{cross_id}").json()["notices"]])
+
+    c.post(f"/instances/{cross_id}/stop")
+    wait_status(c, cross_id, "stopped")
+    check("the code is dropped with the session that owned it",
+          c.get(f"/api/instances/{cross_id}").json()["join_code"] == "",
+          c.get(f"/api/instances/{cross_id}").json()["join_code"])
+    c.post(f"/instances/{cross_id}/delete", data={"remove_files": "on"})
 
     probe = c.get(f"/api/instances/{iid}/connectivity").text
     check("probe carries the library check", "Libraries" in probe or "library" in probe.lower()

@@ -453,17 +453,23 @@ Could not extract valid IP address from externalIP download string.
 
 repeated until something stops the server.
 
-A crossplay server looks its public **IPv6** address up on the way to the
-PlayFab relay, and only the first of those requests can ever reach the
-network: the game reuses one `HttpClient` and sets a timeout on it before
-every request, which .NET refuses once that client has sent anything. On a
-host with a routable IPv6 address the first lookup succeeds and the matter
-ends there. On a host without one it fails — and every retry then throws
-`InvalidOperationException` before it gets as far as the network, so the loop
-runs at CPU speed instead of at network speed.
+The server asks an outside service what its public address is. Only the first
+of those requests can ever reach the network: the game reuses one `HttpClient`
+and sets a timeout on it before every request, which .NET refuses once that
+client has sent anything. When the first lookup succeeds none of that matters.
+When it fails, every retry throws `InvalidOperationException` before it gets as
+far as the network, so the loop runs at CPU speed rather than at network speed.
 
-This is in the game binary; nothing in the manager can patch it. What the
-manager does about it:
+**So the thing to fix is the first lookup.** What usually stops it is something
+on the host's network path refusing the request — a DNS filter, an ad blocker
+or an egress firewall. Those block by domain, and the services the game uses
+(ipify, icanhazip, myip.wtf) sit squarely in the lists such tools ship with.
+This is not hypothetical: it is what it turned out to be here. An IPv6-only
+lookup service also fails on a host with no routable IPv6 address, which is
+worth ruling out second — but an IPv4-only host is otherwise fine.
+
+The loop itself is in the game binary and nothing in the manager can patch it.
+What the manager does about it:
 
 - **The repeats are collapsed.** Console lines are grouped by shape — two
   copies that differ only in a timestamp or an id are one line — and once one
@@ -474,14 +480,50 @@ manager does about it:
   version detection are fed every line either way, so only the repeated text
   is dropped.
 - **It is named.** Once the loop is recognised the instance page says what it
-  is and what to do about it, instead of leaving you to work it out from the
-  stack trace.
-- **It is predicted.** Starting an instance with crossplay on when the host
-  has no routable IPv6 address writes the same explanation into the console
-  *before* the server launches, since after it launches its own repeats are
-  what you would have to read past to find it.
+  is and what to check, instead of leaving you to work it out from the stack
+  trace.
 
-To actually end the loop, give the host a routable IPv6 address — with
-Docker's default bridge network the container has none, so either use host
-networking on an IPv6-capable host or turn IPv6 on for the network — or turn
-crossplay off, which is what wants the address in the first place.
+### If a crossplay server never gets a join code
+
+```
+PlayFab logged in as "PlayFab_My Server_2456_..."
+IPv4, returning 203.0.113.9:2456
+New session server "My Server" that has join code , now 0 player(s)
+Register PlayFab server "My Server" with IP 203.0.113.9:2456
+Server 'My Server' begin PlayFab create and join network for server
+PlayFab reconnect server 'My Server'          <- and this, every 30 seconds
+```
+
+The log says how far it got. Logging in and registering the server's address
+are plain HTTPS calls to `playfabapi.com`, and both succeeded. What repeats is
+the step after them: building the **PlayFab Party** network. Until that
+finishes there is no join code, so no console or Game Pass player can reach the
+server however well the Steam side works.
+
+That step is the one part of crossplay that is not HTTPS from C#. It runs in
+`libparty.so` — Microsoft's native Party library, under
+`valheim_server_Data/Plugins` — and it talks to Azure relays over UDP. It
+therefore fails for two quite different reasons, which look identical from the
+console:
+
+- **The library cannot load.** `libparty.so` is documented as failing on Linux
+  for missing symbols such as `__atomic_load`, i.e. for want of `libatomic1`.
+  The manager's library check now runs `ldd` against it and everything else
+  under `Plugins`, and names the Debian package for anything unresolved. It did
+  not look there before, which is exactly the blind spot the check exists to
+  close: the server boots, Steam works, and only crossplay never comes up.
+- **Its UDP traffic never gets out.** PlayFab Party pings quality-of-service
+  beacons and then relays over UDP. A filter that allows the HTTPS that
+  already worked can still drop these. In the console,
+  `PARTY_STATE_CHANGE_RESULT_INTERNET_CONNECTIVITY_ERROR` or a
+  quality-of-service beacon timing out points here rather than at the library.
+
+**Test client visibility** on the instance page reports both halves: what `ldd`
+makes of the plugins, and whether `playfabapi.com` resolves and answers from
+inside the container — including when it resolves to `0.0.0.0`, which is a DNS
+filter blocking the name rather than a name that does not exist.
+
+The join code itself is now shown on the instance page beside the address,
+because for crossplay players it *is* the address. It is reissued on every
+boot, and it is dropped when the server stops, since the PlayFab session it
+belonged to is gone.

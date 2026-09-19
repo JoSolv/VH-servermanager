@@ -138,6 +138,31 @@ def external_ip_loop() -> None:
         time.sleep(0.001)
 
 
+def playfab_boot(name: str, port: int) -> None:
+    """The crossplay handshake, in the shape the real server logs it.
+
+    With VHSM_FAKE_NO_JOIN_CODE set it stops where a server behind a filtered
+    network stops: registered, reconnecting every so often, never issued a
+    code. That is the failure players actually report, and it is otherwise
+    only reproducible by breaking a network on purpose.
+    """
+    log("Logged in PlayFab user via custom ID")
+    log(f'PlayFab logged in as "PlayFab_{name}_{port}_{random.getrandbits(128):032x}"')
+    log(f'New session server "{name}" that has join code , now 0 player(s)')
+    log(f'Register PlayFab server "{name}" with IP 203.0.113.9:{port}')
+    log(f"Server '{name}' begin PlayFab create and join network for server ")
+    if os.environ.get("VHSM_FAKE_NO_JOIN_CODE", "") not in ("", "0"):
+        while running:
+            time.sleep(0.5)
+            log(f"PlayFab reconnect server '{name}'")
+            log(f"Server '{name}' begin PlayFab create and join network for server ")
+        return
+    time.sleep(1.0)
+    code = f"{random.randint(100000, 999999)}"
+    log(f'Opened PlayFab server Session "{name}" registered with join code {code}')
+    log(f'New session server "{name}" that has join code {code}, now 0 player(s)')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("-name", default="Fake Server")
@@ -145,6 +170,7 @@ def main() -> int:
     parser.add_argument("-port", type=int, default=2456)
     parser.add_argument("-public", default="0")
     parser.add_argument("-savedir", default=".")
+    parser.add_argument("-crossplay", action="store_true")
     known, _ = parser.parse_known_args()
 
     def handle_stop(signum, _frame):
@@ -165,6 +191,10 @@ def main() -> int:
     threading.Thread(target=player_churn, daemon=True).start()
     if os.environ.get("VHSM_FAKE_LOOP", "") not in ("", "0"):
         threading.Thread(target=external_ip_loop, daemon=True).start()
+    if known.crossplay:
+        threading.Thread(
+            target=playfab_boot, args=(known.name, known.port), daemon=True
+        ).start()
     time.sleep(1.5)
     log("Game server connected")
     log(f"DungeonDB Start {random.randint(1000, 9999)}")

@@ -120,6 +120,7 @@
       active ? metrics.cpu_cores.toFixed(2) + " / " + metrics.cpu_count + " cores" : "\u00a0"
     );
     setText(scope, "version", snapshot.version || "\u2014");
+    applyJoinCode(scope, snapshot);
     applyReach(scope, snapshot);
     setText(scope, "mem", active ? fmtBytes(metrics.memory_rss) : "--");
     setText(scope, "threads", active ? String(metrics.threads) : "--");
@@ -192,6 +193,22 @@
     b.dataset.instance = instanceId;
     b.dataset.player = playerId;
     return b;
+  }
+
+  // A crossplay server has no useful address -- players join by code -- and
+  // the code only exists once PlayFab has issued one, which can be a minute
+  // after the server is otherwise up, or never.
+  function applyJoinCode(scope, snapshot) {
+    var box = scope.querySelector('[data-f="join-code-box"]');
+    if (!box) return;                       // not a crossplay server
+    var code = snapshot.join_code || "";
+    var active = ["starting", "running", "stopping"].indexOf(snapshot.status) >= 0;
+    setText(scope, "join-code", code);
+    var button = box.querySelector("[data-copy]");
+    if (button) button.dataset.copy = code;
+    box.hidden = !code;
+    var pending = scope.querySelector('[data-f="join-pending"]');
+    if (pending) pending.hidden = Boolean(code) || !active;
   }
 
   function applyReach(scope, snapshot) {
