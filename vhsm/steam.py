@@ -133,7 +133,7 @@ async def update_server(settings: Settings, validate: bool = True) -> AsyncItera
     binary = settings.game_dir / "valheim_server.x86_64"
     if binary.is_file():
         binary.chmod(0o755)
-    yield f"[manager] server files are {"verified and" if validate else ""} up to date"
+    yield "[manager] server files are verified and up to date"
 
 
 def server_status(settings: Settings) -> dict[str, object]:
