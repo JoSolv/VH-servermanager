@@ -908,7 +908,7 @@ class InstanceManager:
             "available": bool(installed and self._latest_build and installed != self._latest_build),
         }
 
-    async def run_update(self, *, validate: bool = False, restart: bool = True) -> None:
+    async def run_update(self, *, validate: bool = True, restart: bool = True) -> None:
         """Install or update server files, restarting instances around it."""
         job = self.job
 

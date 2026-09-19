@@ -3,8 +3,6 @@
 <article class="card" data-instance="{{ config.id }}">
   <div class="row spread nowrap">
     <h3><a href="/instances/{{ config.id }}">{{ config.name }}</a></h3>
-    {# Status, then the actions that are about the instance as a whole rather
-       than about the process: managing, copying and moving it. #}
     <div class="row nowrap" style="gap:8px">
       <span class="pill {{ status }}" data-f="status">{{ status }}</span>
       <details class="menu">
@@ -37,28 +35,28 @@
       <button type="button" data-copy="{{ hostname }}:{{ config.port }}" title="Copy">copy</button>
     </span>
     {% set reach = 'yes' if record.reachable else ('warn' if record.listening else ('no' if record.reachable is sameas false else '')) %}
-    <span class="reach {{ reach }}" data-f="reach" title="{{ record.reachable_detail }}">
-      {%- if not record.supervisor.status.is_active %}not running
-      {%- elif record.reachable %}reachable
-      {%- elif record.reachable is sameas false %}{% if record.listening %}up, query silent{% else %}not reachable{% endif %}
-      {%- elif record.listening %}up
-      {%- else %}checking…{% endif -%}
-    </span>
+    {%- if record.supervisor.status.is_active %}
+      <span class="reach {{ reach }}" data-f="reach" title="{{ record.reachable_detail }}">
+        {%- if record.reachable %}reachable
+        {%- elif record.reachable is sameas false %}{% if record.listening %}up, query silent{% else %}not reachable{% endif %}
+        {%- elif record.listening %}up
+        {%- else %}checking…{% endif -%}
+      </span>
+    {%endif%}
   </div>
 
   <div class="meta">
     v. <span data-f="version" title="Version reported by the running server">{{ record.version or '—' }}</span>
     {% if config.public %} <span class="tag">listed</span>
-    {% else %}&middot; <span class="tag upd" title="Not advertised in the Valheim server browser; players must add it by address">unlisted</span>{% endif %}
+    {% else %}&middot; <span class="tag upd">unlisted</span>{% endif %}
     {% if config.crossplay %}&middot; <span class="tag">crossplay</span>{% endif %}
     {% if config.mods_enabled %}&middot; <span class="tag dep">modded</span>{% endif %}
   </div>
-
-  <svg class="spark" data-spark="cpu" viewBox="0 0 100 30" preserveAspectRatio="none">
-    <polyline points=""></polyline>
-  </svg>
-
-  <div class="metrics">
+  <div class="metricswrapper" style="height:100%;">
+    <svg class="spark" data-spark="cpu" viewBox="0 0 100 30" preserveAspectRatio="none">
+      <polyline points=""></polyline>
+    </svg>
+    <div class="metrics">
     <div class="metric">
       <div class="k">Players</div>
       <div class="v"><span data-f="players">{{ record.players.count }}</span><span
@@ -79,6 +77,7 @@
       <div class="v" data-f="mem">--</div>
       <div class="meter" data-meter="mem"><span></span></div>
     </div>
+  </div>
   </div>
 
   {% include "partials/controls.html" %}

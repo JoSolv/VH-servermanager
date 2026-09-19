@@ -11,6 +11,7 @@ import asyncio
 import os
 import re
 import shutil
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
@@ -93,7 +94,7 @@ def check_writable(settings: Settings) -> None:
             ) from exc
 
 
-async def update_server(settings: Settings, validate: bool = False) -> AsyncIterator[str]:
+async def update_server(settings: Settings, validate: bool = True) -> AsyncIterator[str]:
     """Install or update the Valheim dedicated server, yielding output lines."""
     if not settings.steamcmd_bin.is_file():
         raise SteamError("steamcmd is not installed yet")
@@ -132,7 +133,7 @@ async def update_server(settings: Settings, validate: bool = False) -> AsyncIter
     binary = settings.game_dir / "valheim_server.x86_64"
     if binary.is_file():
         binary.chmod(0o755)
-    yield "[manager] server files up to date"
+    yield f"[manager] server files are {"verified and" if validate else ""} up to date"
 
 
 def server_status(settings: Settings) -> dict[str, object]:
@@ -203,6 +204,10 @@ def installed_build_id(settings: Settings) -> str:
     try:
         match = RE_BUILDID.search(manifest.read_text(encoding="utf-8", errors="replace"))
     except OSError:
+        if settings.steamcmd_bin.is_file():
+            # Flytta till notishanterare
+            print("ERROR:\t\tSteam is installed, but appmanifest is missing.", file=sys.stderr)
+            pass
         return ""
     return match.group(1) if match else ""
 

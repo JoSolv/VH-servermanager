@@ -1,20 +1,19 @@
 <div id="build-status" hx-target="this" hx-swap="outerHTML">
   <table>
-    <tr><th>Installed build</th><td><code>{{ build.installed or 'unknown' }}</code></td></tr>
-    <tr><th>Latest build</th><td><code>{{ build.latest or 'unknown' }}</code></td></tr>
-    <tr>
-      <th>Version status</th>
-      <td>
-        {% if build.available %}
+    <tr><th>Server build</th><td><code>{{ build.installed or 'unknown' }}</code>
+    {% if build.available %}
           <span class="tag upd">update available</span>
         {% elif build.installed and build.latest %}
-          <span class="tag ok-tag">up to date</span>
+          <span class="tag ok-tag">latest</span>
         {% else %}
           <span class="muted">not checked yet</span>
         {% endif %}
-      </td>
-    </tr>
+        <button class="small" hx-post="/settings/check-update" style="padding:1px 6px; margin:0 0 0 5px;"
+        hx-indicator="#build-spinner" >Check for updates</button>
+        <div id="build-spinner" class="spinner htmx-indicator" style="float:inline-end;"><span class="spinner-icon"></span>
+                Checking for updates...
+        </div>
+    </td></tr>
   </table>
-  <button class="small" hx-post="/settings/check-update">Check for updates</button>
-  <span class="spinner">checking…</span>
+
 </div>
