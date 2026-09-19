@@ -100,7 +100,7 @@ with TestClient(app) as c:
 
     print("\n[pages]")
     r = c.get("/"); check("GET / renders", r.status_code == 200 and "Instances" in r.text)
-    check("dev-mode banner shown", "development mode" in r.text)
+    check("dev-mode banner shown", "Development mode active" in r.text)
     r = c.get("/instances/new"); check("GET /instances/new", r.status_code == 200 and 'name="world"' in r.text)
     r = c.get("/settings"); check("GET /settings", r.status_code == 200 and "Dedicated server files" in r.text)
     check("settings shows build status", "Installed build" in r.text)
@@ -405,6 +405,156 @@ with TestClient(app) as c:
     check("library check degrades cleanly with nothing to check",
           not report.available and bool(report.reason), report.to_dict())
     check("a report with nothing checked is not called ok", not report.ok)
+
+    print("\n[crossplay: the public-IP retry loop]")
+    # A crossplay server on a host without IPv6 cannot look its public address
+    # up, and the game retries that in a tight loop -- thousands of lines a
+    # second, all of them the same two. Real output, verbatim:
+    import vhsm.supervisor as supervisor_mod
+    from vhsm.logspam import (
+        CROSSPLAY_PUBLIC_IP_LOOP, IssueWatcher, LogThrottle, signature)
+    from vhsm.monitor.ports import global_ipv6
+    from vhsm.supervisor import Supervisor
+    from vhsm.instance import InstanceConfig, InstanceLayout
+
+    EXC = ("Exception while waiting for respons from https://api6.ipify.org -> "
+           "System.InvalidOperationException: This instance has already started "
+           "one or more requests. Properties can only be modified before sending "
+           "the first request.")
+    FAILED = "09/19/2026 16:00:52: Could not extract valid IP address from externalIP download string."
+    LATER = "09/19/2026 16:11:02: Could not extract valid IP address from externalIP download string."
+
+    check("a repeat is recognised through its timestamp", signature(FAILED) == signature(LATER))
+    check("unrelated lines keep their own signature", signature(EXC) != signature(FAILED))
+
+    throttle = LogThrottle(burst=5, window=10.0, note_interval=1.0)
+    kept = notes = 0
+    for i in range(400):                      # the real loop, ~1000 lines/s
+        verdict = throttle.admit(FAILED, now=100.0 + i * 0.001)
+        kept += verdict.keep
+        notes += bool(verdict.note)
+    check("a flood stops after the burst", kept == 5, kept)
+    check("and the console says why it stopped", notes >= 1, notes)
+
+    quiet = LogThrottle(burst=2, window=10.0)
+    check("distinct messages are never held back",
+          all(quiet.admit(line, now=200.0).keep for line in (
+              "Loading world", "Zonesystem Start", "Steam game server initialized",
+              "Game server connected", "World loaded", "DungeonDB Start",
+              "Registering lobby", "Session Vanaheim registered")))
+    # Shape, not text: a message that differs only in an id is one message, so
+    # a burst of them is collapsed too. Nothing is lost by that -- the player
+    # tracker reads every line either way -- and the defaults leave room for
+    # far more players than Valheim admits at once.
+    check("an id does not disguise a repeat",
+          signature("Got connection SteamID 76561198000000001") ==
+          signature("Got connection SteamID 76561198000000002"))
+    lobby = LogThrottle()
+    check("a whole lobby connecting at once is not mistaken for a loop",
+          all(lobby.admit("Got connection SteamID 7656119800000%04d" % n).keep
+              for n in range(20)))
+    slow = LogThrottle(burst=5, window=10.0)
+    check("a line that merely recurs is never held back",
+          all(slow.admit(FAILED, now=300.0 + n * 5).keep for n in range(20)))
+
+    recovering = LogThrottle(burst=3, window=10.0, note_interval=1.0)
+    for i in range(50):
+        recovering.admit(FAILED, now=400.0 + i * 0.01)
+    resumed = recovering.admit(FAILED, now=500.0)
+    check("the console resumes once the loop stops",
+          resumed.keep and "left out" in resumed.note, resumed)
+
+    watcher = IssueWatcher()
+    check("one failed lookup is not a diagnosis",
+          watcher.observe(FAILED) is None and not watcher.notices)
+    raised = None
+    for _ in range(CROSSPLAY_PUBLIC_IP_LOOP.threshold):
+        raised = watcher.observe(FAILED) or raised
+    check("a loop is a diagnosis", raised is not None and raised.key == "crossplay-public-ip-loop", raised)
+    check("it is raised once, not once per line",
+          all(watcher.observe(FAILED) is None for _ in range(50)))
+    check("while the count keeps rising",
+          watcher.notices[0].hits > CROSSPLAY_PUBLIC_IP_LOOP.threshold, watcher.notices[0].hits)
+    check("the notice names the cause and the way out",
+          "IPv6" in raised.detail and "crossplay off" in raised.detail)
+    check("it reaches the console as manager lines",
+          all(line.startswith("[manager] ") for line in raised.console_lines()))
+    check("ordinary output raises nothing",
+          IssueWatcher().observe("Game server connected") is None)
+
+    # Preflight: said before the server starts, so it is not buried by the very
+    # loop it is about. Pinned rather than read off this host, which may have
+    # IPv6 of its own.
+    def preflight_notices(crossplay, ipv6):
+        config = InstanceConfig(name="Vanaheim", world="Vanaheim", password="hammertime",
+                                port=2600, public=False, crossplay=crossplay)
+        layout = InstanceLayout.for_instance(settings, config.id)
+        sup = Supervisor(config, layout, settings)
+        real, supervisor_mod.global_ipv6 = supervisor_mod.global_ipv6, lambda: ipv6
+        try:
+            sup._preflight()
+        finally:
+            supervisor_mod.global_ipv6 = real
+        transcript = layout.console_log.read_text() if layout.console_log.is_file() else ""
+        return sup.notices, sup.recent_logs(), transcript
+
+    flagged, logged, written = preflight_notices(crossplay=True, ipv6="")
+    check("crossplay without IPv6 is flagged before launch",
+          [n["key"] for n in flagged] == ["crossplay-public-ip-loop"], flagged)
+    check("and explained in the console the user is watching",
+          any("no routable IPv6" in line for line in logged), logged)
+    check("and in the transcript they would download",
+          "no routable IPv6" in written and "Turning crossplay off" in written, written[:120])
+    check("crossplay with IPv6 is left alone",
+          preflight_notices(crossplay=True, ipv6="2001:db8::1")[0] == [])
+    check("a non-crossplay server is never flagged",
+          preflight_notices(crossplay=False, ipv6="")[0] == [])
+    check("the host IPv6 probe answers without raising", isinstance(global_ipv6(), str))
+
+    snap = c.get(f"/api/instances/{iid}").json()
+    check("notices ride on every instance snapshot",
+          snap["notices"] == [], snap.get("notices"))
+    check("the instance page has somewhere to put them",
+          'data-f="notices"' in c.get(f"/instances/{iid}").text)
+
+    # End to end, against a process actually spinning: crossplay is left OFF
+    # so the preflight cannot be what raises the notice -- only reading the
+    # console can be. VHSM_FAKE_LOOP makes the stand-in server reproduce the
+    # real loop, thousands of lines a second.
+    os.environ["VHSM_FAKE_LOOP"] = "1"
+    r = c.post("/instances", data={"name":"Loopy","world":"Loopy","password":"hammertime",
+               "port":"2510","save_interval":"1800","backups":"4","backup_short":"7200",
+               "backup_long":"43200"}, follow_redirects=False)
+    loop_id = r.headers["location"].rsplit("/", 1)[-1]
+    c.post(f"/instances/{loop_id}/start")
+    wait_status(c, loop_id, "running")
+    os.environ.pop("VHSM_FAKE_LOOP", None)
+
+    deadline, live = time.time() + 20, []
+    while time.time() < deadline:
+        live = c.get(f"/api/instances/{loop_id}").json()["notices"]
+        if live:
+            break
+        time.sleep(0.5)
+    check("a running loop is recognised from the console alone",
+          [n["key"] for n in live] == ["crossplay-public-ip-loop"], live)
+
+    time.sleep(3)
+    supervisor = app.state.manager.get(loop_id).supervisor
+    console = "\n".join(supervisor.recent_logs())
+    check("the console says it is collapsing the repeats",
+          "is repeating faster than it can be read" in console)
+    check("and keeps room for what the server said before it",
+          "Valheim version" in console or "[manager] starting" in console, console[:200])
+    transcript = app.state.manager.get(loop_id).layout.console_log
+    size = transcript.stat().st_size if transcript.is_file() else 0
+    # Unthrottled this loop writes on the order of a megabyte a second, so a
+    # transcript still this small after several seconds is the whole point.
+    check("the transcript on disk stays bounded", 0 < size < 250_000, f"{size} bytes")
+
+    c.post(f"/instances/{loop_id}/stop")
+    wait_status(c, loop_id, "stopped")
+    c.post(f"/instances/{loop_id}/delete", data={"remove_files": "on"})
 
     probe = c.get(f"/api/instances/{iid}/connectivity").text
     check("probe carries the library check", "Libraries" in probe or "library" in probe.lower()

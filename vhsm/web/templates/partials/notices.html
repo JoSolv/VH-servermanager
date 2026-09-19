@@ -1,0 +1,16 @@
+{# Known failures the console cannot explain on its own -- a server stuck in a
+   retry loop says what it is failing at thousands of times and never why.
+   Rendered here on load and patched in place from the metrics socket, since
+   these are raised while a server runs rather than when a page is opened.
+   data-keys lets the client tell "unchanged" from "empty" without re-rendering. #}
+<div data-instance="{{ config.id }}" data-f="notices"
+     data-keys="{{ record.supervisor.notices | map(attribute='key') | join('|') }}">
+  {% for notice in record.supervisor.notices %}
+    <div class="alert important" data-notice="{{ notice.key }}">
+      <strong>{{ notice.title }}</strong>
+      {% for paragraph in notice.detail.split('\n') %}
+        <p style="margin:6px 0 0">{{ paragraph }}</p>
+      {% endfor %}
+    </div>
+  {% endfor %}
+</div>

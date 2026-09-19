@@ -203,6 +203,10 @@ class InstanceRecord:
             "uptime": round(supervisor.uptime),
             "exit_code": supervisor.exit_code,
             "last_error": supervisor.last_error,
+            # Known failures recognised in this run. Carried on every tick so
+            # an open page learns about one without being reloaded -- which
+            # matters, because these are raised while a server is running.
+            "notices": supervisor.notices,
             "version": self.version,
             "reachable": self.reachable,
             "listening": self.listening,
@@ -1070,6 +1074,7 @@ class InstanceManager:
             # A silently unresolved steamclient.so dependency looks exactly
             # like a firewall problem from the outside, so it is checked here.
             "libraries": check_libraries(self.settings).to_dict(),
+            "notices": record.supervisor.notices,
         }
 
         for candidate in query_candidates(record.supervisor.pid, record.config.port)[:4]:

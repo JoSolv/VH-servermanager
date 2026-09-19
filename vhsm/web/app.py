@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from ..config import Settings, settings as default_settings
 from ..instance import ValidationError
 from ..manager import InstanceManager, ManagerError
+from .templating import TEMPLATES
 
 log = logging.getLogger("vhsm.web")
 
@@ -22,6 +23,10 @@ HERE = Path(__file__).resolve().parent
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or default_settings
     manager = InstanceManager(settings)
+    # The development banner sits in the base layout, so every page needs the
+    # flag. Passing it per route meant the two routes that did were the only
+    # ones that rendered at all -- the rest raised UndefinedError on it.
+    TEMPLATES.env.globals["vhsm_dev_mode"] = settings.fake_server
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

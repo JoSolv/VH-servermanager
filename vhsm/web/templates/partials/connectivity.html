@@ -15,6 +15,16 @@
   </div>
 {% endif %}
 
+{# A notice raised while this server ran. Only the headline here: the whole
+   explanation is already at the top of the page, and a panel that repeats it
+   buries the socket facts this one exists to show. #}
+{% for notice in probe.notices %}
+  <div class="alert important" style="margin-top:12px">
+    <strong>{{ notice.title }}</strong>
+    <br><span class="subtle">Explained in full at the top of this page.</span>
+  </div>
+{% endfor %}
+
 {% if not probe.public %}
   <div class="alert info" style="margin-top:12px">
     <strong>This server is set to <code>-public 0</code>.</strong>
