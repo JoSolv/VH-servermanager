@@ -16,11 +16,13 @@ import signal
 import time
 from collections import deque
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TextIO
 
 from .config import Settings, VALHEIM_CLIENT_APPID
 from .instance import InstanceConfig, InstanceLayout
+from .logspam import CROSSPLAY_PUBLIC_IP_LOOP, IssueWatcher, LogThrottle
 from .mods import bepinex
+from .monitor.ports import global_ipv6
 
 #: Lines of console output kept in memory per instance.
 LOG_BUFFER_LINES = 1000
@@ -75,6 +77,11 @@ class Supervisor:
         self._buffer: deque[str] = deque(maxlen=LOG_BUFFER_LINES)
         self._subscribers: set[asyncio.Queue[str]] = set()
         self._log_hooks: list[LogHook] = []
+        #: A server stuck in a retry loop writes the same lines thousands of
+        #: times a second. Left alone that fills the disk, floods every open
+        #: browser, and pushes the reason it got stuck out of the buffer.
+        self._throttle = LogThrottle()
+        self._issues = IssueWatcher()
 
     # ------------------------------------------------------------------ #
     # logging
@@ -94,17 +101,31 @@ class Supervisor:
     def unsubscribe(self, queue: asyncio.Queue[str]) -> None:
         self._subscribers.discard(queue)
 
-    def _emit(self, line: str) -> None:
+    @property
+    def notices(self) -> list[dict[str, object]]:
+        """Known failures recognised in this run, explained in plain words."""
+        return self._issues.to_list()
+
+    def _emit(self, line: str, record: bool = True) -> None:
+        """Account for one line, and show it unless it is being throttled.
+
+        *record* only decides whether the line reaches the transcript and the
+        live console. Everything that reads the stream for meaning -- the
+        version banner, the player tracker -- is fed either way, so collapsing
+        a flood costs nothing but the repeated text.
+        """
         match = RE_VERSION.search(line)
         if match:
             self.server_version = match.group(1)
-        stamped = f"{time.strftime('%H:%M:%S')} {line}"
-        self._buffer.append(stamped)
         for hook in self._log_hooks:
             try:
                 hook(line)
             except Exception:  # a broken hook must never kill the log pump
                 pass
+        if not record:
+            return
+        stamped = f"{time.strftime('%H:%M:%S')} {line}"
+        self._buffer.append(stamped)
         for queue in list(self._subscribers):
             try:
                 queue.put_nowait(stamped)
@@ -153,6 +174,47 @@ class Supervisor:
             env.update(bepinex.launch_env(self.layout, self.settings.game_dir))
         return env
 
+    def _say(self, line: str, sink: TextIO | None = None) -> None:
+        """Record a manager line in the transcript and in the live console.
+
+        The pump normally holds the transcript open and passes its handle. A
+        line emitted before it starts -- a preflight warning, say -- appends to
+        the file itself, because a line that only ever reaches the in-memory
+        buffer is missing from the very download someone reaches for when a
+        server has misbehaved.
+        """
+        try:
+            if sink is not None:
+                sink.write(line + "\n")
+                sink.flush()
+            else:
+                self.layout.logs.mkdir(parents=True, exist_ok=True)
+                with self.layout.console_log.open("a", encoding="utf-8") as handle:
+                    handle.write(line + "\n")
+        except OSError as exc:  # a full or read-only disk must not stop a start
+            self._emit(f"[manager] could not write the console log: {exc}")
+        self._emit(line)
+
+    def _preflight(self) -> None:
+        """Say up front what this host will make the server do wrong.
+
+        The alternative is finding out from the console, and the console is
+        the one place a failure like the crossplay IP loop is unreadable --
+        by the time anyone looks, its own repeats have scrolled everything
+        else away.
+        """
+        if not self.config.crossplay or global_ipv6():
+            return
+        notice = self._issues.raise_now(CROSSPLAY_PUBLIC_IP_LOOP)
+        if notice is None:
+            return
+        self._say(
+            "[manager] crossplay is on and this host has no routable IPv6 "
+            "address, which the server does not cope with:"
+        )
+        for text in notice.console_lines():
+            self._say(text)
+
     async def start(self) -> None:
         async with self._lock:
             if self.status.is_active:
@@ -171,7 +233,13 @@ class Supervisor:
             self.status = Status.STARTING
             self.exit_code = None
             self.last_error = None
-            self._emit(f"[manager] starting {self.config.name!r} on port {self.config.port}")
+            # Both describe this run of this process, not the instance, so a
+            # restart starts them over rather than carrying the last run's
+            # complaints forward.
+            self._throttle.reset()
+            self._issues.clear()
+            self._say(f"[manager] starting {self.config.name!r} on port {self.config.port}")
+            self._preflight()
 
             try:
                 self._process = await asyncio.create_subprocess_exec(
@@ -188,7 +256,7 @@ class Supervisor:
             except OSError as exc:
                 self.status = Status.CRASHED
                 self.last_error = str(exc)
-                self._emit(f"[manager] launch failed: {exc}")
+                self._say(f"[manager] launch failed: {exc}")
                 raise RuntimeError(f"Failed to launch: {exc}") from exc
 
             self.pid = self._process.pid
@@ -204,9 +272,20 @@ class Supervisor:
             with log_file.open("a", encoding="utf-8", errors="replace") as sink:
                 async for raw in self._process.stdout:
                     line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                    sink.write(line + "\n")
-                    sink.flush()
-                    self._emit(line)
+                    # A line the throttle holds back is still accounted for:
+                    # _emit feeds the hooks either way, so only the text is
+                    # dropped, never the meaning.
+                    verdict = self._throttle.admit(line)
+                    if verdict.note:
+                        self._say(verdict.note, sink)
+                    if verdict.keep:
+                        self._say(line, sink)
+                    else:
+                        self._emit(line, record=False)
+                    notice = self._issues.observe(line)
+                    if notice is not None:
+                        for text in notice.console_lines():
+                            self._say(text, sink)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

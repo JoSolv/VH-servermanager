@@ -144,6 +144,36 @@
     drawSpark(scope, snapshot.id);
 
     renderPlayers(scope, snapshot.id, players.players || []);
+    renderNotices(scope, snapshot.notices || []);
+  }
+
+  // A notice is raised while a server runs -- the crossplay IP loop only shows
+  // itself once the loop is going -- so it has to arrive without a reload. The
+  // key list decides whether anything changed, because re-rendering on every
+  // tick would fight with the user trying to select the text.
+  function renderNotices(scope, notices) {
+    var host = scope.querySelector('[data-f="notices"]');
+    if (!host) return;
+    var keys = notices.map(function (n) { return n.key; }).join("|");
+    if (host.getAttribute("data-keys") === keys) return;
+    host.setAttribute("data-keys", keys);
+    host.textContent = "";
+    notices.forEach(function (notice) {
+      var box = document.createElement("div");
+      box.className = "alert important";
+      box.setAttribute("data-notice", notice.key);
+      var title = document.createElement("strong");
+      title.textContent = notice.title;   // textContent, as everywhere here
+      box.appendChild(title);
+      String(notice.detail || "").split("\n").forEach(function (paragraph) {
+        if (!paragraph.trim()) return;
+        var p = document.createElement("p");
+        p.style.margin = "6px 0 0";
+        p.textContent = paragraph;
+        box.appendChild(p);
+      });
+      host.appendChild(box);
+    });
   }
 
   function cell(row, text, className) {

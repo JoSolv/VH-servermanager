@@ -16,7 +16,7 @@
     <a href="/" class="{{ 'active' if nav == 'dashboard' }}">Dashboard</a>
     <a href="/settings" class="{{ 'active' if nav == 'settings' }}">Settings</a>
   </nav>
-  {% if status.fake_server %}
+  {% if vhsm_dev_mode %}
     <div class="topbar_notice important">
     <strong>Development mode active</strong> (VHSM_FAKE_SERVER=1).
   </div>

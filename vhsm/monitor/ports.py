@@ -14,6 +14,7 @@ loopback, so the probe has to follow the binding rather than assume it.
 
 from __future__ import annotations
 
+import ipaddress
 import socket
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +23,11 @@ import psutil
 
 #: Addresses meaning "every interface"; reach these over loopback.
 WILDCARD = {"0.0.0.0", "::", ""}
+
+#: A routable IPv6 address to point a socket at when asking the kernel which
+#: source address it would use. Nothing is sent to it; it only has to be
+#: somewhere other than this host. (Google public DNS, never contacted.)
+IPV6_PROBE = "2001:4860:4860::8888"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +63,33 @@ def primary_host_ip() -> str:
             return probe.getsockname()[0]
     except OSError:
         return "127.0.0.1"
+
+
+def global_ipv6() -> str:
+    """This host's routable IPv6 source address, or "" when it has none.
+
+    The same trick as :func:`primary_host_ip`, over IPv6: connecting a UDP
+    socket only picks a route, so nothing is sent and nothing is waited on. A
+    host with no IPv6 route fails outright here, and one that has only a
+    link-local or unique-local address answers with it -- neither of which is
+    reachable from the internet, so neither counts.
+
+    This matters because a crossplay server insists on looking its public IPv6
+    address up and retries forever when it cannot, which is the single worst
+    failure mode the manager can warn about before it happens.
+    """
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as probe:
+            probe.connect((IPV6_PROBE, 9))
+            address = probe.getsockname()[0]
+    except OSError:
+        return ""
+    # A link-local source address arrives with its interface scope attached.
+    try:
+        parsed = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return ""
+    return str(parsed) if parsed.is_global else ""
 
 
 def bound_udp_sockets(pid: int | None) -> list[Endpoint]:

@@ -38,6 +38,8 @@
   <div class="alert error">{{ record.supervisor.last_error }}</div>
 {% endif %}
 
+{% include "partials/notices.html" %}
+
 <div data-instance="{{ config.id }}">
   <div class="panel">
     {# Controls on the left, the process facts nobody acts on kept small on the
