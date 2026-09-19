@@ -100,6 +100,11 @@
   </div>
 </div>
 
+<div id="players" hx-get="/api/instances/{{ config.id }}/players"
+     hx-trigger="load" hx-swap="outerHTML">
+  <div class="panel empty">Loading players…</div>
+</div>
+
 <div id="backups" hx-get="/api/instances/{{ config.id }}/backups"
      hx-trigger="load" hx-swap="outerHTML">
   <div class="panel empty">Loading backups…</div>
@@ -108,11 +113,6 @@
 <div id="transfer" hx-get="/api/instances/{{ config.id }}/transfer"
      hx-trigger="load" hx-swap="outerHTML">
   <div class="panel empty">Loading transfer…</div>
-</div>
-
-<div id="players" hx-get="/api/instances/{{ config.id }}/players"
-     hx-trigger="load" hx-swap="outerHTML">
-  <div class="panel empty">Loading players…</div>
 </div>
 
 <details class="section" data-remember="configuration">

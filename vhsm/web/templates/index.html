@@ -75,7 +75,7 @@
       <h3>Import a server</h3>
       <p class="hint">Restore a <code>.vhsm.zip</code> archive from this or another host.</p>
       <form hx-post="/api/instances/import" hx-target="#import-result" hx-swap="innerHTML"
-            hx-encoding="multipart/form-data">
+            hx-encoding="multipart/form-data" hx-indicator="#import-spinner">
         <div class="field">
           <label for="import_file">Archive</label>
           <input type="file" id="import_file" name="file" accept=".zip" required>
@@ -85,7 +85,10 @@
           <input type="text" id="import_name" name="name" placeholder="keep the archive's name">
         </div>
         <button class="primary" type="submit">Import</button>
-        <span class="spinner">importing…</span>
+        <div id="import-spinner" class="spinner htmx-indicator"><span class="spinner-icon"></span>
+          importing…
+        </div>
+
       </form>
       <div id="import-result"></div>
     </section>

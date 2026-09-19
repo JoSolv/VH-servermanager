@@ -1,14 +1,13 @@
-{# Lifecycle buttons for one instance, and only those: everything that acts on
-   the instance rather than on its process lives in the card's ... menu on the
-   dashboard and in the header on the instance page. Re-fetched whenever the
-   status changes. #}
 <div class="row" data-controls hx-target="this" hx-swap="outerHTML">
   {% set active = record.supervisor.status.value in ('starting', 'running', 'stopping') %}
-  <button class="primary" hx-post="/instances/{{ record.config.id }}/start"
+  <button hx-indicator="#controls-spinner-{{ record.config.id }}" class="primary" hx-post="/instances/{{ record.config.id }}/start"
           {{ 'disabled' if active }}>Start</button>
-  <button hx-post="/instances/{{ record.config.id }}/stop"
+  <button hx-indicator="#controls-spinner-{{ record.config.id }}" hx-post="/instances/{{ record.config.id }}/stop"
           {{ 'disabled' if not active }}>Stop</button>
-  <button hx-post="/instances/{{ record.config.id }}/restart"
+  <button hx-indicator="#controls-spinner-{{ record.config.id }}" hx-post="/instances/{{ record.config.id }}/restart"
           {{ 'disabled' if not active }}>Restart</button>
-  <span class="spinner">working…</span>
+  <div id="controls-spinner-{{ record.config.id }}" class="spinner htmx-indicator">
+      <span class="spinner-icon"></span>
+            working…
+  </div>
 </div>

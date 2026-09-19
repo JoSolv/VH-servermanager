@@ -11,23 +11,6 @@
     <tr><th>Server</th><td>{% if status.server_installed %}<code>{{ status.server_path }}</code>{% else %}<span class="muted">not installed</span>{% endif %}</td></tr>
     <tr><th>Disk space</th><td>{{ status.disk_free | human_bytes }}</td></tr>
     <tr><th>Mode</th><td>{% if status.fake_server %}<strong>development</strong> (simulated server){% else %}production{% endif %}</td></tr>
-    <tr>
-      <th>Libraries</th>
-      <td>
-        {% if not libraries.available %}
-          <span class="muted">{{ libraries.reason }}</span>
-        {% elif libraries.ok %}
-          <span class="tag ok-tag">all resolve</span>
-          <span class="muted">checked {{ libraries.checked | join(', ') }}</span>
-        {% else %}
-          <span class="tag upd">missing</span>
-          {% for lib in libraries.all_missing %}
-            <code>{{ lib }}</code>{% if package_for(lib) %}
-              <span class="muted">({{ package_for(lib) }})</span>{% endif %}{% if not loop.last %}, {% endif %}
-          {% endfor %}
-        {% endif %}
-      </td>
-    </tr>
   </table>
 
 
@@ -43,22 +26,19 @@
   {% endif %}
 
   {% include "partials/build_status.html" %}
-  {% if not status.server_installed or build.available %}
   <form hx-post="/settings/install" hx-target="#setup-log" hx-swap="outerHTML" style="margin-top:14px">
-    <div class="check">
-      <input type="checkbox" id="validate" name="validate_files" value="1">
-      <label for="validate">Validate files (slower, repairs a broken install)</label>
-    </div>
     <div class="check">
       <input type="checkbox" id="restart_now" name="restart_instances" value="1" checked>
       <label for="restart_now">Restart running servers after update</label>
     </div>
     <button class="primary" type="submit">
-
-      {% if status.server_installed and build.available %}Update server now{% else %}Install server{% endif %}
+      {% if not status.server_installed %} Install server
+      {% elif not build.latest %}Update server
+      {% else %}Verify steamfiles
+      {% endif %}
     </button>
   </form>
-  {% endif %}
+
   {% include "partials/setup_log.html" %}
   <div class="row" style="margin-top:10px">
     <a class="btn small" href="/api/steamcmd-log">Download steamcmd log</a>
@@ -67,17 +47,7 @@
 
 <div class="panel">
   <h2>Scheduled updates</h2>
-  <p class="subtle">
-    Once a day at the chosen time the manager checks Steam for a new build and, if there
-    is one, installs it. Running instances are stopped first and started again afterwards,
-    so pick an hour when the servers are quiet.
-  </p>
   <form hx-post="/settings/auto-update" hx-target="#auto-update-note" hx-swap="innerHTML">
-    <div class="check">
-      <input type="checkbox" id="auto_enabled" name="enabled" value="1"
-             {{ 'checked' if auto_update.enabled }}>
-      <label for="auto_enabled">Check for updates and install automatically</label>
-    </div>
     <div class="form-grid">
       <div class="field">
         <label for="auto_at">Daily at (server local time)</label>
@@ -85,14 +55,14 @@
       </div>
     </div>
     <div class="check">
-      <input type="checkbox" id="auto_restart" name="restart_instances" value="1"
-             {{ 'checked' if auto_update.restart_instances }}>
-      <label for="auto_restart">Restart instances that were running</label>
+      <input type="checkbox" id="auto_enabled" name="enabled" value="1"
+             {{ 'checked' if auto_update.enabled }}>
+      <label for="auto_enabled">Check for updates and install automatically</label>
     </div>
     <div class="check">
-      <input type="checkbox" id="auto_validate" name="validate_files" value="1"
-             {{ 'checked' if auto_update.validate }}>
-      <label for="auto_validate">Validate files each time (much slower)</label>
+      <input type="checkbox" id="auto_restart" name="restart_instances" value="1"
+             {{ 'checked' if auto_update.restart_instances }}>
+      <label for="auto_restart">Restart running instances after update</label>
     </div>
     <button class="primary" type="submit">Save schedule</button>
     {% if auto_update.last_run_date %}
@@ -100,24 +70,6 @@
     {% endif %}
   </form>
   <div id="auto-update-note"></div>
-</div>
-
-<div class="panel">
-  <h2>This manager</h2>
-  <table>
-    <tr><th>Version</th><td>{{ vhsm_build.version }}</td></tr>
-    <tr>
-      <th>Build</th>
-      <td>
-        {% if vhsm_build.commit %}
-          <code>{{ vhsm_build.short_commit }}</code>
-          <span class="muted">built {{ vhsm_build.built_at or 'unknown' }}</span>
-        {% else %}
-          <span class="muted">-</span>
-        {% endif %}
-      </td>
-    </tr>
-  </table>
 </div>
 
 <div class="panel">
@@ -157,26 +109,24 @@
 </div>
 
 <div class="panel">
-  <h2>Monitoring</h2>
+  <h2>This manager</h2>
   <table>
+    <tr><th>Version</th><td>{{ vhsm_build.version }}</td></tr>
     <tr>
-      <th>Per-instance network</th>
+      <th>Build</th>
       <td>
-        {% if net_available %}nftables counters active{% else %}
-          <span class="muted">unavailable &mdash; {{ net_reason }}</span>
+        {% if vhsm_build.commit %}
+          <code>{{ vhsm_build.short_commit }}</code>
+          <span class="muted">built {{ vhsm_build.built_at or 'unknown' }}</span>
+        {% else %}
+          <span class="muted">-</span>
         {% endif %}
       </td>
     </tr>
-    <tr><th>Sample interval</th><td>{{ settings.sample_interval }}s</td></tr>
     <tr><th>Data root</th><td><code>{{ settings.data_root }}</code></td></tr>
     <tr><th>Bind address</th><td><code>{{ settings.host }}:{{ settings.port }}</code></td></tr>
   </table>
-  {% if settings.host not in ('127.0.0.1', 'localhost') %}
-    <div class="alert error" style="margin-top:12px">
-      This manager has <strong>no authentication</strong> and is bound to {{ settings.host }}.
-      Anyone who can reach this port can start processes on the host. Put it behind a
-      reverse proxy with authentication, or bind it to 127.0.0.1 and use an SSH tunnel.
-    </div>
-  {% endif %}
+</div>
+  </table>
 </div>
 {% endblock %}

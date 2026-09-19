@@ -1,5 +1,3 @@
-"""HTML pages and the form actions behind them."""
-
 from __future__ import annotations
 
 import asyncio
@@ -261,14 +259,13 @@ async def settings_page(request: Request):
 @router.post("/settings/install", response_class=HTMLResponse)
 async def install_server(
     request: Request,
-    validate_files: str = Form(default=""),
     restart_instances: str = Form(default="1"),
 ):
     manager = _manager(request)
     # Background task: a full install is a multi-GB download, far longer than
     # any browser will hold the request open.
     asyncio.create_task(
-        manager.run_update(validate=bool(validate_files), restart=bool(restart_instances))
+        manager.run_update(validate=True, restart=bool(restart_instances))
     )
     await asyncio.sleep(0.3)
     return _render(request, "partials/setup_log.html", task=manager.job)
@@ -285,7 +282,6 @@ async def save_auto_update(
     enabled: str = Form(default=""),
     at: str = Form(default="04:00"),
     restart_instances: str = Form(default=""),
-    validate_files: str = Form(default=""),
 ):
     manager = _manager(request)
     try:
@@ -299,7 +295,7 @@ async def save_auto_update(
     manager.auto_update.enabled = bool(enabled)
     manager.auto_update.at = normalised
     manager.auto_update.restart_instances = bool(restart_instances)
-    manager.auto_update.validate = bool(validate_files)
+    manager.auto_update.validate = True
     manager.save_state()
     state = "on" if manager.auto_update.enabled else "off"
     return HTMLResponse(
