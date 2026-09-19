@@ -221,8 +221,7 @@ a mod is not an SSH session with `vi`.
 A prebuilt image is published to GitHub's registry by
 [`.github/workflows/publish-image.yml`](.github/workflows/publish-image.yml),
 and [`docker-compose.yaml`](docker-compose.yaml) is ready to paste into a
-TrueNAS custom app. **[docs/truenas.md](docs/truenas.md) is a step-by-step
-walkthrough** that assumes no Docker experience.
+TrueNAS custom app.
 
 ```bash
 docker run -d --name vhsm \

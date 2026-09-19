@@ -3,15 +3,9 @@
 {% block content %}
 
 {% if not status.server_installed and not status.fake_server %}
-  <div class="alert info">
+  <div class="alert important">
     The Valheim dedicated server is not installed yet.
     <a href="/settings">Install it from the Settings page</a> before starting an instance.
-  </div>
-{% endif %}
-{% if status.fake_server %}
-  <div class="alert info">
-    Running in <strong>development mode</strong> (VHSM_FAKE_SERVER=1): instances launch a
-    simulated server, not the real Valheim binary.
   </div>
 {% endif %}
 {% if build.available %}

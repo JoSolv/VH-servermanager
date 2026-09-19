@@ -152,9 +152,8 @@ main { flex: 1; width: min(1240px, 100%); margin: 0 auto; padding: 24px 20px 40p
 /* ---------- buttons & forms ---------- */
 button, .btn {
   font: inherit; font-weight: 600; cursor: pointer;
-  /* inline-block, because .btn is worn by anchors too: an inline <a> lets its
-     padding spill over whatever follows instead of making room for it. */
   display: inline-block;
+  margin: 10px 0;
   background: var(--panel-2); color: var(--text);
   border: 1px solid var(--border); border-radius: 8px; padding: 7px 14px;
 }
@@ -179,12 +178,16 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .check input { width: auto; }
 .check label { margin: 0; color: var(--text); }
 
-/* ---------- alerts ---------- */
+/* ---------- alerts/notices ---------- */
 .alert { padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; border: 1px solid; font-size: 14px; }
 .alert.error { background: #2a1917; border-color: #532b28; color: #ffb3ad; }
 .alert.ok { background: #16251b; border-color: #27512f; color: #a6e3ba; }
 .alert.info { background: #16202b; border-color: #2a4a68; color: #a9cdef; }
 .alert.important { background: #4d3d00; border-color: #8b7601; color: #ffdd9d; }
+
+.topbar_notice.important{
+color: #b74fb3
+}
 
 /* ---------- console ---------- */
 .console {
@@ -203,7 +206,7 @@ th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--bor
 th { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; }
 /* Label columns size to their content so stacked tables in one panel line up. */
 table:not(.players) th { width: 1%; white-space: nowrap; }
-tbody tr:last-child td { border-bottom: none; }
+tbody tr:last-child td {margin-bottom: 20px}
 
 .modlist { display: flex; flex-direction: column; gap: 8px; }
 .mod {
@@ -291,6 +294,7 @@ input.changed { outline: 2px solid var(--accent); transition: outline-color 1.5s
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 14px 18px; cursor: pointer; list-style: none;
   font-weight: 600; user-select: none;
+  margin-bottom: 10px;
 }
 .section > summary::-webkit-details-marker { display: none; }
 .section > summary::before {

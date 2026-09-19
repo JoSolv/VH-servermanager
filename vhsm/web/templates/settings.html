@@ -7,9 +7,9 @@
 <div class="panel">
   <h2>Dedicated server files</h2>
   <table>
-    <tr><th>steamcmd</th><td>{% if status.steamcmd_installed %}installed{% else %}<span class="muted">not installed</span>{% endif %} &middot; <code>{{ status.steamcmd_path }}</code></td></tr>
-    <tr><th>Server</th><td>{% if status.server_installed %}installed ({{ status.install_size | human_bytes }}){% else %}<span class="muted">not installed</span>{% endif %} &middot; <code>{{ status.server_path }}</code></td></tr>
-    <tr><th>Disk free</th><td>{{ status.disk_free | human_bytes }}</td></tr>
+    <tr><th>steamcmd</th><td>{% if status.steamcmd_installed %}<code>{{ status.steamcmd_path }}</code>{% else %}<span class="muted">not installed</span>{% endif %}</td></tr>
+    <tr><th>Server</th><td>{% if status.server_installed %}<code>{{ status.server_path }}</code>{% else %}<span class="muted">not installed</span>{% endif %}</td></tr>
+    <tr><th>Disk space</th><td>{{ status.disk_free | human_bytes }}</td></tr>
     <tr><th>Mode</th><td>{% if status.fake_server %}<strong>development</strong> (simulated server){% else %}production{% endif %}</td></tr>
     <tr>
       <th>Libraries</th>
@@ -29,7 +29,11 @@
       </td>
     </tr>
   </table>
+
+
   {% if libraries.available and not libraries.ok %}
+
+  {# Todo: Flytta till en separat notishanterare #}
     <div class="alert error">
       Steam loads <code>steamclient.so</code> at run time and a missing dependency there
       fails silently — the server runs and accepts direct joins while Steam never
@@ -39,7 +43,7 @@
   {% endif %}
 
   {% include "partials/build_status.html" %}
-
+  {% if not status.server_installed or build.available %}
   <form hx-post="/settings/install" hx-target="#setup-log" hx-swap="outerHTML" style="margin-top:14px">
     <div class="check">
       <input type="checkbox" id="validate" name="validate_files" value="1">
@@ -47,19 +51,17 @@
     </div>
     <div class="check">
       <input type="checkbox" id="restart_now" name="restart_instances" value="1" checked>
-      <label for="restart_now">Stop running instances during the update, then start them again</label>
+      <label for="restart_now">Restart running servers after update</label>
     </div>
     <button class="primary" type="submit">
-      {% if status.server_installed %}Update server now{% else %}Install server{% endif %}
+
+      {% if status.server_installed and build.available %}Update server now{% else %}Install server{% endif %}
     </button>
-    <span class="subtle">Downloads roughly 2 GB on a first install.</span>
   </form>
+  {% endif %}
   {% include "partials/setup_log.html" %}
   <div class="row" style="margin-top:10px">
     <a class="btn small" href="/api/steamcmd-log">Download steamcmd log</a>
-    <span class="subtle">
-      The full transcript, including runs whose output has scrolled out of the box above.
-    </span>
   </div>
 </div>
 
@@ -111,16 +113,11 @@
           <code>{{ vhsm_build.short_commit }}</code>
           <span class="muted">built {{ vhsm_build.built_at or 'unknown' }}</span>
         {% else %}
-          <span class="muted">running from a source checkout</span>
+          <span class="muted">-</span>
         {% endif %}
       </td>
     </tr>
   </table>
-  <p class="subtle" style="margin-bottom:0">
-    A container tag like <code>latest</code> moves, so this is the reliable way to tell
-    whether an update actually reached the machine. Compare it against the commit of the
-    build you expected.
-  </p>
 </div>
 
 <div class="panel">
