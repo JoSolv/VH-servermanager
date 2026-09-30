@@ -221,28 +221,6 @@ class ThunderstoreIndex:
     def get(self, package_full_name: str) -> Package | None:
         return self._packages.get(package_full_name.lower())
 
-    def version(self, namespace: str, name: str, version: str) -> PackageVersion | None:
-        package = self.get(f"{namespace}-{name}")
-        if package is None:
-            return None
-        for candidate in package.versions:
-            if candidate.version_number == version:
-                return candidate
-        return None
-
-    def resolve_dependency(self, text: str) -> PackageVersion | None:
-        """Find the exact version named by a dependency string.
-
-        Falls back to the latest version when that exact build has been
-        removed from Thunderstore, which happens with deprecated packages.
-        """
-        namespace, name, version = parse_dependency(text)
-        exact = self.version(namespace, name, version)
-        if exact is not None:
-            return exact
-        package = self.get(f"{namespace}-{name}")
-        return package.latest if package else None
-
     def search(
         self,
         query: str = "",

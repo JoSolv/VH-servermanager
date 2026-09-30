@@ -26,10 +26,10 @@ from ..playerlists import KICK_BAN_SECONDS, PlayerListError
 from ..archive import ArchiveError, SUFFIX, extract_zip
 from ..backups import BackupError
 from ..worlds import WorldError
-from ..mods.cache import cache_size, clear_cache
+from ..mods.cache import CacheError, cache_size, clear_cache
 from ..mods import config as modconfig
 from ..mods.config import ConfigError
-from ..mods.profile import InstalledMod, ModError
+from ..mods.profile import InstalledMod, ModError, read_export
 from ..mods.thunderstore import ThunderstoreError
 from ..monitor.metrics import host_metrics
 from ..steam import server_status
@@ -544,14 +544,29 @@ async def api_config(request: Request, instance_id: str, path: str = "") -> JSON
 # profile export / import
 # --------------------------------------------------------------------------- #
 @router.get("/api/instances/{instance_id}/mods/export")
-async def export_profile(request: Request, instance_id: str) -> JSONResponse:
+async def export_profile(request: Request, instance_id: str):
+    """Download the mods and their config as an r2modman profile (``.r2z``)."""
     manager = _manager(request)
     record = manager.get(instance_id)
-    payload = manager.profile(instance_id).export(record.config.name)
-    filename = f"{record.config.slug}-modprofile.json"
-    return JSONResponse(
-        payload,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    staging = Path(tempfile.mkdtemp(prefix="vhsm-modprofile-"))
+    path = staging / f"{record.config.slug}-modprofile.r2z"
+    try:
+        await asyncio.to_thread(
+            manager.profile(instance_id).export_r2z, record.config.name, path
+        )
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    def cleanup() -> None:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        filename=path.name,
+        # Built into a temp directory; remove it once sent.
+        background=BackgroundTask(cleanup),
     )
 
 
@@ -559,26 +574,42 @@ async def export_profile(request: Request, instance_id: str) -> JSONResponse:
 async def import_profile(
     request: Request, instance_id: str, file: UploadFile = File(...)
 ) -> HTMLResponse:
+    """Replace the installed mods with an r2modman profile, as r2modman does."""
     raw = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(raw) > MAX_UPLOAD_BYTES:
         return _mods_partial(request, instance_id, error="That file is too large.")
     try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        export = read_export(raw)
+    except ModError as exc:
         return _mods_partial(request, instance_id, error=f"Not a valid profile export: {exc}")
 
     manager = _manager(request)
     profile = manager.profile(instance_id)
-    notes: list[str] = []
     try:
         await manager.index.ensure()
-        installed = await profile.import_mods(payload, progress=notes.append)
-    except (ModError, ThunderstoreError) as exc:
-        return _mods_partial(request, instance_id, error=str(exc))
-    skipped = [n for n in notes if n.startswith("skipped")]
-    message = f"Imported {len(installed)} mod(s)."
-    if skipped:
-        message += " " + "; ".join(skipped)
+        result = await profile.replace_from_export(export)
+    except (ModError, ThunderstoreError, CacheError) as exc:
+        return _mods_partial(request, instance_id, error=f"Import failed: {exc}")
+    finally:
+        if export.archive is not None:
+            export.archive.close()
+
+    message = (
+        f"Imported the profile: {len(profile.mods)} mod(s), "
+        f"{len(result.installed)} newly installed."
+    )
+    if result.removed:
+        message += f" Removed {', '.join(result.removed)}."
+    if export.files:
+        message += f" Unpacked {len(export.files)} config file(s)."
+    if result.missing:
+        message += (
+            f" Not in the Thunderstore catalogue, so skipped: {', '.join(result.missing)}."
+            " If they were published recently, refresh the catalogue and import again."
+        )
+    if export.left_out:
+        message += f" Left out {len(export.left_out)} file(s) that are not BepInEx configuration: "
+        message += ", ".join(export.left_out[:5]) + (", …" if len(export.left_out) > 5 else "") + "."
     return _mods_partial(request, instance_id, message=message)
 
 

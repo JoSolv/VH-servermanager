@@ -4,8 +4,10 @@ Runs entirely against the simulated server, so it needs no Steam download and
 no network access. Usage:  python tests/smoke_test.py
 """
 
-import json, os, shutil, sys, tempfile, time
+import io, json, os, shutil, sys, tempfile, time, zipfile
 from pathlib import Path
+
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
@@ -62,16 +64,20 @@ def lint() -> None:
     check("static analysis clean", problems == 0, "\n" + findings)
 
 def seed(idx, ns, name, ver, files, deps=()):
+    """Cache a package version and list it. Seeding a package again lists the
+    new version as its latest, ahead of the earlier ones, as Thunderstore does."""
     d = settings.cache_dir/f"{ns}-{name}"/ver; d.mkdir(parents=True, exist_ok=True)
     for rel, c in files.items():
         p = d/rel; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(c)
     (d/COMPLETE_MARKER).write_text("ok")
-    idx._packages[f"{ns}-{name}".lower()] = Package.from_api({
+    key = f"{ns}-{name}".lower()
+    earlier = [v.to_dict() for v in idx._packages[key].versions] if key in idx._packages else []
+    idx._packages[key] = Package.from_api({
         "full_name": f"{ns}-{name}", "name": name, "owner": ns, "categories": ["Mods"],
         "rating_score": 5, "package_url": "https://thunderstore.io/x",
         "versions": [{"name": name, "full_name": f"{ns}-{name}-{ver}", "version_number": ver,
                       "description": f"{name} does things", "dependencies": list(deps),
-                      "download_url": "http://unused", "file_size": 1, "downloads": 9}]})
+                      "download_url": "http://unused", "file_size": 1, "downloads": 9}] + earlier})
 
 def wait_status(c, iid, want, timeout=25):
     """Lifecycle actions run in the background now, so poll for the outcome."""
@@ -1160,6 +1166,213 @@ with TestClient(app) as c:
     check("config file deleted", not (cfgdir/"com.jotunn.jotunn.cfg").exists())
     check("deletion explains what happens next", "writes a fresh one" in r.text)
     c.post(f"/api/instances/{iid}/mods/ValheimModding-Jotunn/uninstall")
+
+    print("\n[dependency versions]")
+    bep = "denikson-BepInExPack_Valheim"
+    def mods_on(root):
+        return {m["package_full_name"]: m for m in json.loads((root/"mods.json").read_text())["mods"]}
+    # Newer builds of what is installed, and a mod whose dependency strings name
+    # the older ones -- the shape that used to downgrade shared libraries.
+    seed(idx, "denikson", "BepInExPack_Valheim", "5.4.2351", {
+        "manifest.json": "{}",
+        "BepInExPack_Valheim/BepInEx/core/BepInEx.Preloader.dll": "MZ 5.4.2351",
+        "BepInExPack_Valheim/doorstop_libs/libdoorstop_x64.so": "ELF"})
+    seed(idx, "ValheimModding", "Jotunn", "2.30.2",
+         {"manifest.json": "{}", "plugins/Jotunn.dll": "MZ 2.30.2", "config/Jotunn.cfg": "tuned=0"},
+         deps=[f"{bep}-5.4.2351"])
+    seed(idx, "RandyKnapp", "EpicLoot", "0.14.13",
+         {"manifest.json": "{}", "plugins/EpicLoot.dll": "MZ", "plugins/loot.json": "{}"},
+         deps=[f"{bep}-5.4.2202", "ValheimModding-Jotunn-2.20.0"])
+    c.post(f"/api/instances/{iid}/mods/install", data={"package_full_name": "ValheimModding-Jotunn"})
+    m = mods_on(prof)
+    check("install takes the latest version", m["ValheimModding-Jotunn"]["version"] == "2.30.2", m)
+    check("an installed dependency is left at its version", m[bep]["version"] == "5.4.2202", m[bep])
+    c.post(f"/api/instances/{iid}/mods/install", data={"package_full_name": "RandyKnapp-EpicLoot"})
+    m = mods_on(prof)
+    check("an older dependency string does not downgrade",
+          m["ValheimModding-Jotunn"]["version"] == "2.30.2"
+          and (prof/"BepInEx/plugins/ValheimModding-Jotunn/Jotunn.dll").read_text() == "MZ 2.30.2",
+          m["ValheimModding-Jotunn"]["version"])
+    check("the dependent mod still installed", m["RandyKnapp-EpicLoot"]["version"] == "0.14.13")
+    c.post(f"/api/instances/{iid}/mods/RandyKnapp-EpicLoot/uninstall")
+    c.post(f"/api/instances/{iid}/mods/ValheimModding-Jotunn/uninstall")
+    c.post(f"/api/instances/{iid}/mods/install", data={"package_full_name": "RandyKnapp-EpicLoot"})
+    m = mods_on(prof)
+    check("a missing dependency installs at its latest version",
+          m.get("ValheimModding-Jotunn", {}).get("version") == "2.30.2"
+          and m["ValheimModding-Jotunn"]["dependency_only"], m.get("ValheimModding-Jotunn"))
+
+    print("\n[r2modman profile export / import]")
+    seed(idx, "Zenox", "Zenox", "1.0.53",
+         {"manifest.json": "{}", "plugins/Zenox.dll": "MZ", "plugins/zen.json": "{}"})
+    c.post(f"/api/instances/{iid}/mods/install", data={"package_full_name": "Zenox-Zenox"})
+    c.post(f"/api/instances/{iid}/mods/Zenox-Zenox/toggle")
+    (cfgdir/"randyknapp.mods.epicloot.cfg").write_text("Loot = 3\n")
+    (cfgdir/"EpicLoot").mkdir(exist_ok=True)
+    (cfgdir/"EpicLoot"/"loottables.json").write_text('{"tuned": true}')
+    (prof/"BepInEx/plugins/RandyKnapp-EpicLoot/loot.json").write_text('{"tuned": true}')
+
+    r = c.get(f"/api/instances/{iid}/mods/export")
+    check("export downloads an .r2z",
+          r.status_code == 200 and ".r2z" in r.headers.get("content-disposition", ""),
+          (r.status_code, r.headers.get("content-disposition")))
+    exported_r2z = r.content
+    z = zipfile.ZipFile(io.BytesIO(exported_r2z)); names = set(z.namelist())
+    r2x = yaml.safe_load(z.read("export.r2x"))
+    exported = {e["name"]: e for e in r2x["mods"]}
+    check("export.r2x names the profile", r2x["profileName"] == "Midgard", r2x.get("profileName"))
+    check("every mod listed, in r2modman's shape",
+          set(exported) == {bep, "ValheimModding-Jotunn", "RandyKnapp-EpicLoot", "Zenox-Zenox"}
+          and exported["ValheimModding-Jotunn"] == {
+              "name": "ValheimModding-Jotunn",
+              "version": {"major": 2, "minor": 30, "patch": 2}, "enabled": True}, exported)
+    check("disabled state exported", exported["Zenox-Zenox"]["enabled"] is False)
+    check("config/ holds BepInEx/config",
+          {"config/randyknapp.mods.epicloot.cfg", "config/EpicLoot/loottables.json",
+           "config/BepInEx.cfg"} <= names, sorted(names))
+    check("config files in plugin folders exported",
+          "BepInEx/plugins/RandyKnapp-EpicLoot/loot.json" in names, sorted(names))
+    check("no binaries or disabled copies exported",
+          not any(n.endswith((".dll", ".so", ".old")) for n in names), sorted(names))
+    check("nothing from outside BepInEx exported",
+          all(n == "export.r2x" or n.startswith(("config/", "BepInEx/")) for n in names), sorted(names))
+    check("the server password is not in the export",
+          not any(b"thorhammer" in z.read(n) for n in names))
+
+    r = c.post("/instances", data={"name": "Vanaheim", "world": "Vanaheim", "password": "freyjacat",
+               "port": "2600", "save_interval": "1800", "backups": "4", "backup_short": "7200",
+               "backup_long": "43200"}, follow_redirects=False)
+    vid = r.headers["location"].rsplit("/", 1)[-1]
+    vprof = ROOT/"instances"/vid
+    vcfg = vprof/"BepInEx"/"config"
+    seed(idx, "Other", "Leftover", "1.0.0", {"manifest.json": "{}", "plugins/Leftover.dll": "MZ"})
+    c.post(f"/api/instances/{vid}/mods/install", data={"package_full_name": "Other-Leftover"})
+    check("target starts with other mods and a newer BepInEx",
+          mods_on(vprof).get(bep, {}).get("version") == "5.4.2351" and "Other-Leftover" in mods_on(vprof))
+    vcfg.mkdir(parents=True, exist_ok=True)
+    (vcfg/"randyknapp.mods.epicloot.cfg").write_text("Loot = 1\n")
+    (vcfg/"keep.cfg").write_text("mine")
+
+    def imp(instance, data, filename="profile.r2z"):
+        return c.post(f"/api/instances/{instance}/mods/import",
+                      files={"file": (filename, data, "application/octet-stream")})
+    def r2z(mods, files):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as out:
+            out.writestr("export.r2x", yaml.safe_dump({"profileName": "crafted", "mods": [
+                {"name": n, "version": dict(zip(("major", "minor", "patch"), map(int, v.split(".")))),
+                 "enabled": e} for n, v, e in mods]}))
+            for name, content in files.items():
+                out.writestr(name, content)
+        return buf.getvalue()
+
+    r = imp(vid, exported_r2z)
+    check("import reports what it did", "Imported the profile: 4 mod(s)" in r.text, r.text[:400])
+    m = mods_on(vprof)
+    check("import installs exactly the listed versions",
+          {k: v["version"] for k, v in m.items()} ==
+          {k: "{major}.{minor}.{patch}".format(**v["version"]) for k, v in exported.items()},
+          {k: v["version"] for k, v in m.items()})
+    check("an older listed version replaces a newer one",
+          (vprof/"BepInEx/core/BepInEx.Preloader.dll").read_text() == "MZ")
+    check("mods not in the profile are removed",
+          "Other-Leftover" not in m and not (vprof/"BepInEx/plugins/Other-Leftover").exists()
+          and "Removed Other-Leftover-1.0.0" in r.text)
+    check("a disabled mod arrives disabled",
+          not m["Zenox-Zenox"]["enabled"]
+          and (vprof/"BepInEx/plugins/Zenox-Zenox/Zenox.dll.old").is_file())
+    check("dependencies are marked as such",
+          m["ValheimModding-Jotunn"]["dependency_only"] and m[bep]["dependency_only"]
+          and not m["RandyKnapp-EpicLoot"]["dependency_only"] and not m["Zenox-Zenox"]["dependency_only"],
+          {k: v["dependency_only"] for k, v in m.items()})
+    check("imported config overwrites the server's",
+          (vcfg/"randyknapp.mods.epicloot.cfg").read_text() == "Loot = 3\n")
+    check("nested config unpacked", (vcfg/"EpicLoot/loottables.json").read_text() == '{"tuned": true}')
+    check("config files in plugin folders unpacked",
+          (vprof/"BepInEx/plugins/RandyKnapp-EpicLoot/loot.json").read_text() == '{"tuned": true}')
+    check("config the profile does not carry is left alone", (vcfg/"keep.cfg").read_text() == "mine")
+
+    listed = [(k, "{major}.{minor}.{patch}".format(**v["version"]), v["enabled"]) for k, v in exported.items()]
+    before = (vprof/"mods.json").read_text()
+    r = imp(vid, r2z(listed, {"config/ok.cfg": "x", "config/../../instance.json": "{}"}))
+    check("a traversing path refuses the whole import", "unsafe path" in r.text, r.text[:300])
+    check("...before anything changed",
+          (vprof/"mods.json").read_text() == before and not (vcfg/"ok.cfg").exists())
+
+    def flag_encrypted(data, member):
+        """Set the encrypted bit on *member*'s central directory entry, which
+        zipfile will not write itself."""
+        data = bytearray(data); pos = data.find(b"PK\x01\x02")
+        while pos != -1:
+            size = int.from_bytes(data[pos + 28:pos + 30], "little")
+            if data[pos + 46:pos + 46 + size] == member.encode():
+                data[pos + 8] |= 1
+            pos = data.find(b"PK\x01\x02", pos + 4)
+        return bytes(data)
+    r = imp(vid, flag_encrypted(r2z(listed, {"config/ok.cfg": "x", "config/locked.cfg": "x"}),
+                                "config/locked.cfg"))
+    check("an unreadable member refuses the whole import", "cannot be read" in r.text, r.text[:300])
+    check("...before anything changed",
+          (vprof/"mods.json").read_text() == before and not (vcfg/"ok.cfg").exists())
+
+    admins = vprof/"saves"/"adminlist.txt"
+    r = imp(vid, r2z(listed, {
+        "instance.json": '{"id": "hijacked"}',
+        "saves/adminlist.txt": "76561198000000001",
+        "doorstop_config.ini": "[General]",
+        "config/evil.dll": "MZ",
+        "BepInEx/plugins/Zenox-Zenox/evil.dll": "MZ",
+        "BepInEx/plugins/Zenox-Zenox/zen.json": '{"tuned": 2}',
+        "config/ok.cfg": "fine"}))
+    check("a hostile profile still delivers its config", (vcfg/"ok.cfg").read_text() == "fine", r.text[:400])
+    check("instance.json is never written", json.loads((vprof/"instance.json").read_text())["id"] == vid)
+    check("no admin planted", not (admins.exists() and "76561198000000001" in admins.read_text()))
+    check("no executables unpacked",
+          not (vcfg/"evil.dll").exists() and not (vprof/"BepInEx/plugins/Zenox-Zenox/evil.dll").exists())
+    check("what was left out is reported", "Left out 5 file(s)" in r.text, r.text[:500])
+    check("a disabled mod's file lands on its disabled copy",
+          (vprof/"BepInEx/plugins/Zenox-Zenox/zen.json.old").read_text() == '{"tuned": 2}'
+          and not (vprof/"BepInEx/plugins/Zenox-Zenox/zen.json").exists())
+
+    without_jotunn = [e for e in listed if e[0] != "ValheimModding-Jotunn"]
+    r = imp(vid, r2z(without_jotunn + [("Nobody-Nothing", "1.0.0", True),
+                                       ("ValheimModding-Jotunn", "9.9.9", True)], {}))
+    check("mods the catalogue lacks are skipped and named",
+          "Imported the profile" in r.text and "Nobody-Nothing-1.0.0" in r.text
+          and "ValheimModding-Jotunn-9.9.9" in r.text, r.text[:400])
+    check("...and a version it lacks is not swapped for another",
+          "ValheimModding-Jotunn" not in mods_on(vprof))
+    before = (vprof/"mods.json").read_text()
+    r = imp(vid, r2z([("Nobody-Nothing", "1.0.0", True)], {}))
+    check("a profile with nothing installable is refused", "none of the mods" in r.text, r.text[:300])
+    check("...and the server keeps its mods", (vprof/"mods.json").read_text() == before)
+
+    seed(idx, "Broken", "Mod", "1.0.0", {"manifest.json": "{}", "plugins/Broken.dll": "MZ"})
+    shutil.rmtree(settings.cache_dir/"Broken-Mod"/"1.0.0")
+    idx.get("Broken-Mod").versions[0].download_url = "http://127.0.0.1:9/unreachable"
+    r = imp(vid, r2z(listed + [("Broken-Mod", "1.0.0", True)], {}))
+    check("a failed download is reported", "Import failed" in r.text and "download failed" in r.text, r.text[:300])
+    check("...and leaves the server as it was", (vprof/"mods.json").read_text() == before)
+
+    r = imp(vid, yaml.safe_dump({"profileName": "bare", "mods": [
+        {"name": bep, "version": {"major": 5, "minor": 4, "patch": 2202}, "enabled": True}]}).encode(),
+        "export.r2x")
+    check("a bare .r2x imports", "Imported the profile: 1 mod(s)" in r.text and set(mods_on(vprof)) == {bep},
+          r.text[:300])
+    legacy = json.dumps({"profileName": "Midgard", "source": "vhsm", "exported_at": 1.5, "mods": [
+        {"name": bep, "version": "5.4.2202", "enabled": True},
+        {"name": "ValheimModding-Jotunn", "version": "2.30.2", "enabled": False}]}, separators=(",", ":"))
+    r = imp(vid, legacy.encode(), "old-modprofile.json")
+    m = mods_on(vprof)
+    check("an older JSON export still imports",
+          set(m) == {bep, "ValheimModding-Jotunn"} and not m["ValheimModding-Jotunn"]["enabled"], r.text[:300])
+    for label, data in (("garbage", b"\x00\x01 not a profile"),
+                        ("zip without export.r2x", r2z([], {}).replace(b"export.r2x", b"exportXr2x")),
+                        ("entry without a version", b"mods:\n  - name: a-b\n")):
+        r = imp(vid, data)
+        check(f"refused: {label}", "Not a valid profile export" in r.text, r.text[:300])
+    check("refusals left the mods alone", set(mods_on(vprof)) == {bep, "ValheimModding-Jotunn"})
+    c.post(f"/instances/{vid}/delete", data={"remove_files": "on"})
 
     print("\n[teardown]")
     c.post(f"/instances/{iid}/stop")
