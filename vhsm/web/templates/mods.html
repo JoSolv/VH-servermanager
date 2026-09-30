@@ -53,10 +53,11 @@
         </div>
       </form>
       <form hx-post="/api/instances/{{ config.id }}/mods/import" hx-target="#installed-mods"
-            hx-swap="outerHTML" hx-encoding="multipart/form-data">
-        <label for="import-profile">Import an exported profile</label>
+            hx-swap="outerHTML" hx-encoding="multipart/form-data" hx-disabled-elt="find button"
+            hx-confirm="Replace every mod on this server with the ones in this profile? Config files in the profile overwrite the ones here. Export first to keep a copy of the current setup.">
+        <label for="import-profile">Import an r2modman profile</label>
         <div class="row">
-          <input type="file" id="import-profile" name="file" accept=".json" required>
+          <input type="file" id="import-profile" name="file" accept=".r2z,.r2x,.json" required>
           <button class="small" type="submit">Import</button>
         </div>
       </form>

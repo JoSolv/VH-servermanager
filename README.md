@@ -164,7 +164,11 @@ tested end to end, and the structure is meant to be built on.
 - Browse and search the full Thunderstore catalogue for Valheim, cached to disk
   so searching is instant and works offline.
 - Install with recursive dependency resolution; BepInEx is pulled in
-  automatically because a Valheim mod cannot load without it.
+  automatically because a Valheim mod cannot load without it. A mod installs at
+  its latest version. Dependencies follow r2modman: one already installed is
+  left at its version, and a missing one comes in at its latest — the version in
+  a dependency string is what the author built against, not a pin, and honouring
+  it would downgrade a shared library every other mod is using.
 - A shared package cache (`cache/<namespace-name>/<version>/`) means a package
   is downloaded once and installed into any number of instances from disk.
 - r2modman's install rules: `plugins/`, `patchers/`, `monomod/`, `core/` and
@@ -174,8 +178,21 @@ tested end to end, and the structure is meant to be built on.
 - Config files are never renamed on disable or deleted on uninstall, and never
   overwritten on update — tuned settings survive.
 - Update detection with one-click update-all, orphaned-dependency pruning,
-  profile export/import, and manual `.zip` upload for packages not on
-  Thunderstore.
+  and manual `.zip` upload for packages not on Thunderstore.
+- **Profile export and import in r2modman's `.r2z` format**, so a server's mods
+  can go to players' r2modman and back. Export writes the mod list and
+  `BepInEx/config`, plus the config-type files from the plugin folders, in the
+  layout r2modman writes — but nothing from outside `BepInEx/`, where the
+  server password and the admin list live.
+- Importing a `.r2z` (or a bare `.r2x`, or a JSON list exported by earlier
+  versions of this manager) *replaces* the server's mods, as r2modman does: it
+  asks first, then installs exactly the listed versions, removes everything
+  else, unpacks the profile's config over what is here, and disables what the
+  profile had disabled. Everything is downloaded before anything changes, so a
+  failed download leaves the server as it was. Mods the catalogue does not have
+  are skipped and named. Only BepInEx configuration is unpacked: executables,
+  r2modman's `doorstop_config.ini` and anything aimed outside `BepInEx/` are
+  left out and reported, and an archive with a traversing path is refused whole.
 
 **A config editor for each mod**
 
@@ -302,7 +319,7 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 .venv/bin/python tests/smoke_test.py
 ```
 
-298 checks covering page rendering, instance creation and validation, the
+373 checks covering page rendering, instance creation and validation, the
 start/stop/restart lifecycle, the live-metrics and console websockets, CPU
 normalisation, version reporting, player detail, every moderation path, query
 socket discovery (including a socket bound to a single interface), the
@@ -317,7 +334,10 @@ world and its undo, automatic snapshots and their pruning, the update endpoints
 and its history export, the whitelist defaulting to off, the console log
 download, the server address and reachability probe, the whole mod flow
 (search, dependency resolution, disable/enable, config preservation,
-dependency-protected uninstall, export) and the config editor (parsing,
+dependency-protected uninstall, dependency versions never downgrading an
+installed library, and r2modman profile export and import: exact versions,
+removal of unlisted mods, config unpacking, disabled mods, and refusal of
+traversing, hostile or unreadable archives) and the config editor (parsing,
 typed validation, per-setting and whole-file resets, and the path guards on
 every file it touches). Runs against the simulated server, so it needs no
 network and no Steam download.
@@ -352,18 +372,15 @@ edit form, as the server needs them on its command line.
 - Exporting or cloning a *running* server copies its world while the server
   still holds it in memory, so the copy can be a moment behind or mid-write.
   Stop it first if the copy has to be exact.
-- Mod install runs inline in the request; large packages block that request.
+- Mod install and profile import run inline in the request; large packages
+  block that request.
   Moving it to a background job with progress in the UI is the natural next step.
 - A mod has no settings to edit until it has loaded once: BepInEx writes the
   `.cfg` file at boot, so a freshly installed mod shows "no config file yet"
   until the server has started with it enabled. The editor says so rather than
   inventing a file the mod would overwrite.
-- Profile export carries the mod list, not the tuned config files, so importing
-  a profile elsewhere starts those mods at their defaults. Packing the config
-  tree into the export (as r2modman's `.r2z` does) is the next step.
-- `.r2x` files exported by r2modman itself are not yet parsed (our own JSON
-  export/import is); the importer already understands its `{major, minor, patch}`
-  version shape.
+- r2modman's profile *codes* (the "export as code" share) are not supported;
+  profiles move as `.r2z` files.
 - Per-instance network needs root. A rootless fallback would need eBPF.
 
 ### Bringing an existing world in

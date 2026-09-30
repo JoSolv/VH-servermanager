@@ -8,17 +8,21 @@ guess, and disabling is reversible.
 
 from __future__ import annotations
 
+import io
 import shutil
 import time
+import zipfile
 from dataclasses import dataclass, field, asdict
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
+
+import yaml
 
 from ..instance import InstanceLayout
 from ..util import read_json, write_json
 from . import rules
 from .bepinex import BEPINEX_PACKAGE
-from .cache import ensure_cached
+from .cache import MAX_PACKAGE_BYTES, ensure_cached
 from .thunderstore import (
     PackageVersion,
     ThunderstoreError,
@@ -31,6 +35,26 @@ MANIFEST_VERSION = 1
 DISABLED_SUFFIX = ".old"
 #: Guard against a malformed dependency graph.
 MAX_DEPENDENCY_DEPTH = 24
+
+#: The mod list inside an r2modman profile (``.r2z``), in YAML.
+R2X_NAME = "export.r2x"
+#: A mod list is a few kilobytes; one this large is not a mod list.
+MAX_R2X_BYTES = 1024 * 1024
+#: The file types r2modman exports from outside ``config/``
+#: (``ProfileModList.SUPPORTED_CONFIG_FILE_EXTENSIONS``), and so the only ones
+#: an import takes from there.
+CONFIG_EXTENSIONS = (".cfg", ".txt", ".json", ".yml", ".yaml", ".ini")
+#: Never unpacked from ``config/`` -- the list r2modman's own import refuses.
+BLOCKED_EXTENSIONS = (
+    ".dll", ".exe", ".scr", ".com", ".pif", ".bat", ".cmd", ".ps1", ".vbs", ".vbe",
+    ".js", ".jse", ".wsf", ".wsh", ".hta", ".msi", ".msix", ".sys", ".drv", ".cpl",
+    ".ocx", ".lnk", ".reg", ".inf",
+)
+#: What :mod:`zipfile` can decompress. Anything else, or an encrypted member,
+#: would only fail while unpacking -- after the mods had been replaced.
+READABLE_COMPRESSION = (
+    zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA,
+)
 
 ProgressHook = Callable[[str], None]
 
@@ -78,6 +102,115 @@ class InstalledMod:
     def from_dict(cls, payload: dict[str, Any]) -> "InstalledMod":
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in payload.items() if k in known})
+
+
+@dataclass(slots=True)
+class ExportedMod:
+    """One line of an exported mod list."""
+
+    package_full_name: str
+    version: str
+    enabled: bool
+
+
+@dataclass(slots=True)
+class ProfileExport:
+    """An uploaded profile, read and checked before anything is changed."""
+
+    mods: list[ExportedMod]
+    #: The ``.r2z`` the files come from; ``None`` for a bare mod list.
+    archive: zipfile.ZipFile | None = None
+    #: Archive members to unpack, each with the profile-relative path it goes to.
+    files: list[tuple[zipfile.ZipInfo, PurePosixPath]] = field(default_factory=list)
+    #: Archive members left out because they are not BepInEx configuration.
+    left_out: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ImportResult:
+    installed: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+    #: Listed mods that could not be had, as ``namespace-name-version``.
+    missing: list[str] = field(default_factory=list)
+
+
+def read_export(raw: bytes) -> ProfileExport:
+    """Read an uploaded profile: an r2modman ``.r2z`` or ``.r2x``, or the JSON
+    mod list this manager exported before it wrote ``.r2z``.
+
+    Every path in a ``.r2z`` is checked here, so a bad archive is refused
+    before the profile is touched. Of its files only BepInEx configuration is
+    taken: ``config/`` goes to ``BepInEx/config``, where r2modman took it
+    from, minus executables; elsewhere under ``BepInEx/`` only config-type
+    files. Anything else -- r2modman's copy of ``doorstop_config.ini``, or a
+    file aimed at the instance directory, where ``instance.json`` and the
+    admin list live -- is left out.
+    """
+    archive: zipfile.ZipFile | None = None
+    data = raw
+    if zipfile.is_zipfile(io.BytesIO(raw)):
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(raw))
+            info = archive.getinfo(R2X_NAME)
+        except zipfile.BadZipFile as exc:
+            raise ModError(f"not a readable zip file: {exc}") from exc
+        except KeyError:
+            raise ModError(f"there is no {R2X_NAME} in it, so it is not an r2modman profile") from None
+        if info.file_size > MAX_R2X_BYTES:
+            raise ModError(f"its {R2X_NAME} is far too large to be a mod list")
+        if not _readable(info):
+            raise ModError(f"its {R2X_NAME} is encrypted or compressed in a way that cannot be read")
+        data = archive.read(info)
+
+    # YAML reads JSON as well, which covers the older exports.
+    try:
+        payload = yaml.safe_load(data.decode("utf-8-sig"))
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ModError(f"the mod list is not readable YAML or JSON: {exc}") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("mods"), list):
+        raise ModError("there is no list of mods in it")
+
+    mods: list[ExportedMod] = []
+    for entry in payload["mods"]:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        version = entry.get("version") if isinstance(entry, dict) else None
+        if isinstance(version, dict):
+            # r2modman writes {major, minor, patch}.
+            version = ".".join(str(version.get(k, 0)) for k in ("major", "minor", "patch"))
+        if not isinstance(name, str) or not name or not isinstance(version, str) or not version:
+            raise ModError(f"a mod entry has no name or version: {entry!r}")
+        # r2modman reads a missing flag as enabled.
+        mods.append(ExportedMod(name, version, bool(entry.get("enabled", True))))
+
+    export = ProfileExport(mods=mods, archive=archive)
+    if archive is None:
+        return export
+    total = 0
+    for info in archive.infolist():
+        name = info.filename
+        if info.is_dir() or name == R2X_NAME:
+            continue
+        relative = PurePosixPath(name)
+        if relative.is_absolute() or ".." in relative.parts or name.startswith("\\"):
+            raise ModError(f"unsafe path in the profile: {name}")
+        top, lower = relative.parts[0], name.lower()
+        if top == "config" and len(relative.parts) > 1 and not lower.endswith(BLOCKED_EXTENSIONS):
+            export.files.append((info, PurePosixPath("BepInEx") / relative))
+        elif top == "BepInEx" and len(relative.parts) > 1 and lower.endswith(CONFIG_EXTENSIONS):
+            export.files.append((info, relative))
+        else:
+            export.left_out.append(name)
+            continue
+        if not _readable(info):
+            raise ModError(f"{name} is encrypted or compressed in a way that cannot be read")
+        total += info.file_size
+        if total > MAX_PACKAGE_BYTES:
+            raise ModError("the profile's files are unreasonably large")
+    return export
+
+
+def _readable(info: zipfile.ZipInfo) -> bool:
+    return not info.flag_bits & 0x1 and info.compress_type in READABLE_COMPRESSION
 
 
 class ModProfile:
@@ -152,11 +285,17 @@ class ModProfile:
     # dependency resolution
     # ------------------------------------------------------------------ #
     def _resolve_chain(self, version: PackageVersion) -> list[tuple[PackageVersion, bool]]:
-        """Flatten a package and its dependencies, dependencies first.
+        """Flatten a package and the dependencies it still needs, dependencies first.
 
         The boolean is ``dependency_only``. BepInEx is appended implicitly
         because a Valheim mod is unloadable without it and not every package
         bothers to declare it.
+
+        Dependencies follow r2modman: one that is already installed is left
+        at whatever version it is, and a missing one comes in at its latest
+        version. The version in a dependency string is the build the author
+        compiled against, not a pin -- taking it literally replaced a newer
+        shared library, which every other mod here was using, with an older one.
         """
         ordered: list[tuple[PackageVersion, bool]] = []
         seen: set[str] = set()
@@ -169,12 +308,15 @@ class ModProfile:
                 raise ModError(f"dependency chain too deep at {candidate.full_name}")
             seen.add(key)
             for dependency in candidate.dependencies:
-                resolved = self.index.resolve_dependency(dependency)
-                if resolved is None:
+                namespace, name, _ = parse_dependency(dependency)
+                if self.get(f"{namespace}-{name}") is not None:
+                    continue
+                package = self.index.get(f"{namespace}-{name}")
+                if package is None or package.latest is None:
                     raise ModError(
                         f"{candidate.full_name} needs {dependency}, which is not on Thunderstore"
                     )
-                walk(resolved, depth + 1, True)
+                walk(package.latest, depth + 1, True)
             ordered.append((candidate, is_dependency))
 
         walk(version, 0, False)
@@ -272,33 +414,43 @@ class ModProfile:
                 continue
             if existing:
                 report(f"replacing {existing.full_name} with {candidate.version_number}")
-                self._remove_files(existing)
-                self._mods.remove(existing)
 
             cached = await ensure_cached(self.cache_dir, candidate, progress)
             report(f"installing {candidate.full_name}")
-            files, configs = self._install_files(candidate, cached)
-            mod = InstalledMod(
-                namespace=candidate.namespace,
-                name=candidate.name,
-                version=candidate.version_number,
-                dependency_only=is_dependency and existing is None,
-                description=candidate.description,
-                icon=candidate.icon,
-                website_url=candidate.website_url,
-                dependencies=candidate.dependencies,
-                files=files,
-                config_files=configs,
-            )
             # Keep an explicitly requested mod explicit even if it was first
             # pulled in as somebody else's dependency.
-            if existing is not None and not existing.dependency_only:
-                mod.dependency_only = False
-            self._mods.append(mod)
-            newly_installed.append(mod)
+            newly_installed.append(
+                self._install_version(
+                    candidate, cached, dependency_only=is_dependency and existing is None
+                )
+            )
 
         self.save()
         return newly_installed
+
+    def _install_version(
+        self, version: PackageVersion, cached: Path, *, dependency_only: bool
+    ) -> InstalledMod:
+        """Install *version* from the cache in place of any installed version of it."""
+        existing = self.get(version.package_full_name)
+        if existing:
+            self._remove_files(existing)
+            self._mods.remove(existing)
+        files, configs = self._install_files(version, cached)
+        mod = InstalledMod(
+            namespace=version.namespace,
+            name=version.name,
+            version=version.version_number,
+            dependency_only=dependency_only,
+            description=version.description,
+            icon=version.icon,
+            website_url=version.website_url,
+            dependencies=version.dependencies,
+            files=files,
+            config_files=configs,
+        )
+        self._mods.append(mod)
+        return mod
 
     async def install_by_name(
         self, package_full_name: str, version_number: str = "", *, progress: ProgressHook | None = None
@@ -385,59 +537,138 @@ class ModProfile:
         ]
 
     # ------------------------------------------------------------------ #
-    # export / import
+    # export / import, as r2modman's .r2z
     # ------------------------------------------------------------------ #
-    def export(self, profile_name: str) -> dict[str, Any]:
-        """A portable description of this mod set, r2modman style."""
-        return {
-            "profileName": profile_name,
-            "source": "vhsm",
-            "exported_at": time.time(),
-            "mods": [
+    def export_r2z(self, profile_name: str, destination: Path) -> None:
+        """Write this profile to *destination* as an r2modman ``.r2z``.
+
+        The shape r2modman's own export has, so r2modman imports it:
+        ``export.r2x`` listing the mods, ``config/`` holding ``BepInEx/config``,
+        and the config-type files from the rest of ``BepInEx/``. Nothing outside
+        ``BepInEx/`` is read -- the instance directory around it holds the
+        server password (``instance.json``) and the admin and ban lists.
+
+        A mod whose version is not ``major.minor.patch`` cannot be written in
+        r2modman's format and is left out. Only a hand-uploaded zip with an odd
+        filename gets such a version, and r2modman could not download it anyway.
+        """
+        mods = []
+        for mod in self._mods:
+            try:
+                major, minor, patch = (int(part) for part in mod.version.split("."))
+            except ValueError:
+                continue
+            mods.append(
                 {
                     "name": mod.package_full_name,
-                    "version": mod.version,
+                    "version": {"major": major, "minor": minor, "patch": patch},
                     "enabled": mod.enabled,
                 }
-                for mod in self._mods
-            ],
-        }
+            )
 
-    async def import_mods(
-        self, payload: dict[str, Any], *, progress: ProgressHook | None = None
-    ) -> list[InstalledMod]:
-        entries = payload.get("mods")
-        if not isinstance(entries, list):
-            raise ModError("export file has no 'mods' list")
+        config = self.layout.bepinex / "config"
+        with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                R2X_NAME,
+                yaml.safe_dump({"profileName": profile_name, "mods": mods}, sort_keys=False),
+            )
+            for path in sorted(self.layout.bepinex.rglob("*")):
+                if not path.is_file():
+                    continue
+                if path.is_relative_to(config):
+                    archive.write(path, "config/" + path.relative_to(config).as_posix())
+                elif path.name.lower().endswith(CONFIG_EXTENSIONS):
+                    archive.write(path, path.relative_to(self.layout.root).as_posix())
 
-        installed: list[InstalledMod] = []
-        disabled: list[str] = []
-        for entry in entries:
-            name = entry.get("name") or entry.get("full_name") or ""
-            version = str(entry.get("version") or "")
-            if isinstance(entry.get("version"), dict):
-                # r2modman writes {major, minor, patch}.
-                parts = entry["version"]
-                version = ".".join(
-                    str(parts.get(k, 0)) for k in ("major", "minor", "patch")
+    async def replace_from_export(
+        self, export: ProfileExport, *, progress: ProgressHook | None = None
+    ) -> ImportResult:
+        """Make this profile the one in *export*, as r2modman's import does.
+
+        Afterwards the installed mods are exactly the ones the export lists,
+        at the versions it lists, and anything else is removed. There is no
+        dependency resolution: an export already names every dependency at the
+        version it ran with. A listed version the catalogue does not have --
+        withdrawn, never on Thunderstore, or published since the catalogue was
+        last refreshed -- is skipped and reported, unless it is already
+        installed here.
+
+        Everything to be installed is downloaded before anything changes, so
+        a failed download leaves the profile as it was. The export's files are
+        then unpacked over what is here, config included.
+        """
+        keep: list[ExportedMod] = []
+        fetch: list[tuple[ExportedMod, PackageVersion]] = []
+        missing: list[str] = []
+        for entry in export.mods:
+            installed = self.get(entry.package_full_name)
+            if installed and installed.version == entry.version:
+                keep.append(entry)
+                continue
+            package = self.index.get(entry.package_full_name)
+            version = next(
+                (v for v in package.versions if v.version_number == entry.version), None
+            ) if package else None
+            if version is None:
+                missing.append(f"{entry.package_full_name}-{entry.version}")
+            else:
+                fetch.append((entry, version))
+        if export.mods and not keep and not fetch:
+            raise ModError(
+                "none of the mods in this profile are on Valheim's Thunderstore, "
+                "so importing it would only remove this server's mods"
+            )
+        cached: list[tuple[PackageVersion, Path]] = []
+        for _, version in fetch:
+            cached.append((version, await ensure_cached(self.cache_dir, version, progress)))
+
+        wanted = {entry.package_full_name.lower(): entry for entry in keep}
+        wanted.update((entry.package_full_name.lower(), entry) for entry, _ in fetch)
+        # What this server already knew about each mod, which an export does not say.
+        known = {mod.package_full_name.lower(): mod.dependency_only for mod in self._mods}
+        result = ImportResult(missing=missing)
+        try:
+            for mod in list(self._mods):
+                if mod.package_full_name.lower() not in wanted:
+                    self._remove_files(mod)
+                    self._mods.remove(mod)
+                    result.removed.append(mod.full_name)
+
+            new = [
+                self._install_version(version, path, dependency_only=False)
+                for version, path in cached
+            ]
+            for mod in new:
+                key = mod.package_full_name.lower()
+                mod.dependency_only = (
+                    known[key] if key in known else bool(self.dependents_of(mod.package_full_name))
                 )
-            if not name:
-                continue
-            try:
-                installed += await self.install_by_name(name, version, progress=progress)
-            except (ModError, ThunderstoreError) as exc:
-                if progress:
-                    progress(f"skipped {name}: {exc}")
-                continue
-            if entry.get("enabled") is False:
-                disabled.append(name)
+            result.installed = [mod.full_name for mod in new]
 
-        for name in disabled:
-            try:
-                self.set_enabled(name, False)
-            except ModError:
-                continue
-        return installed
+            # Unpack with every mod enabled, so a file lands on the mod's active
+            # copy rather than beside a disabled one that enabling would rename
+            # over it.
+            for mod in self._mods:
+                if not mod.enabled:
+                    self.set_enabled(mod.package_full_name, True)
+            root = self.layout.root.resolve()
+            for info, relative in export.files:
+                target = self.layout.root / Path(relative)
+                if root not in target.resolve().parents:
+                    raise ModError(f"refusing to write outside the profile: {relative}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with export.archive.open(info) as source, target.open("wb") as sink:
+                    shutil.copyfileobj(source, sink)
+            for mod in self._mods:
+                if not wanted[mod.package_full_name.lower()].enabled:
+                    self.set_enabled(mod.package_full_name, False)
+        except (ModError, OSError, zipfile.BadZipFile) as exc:
+            raise ModError(
+                f"the import stopped part-way, so this server has only some of the profile: {exc}"
+            ) from exc
+        finally:
+            self.save()
+        return result
 
     # ------------------------------------------------------------------ #
     def summary(self) -> dict[str, Any]:
