@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .config import Settings
@@ -33,6 +34,13 @@ CHECKED = (
     "linux64/libsteam_api.so",
 )
 
+#: PlayFab Party, the transport crossplay runs on, fails the same silent way:
+#: PlayFab login works, the Party network the join code hangs off is never
+#: created, and the console repeats "PlayFab reconnect server" forever. It
+#: ships as a Unity plugin, so it is found by name rather than by a path that
+#: depends on how Unity lays the plugin folder out.
+PARTY_LIBRARY = "libParty*.so"
+
 
 @dataclass(slots=True)
 class LibraryReport:
@@ -44,6 +52,11 @@ class LibraryReport:
     @property
     def ok(self) -> bool:
         return self.available and not self.missing
+
+    @property
+    def crossplay_broken(self) -> bool:
+        """Whether what is missing belongs to PlayFab Party, i.e. crossplay."""
+        return any(Path(file).match(PARTY_LIBRARY) for file in self.missing)
 
     @property
     def all_missing(self) -> list[str]:
@@ -62,11 +75,13 @@ class LibraryReport:
             "checked": self.checked,
             "missing": self.missing,
             "all_missing": self.all_missing,
+            "crossplay_broken": self.crossplay_broken,
+            "packages": {lib: package_for(lib) for lib in self.all_missing},
         }
 
 
 def check_libraries(settings: Settings) -> LibraryReport:
-    """Report shared libraries the server or Steam cannot resolve."""
+    """Report shared libraries the server, Steam or PlayFab Party cannot resolve."""
     game_dir = settings.game_dir
     if not game_dir.is_dir():
         return LibraryReport([], {}, available=False, reason="the server is not installed yet")
@@ -80,12 +95,15 @@ def check_libraries(settings: Settings) -> LibraryReport:
         [str(game_dir / "linux64"), str(game_dir), env.get("LD_LIBRARY_PATH", "")]
     ).strip(":")
 
+    targets = [game_dir / relative for relative in CHECKED]
+    targets += sorted(game_dir.rglob(PARTY_LIBRARY))
+
     checked: list[str] = []
     missing: dict[str, list[str]] = {}
-    for relative in CHECKED:
-        target = game_dir / relative
+    for target in targets:
         if not target.is_file():
             continue
+        relative = str(target.relative_to(game_dir))
         checked.append(relative)
         try:
             result = subprocess.run(
@@ -105,11 +123,14 @@ def check_libraries(settings: Settings) -> LibraryReport:
 
 
 #: Debian package names for the libraries that usually turn up missing, so the
-#: report can say what to install rather than only what is absent.
+#: report can say what to install rather than only what is absent. Matched by
+#: prefix in this order, so a longer name has to come before its own prefix.
 PACKAGE_HINTS = {
     "libsdl2": "libsdl2-2.0-0",
     "libcurl": "libcurl4",
+    "libpulse-mainloop-glib": "libpulse-mainloop-glib0",
     "libpulse": "libpulse0",
+    "libglib-2.0": "libglib2.0-0",
     "libatomic": "libatomic1",
     "libstdc++": "libstdc++6",
     "libgcc_s": "libgcc-s1",
