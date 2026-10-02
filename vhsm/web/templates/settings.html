@@ -18,24 +18,10 @@
 
   {# Todo: Flytta till en separat notishanterare #}
     <div class="alert error">
-      {% if libraries.crossplay_broken %}
-        PlayFab Party, which crossplay runs on, cannot load, and that fails silently —
-        PlayFab login works but the Party network is never created, so a crossplay server
-        never gets a join code and its console repeats <code>PlayFab reconnect server</code>.
-      {% else %}
-        Steam loads <code>steamclient.so</code> at run time and a missing dependency there
-        fails silently — the server runs and accepts direct joins while Steam never
-        initialises, so it stays out of the server browser and its query port never answers.
-      {% endif %}
-      <ul class="probe-list">
-        {% for file, libs in libraries.missing.items() %}
-          <li><code>{{ file }}</code> needs
-            {% for lib in libs %}{{ lib }}{% if libraries.packages[lib] %}
-              (<code>{{ libraries.packages[lib] }}</code>){% endif %}{{ ', ' if not loop.last }}{% endfor %}
-          </li>
-        {% endfor %}
-      </ul>
-      Install those packages and restart.
+      Steam loads <code>steamclient.so</code> at run time and a missing dependency there
+      fails silently — the server runs and accepts direct joins while Steam never
+      initialises, so it stays out of the server browser and its query port never answers.
+      Install the packages listed above and restart.
     </div>
   {% endif %}
 
