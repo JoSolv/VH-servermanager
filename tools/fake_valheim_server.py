@@ -88,7 +88,7 @@ def a2s_server(port: int, name: str, world: str, public: bool) -> None:
 # --------------------------------------------------------------------------- #
 # Simulated player churn
 # --------------------------------------------------------------------------- #
-def player_churn() -> None:
+def player_churn(crossplay: bool) -> None:
     while running:
         time.sleep(random.uniform(8, 20))
         if not running:
@@ -97,18 +97,25 @@ def player_churn() -> None:
             joining = len(players) < 4 and (not players or random.random() < 0.6)
             if joining:
                 steam_id = str(random.randint(76561197960265728, 76561199999999999))
+                # Crossplay knows a player by PlayFab session first, and learns
+                # the platform account behind it on the very next line.
+                session = f"playfab/{random.getrandbits(64):016X}" if crossplay else steam_id
                 name = random.choice([n for n in NAMES if n not in players.values()] or NAMES)
-                players[steam_id] = name
+                players[session] = name
             else:
-                steam_id, name = random.choice(list(players.items()))
-                del players[steam_id]
+                session, name = random.choice(list(players.items()))
+                del players[session]
             count = len(players)
-        if joining:
+        if joining and crossplay:
+            log(f"Got handshake from client {session}")
+            log(f"PlayFab socket with remote ID {session} received local Platform ID Steam_{steam_id}")
+        elif joining:
             log(f"Got connection SteamID {steam_id}")
             log(f"Got handshake from client {steam_id}")
+        if joining:
             log(f"Got character ZDOID from {name} : {random.randint(1, 10**9)}:1")
         else:
-            log(f"Closing socket {steam_id}")
+            log(f"Closing socket {session}")
         log(f"Connections {count} ZDOS:{count * 137} sent:0 recv:0")
 
 
@@ -129,6 +136,7 @@ def main() -> int:
     parser.add_argument("-port", type=int, default=2456)
     parser.add_argument("-public", default="0")
     parser.add_argument("-savedir", default=".")
+    parser.add_argument("-crossplay", action="store_true")
     known, _ = parser.parse_known_args()
 
     def handle_stop(signum, _frame):
@@ -146,7 +154,7 @@ def main() -> int:
         args=(known.port + 1, known.name, known.world, known.public == "1"),
         daemon=True,
     ).start()
-    threading.Thread(target=player_churn, daemon=True).start()
+    threading.Thread(target=player_churn, args=(known.crossplay,), daemon=True).start()
     if os.environ.get("VHSM_FAKE_FLOOD", "") not in ("", "0"):
         threading.Thread(target=flood, daemon=True).start()
     time.sleep(1.5)

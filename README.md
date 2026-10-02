@@ -65,6 +65,10 @@ tested end to end, and the structure is meant to be built on.
 - Per player: names used, platform id, session count, time played, last seen
   ("now" while online, otherwise a timestamp) and a bounded log of their
   connects, spawns, deaths and disconnects — downloadable as a text file.
+- On a crossplay server the console names a player by PlayFab session
+  (`playfab/…`) first and gives the platform account behind it on the next
+  line (`Steam_…`, `Xbox_…`, …). Players are recorded under that platform id,
+  since it is what Valheim's admin, ban and permit lists key on.
 - Admin, ban, permit and kick from the roster, whether or not the player is
   online. Valheim re-reads its list files while running, so changes take effect
   within seconds without a restart.
@@ -329,7 +333,7 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 .venv/bin/python tests/smoke_test.py
 ```
 
-373 checks covering page rendering, instance creation and validation, the
+393 checks covering page rendering, instance creation and validation, the
 start/stop/restart lifecycle, the live-metrics and console websockets, CPU
 normalisation, version reporting, player detail, every moderation path, query
 socket discovery (including a socket bound to a single interface), the
@@ -341,7 +345,8 @@ loose files, and rejection of a traversing filename) in both the fresh-instance
 and the replace-an-existing-world cases, snapshots and rollback of a 1.0 folder
 world and its undo, automatic snapshots and their pruning, the update endpoints
 (including that a failed update still restarts the servers), the player roster
-and its history export, the whitelist defaulting to off, the console log
+and its history export (including crossplay players, recorded under their
+platform id), the whitelist defaulting to off, the console log
 download, the server address and reachability probe, the whole mod flow
 (search, dependency resolution, disable/enable, config preservation,
 dependency-protected uninstall, dependency versions never downgrading an

@@ -88,7 +88,10 @@ class Roster:
                 entry = RosterEntry.from_dict(item)
             except TypeError:
                 continue
-            if entry.player_id:
+            # Crossplay players used to be recorded under their PlayFab session
+            # ("playfab/..."), which no list accepts and whose slash breaks
+            # every per-player URL -- they could not even be forgotten.
+            if entry.player_id and "/" not in entry.player_id:
                 self._entries[entry.player_id] = entry
         self._dirty = False
 

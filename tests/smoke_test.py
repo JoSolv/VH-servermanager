@@ -259,6 +259,96 @@ with TestClient(app) as c:
     check("history carries the events", "connected" in r.text, r.text[:120])
     check("history is an attachment", "attachment" in r.headers.get("content-disposition", ""))
 
+    print("\n[crossplay players]")
+    # A crossplay server knows a player by PlayFab session first. The platform
+    # account -- the id Valheim's admin, ban and permit lists key on -- comes
+    # on the next line. Shapes verbatim from real servers:
+    from vhsm.monitor.players import PlayerTracker
+    from vhsm.roster import Roster
+    XID = "Steam_76561198373857942"
+    XP = ("Got handshake from client playfab/EFEFD7F454DC3473",
+          f"PlayFab socket with remote ID playfab/EFEFD7F454DC3473 received local Platform ID {XID}",
+          "Got character ZDOID from Ragnhild : 1234567:1",
+          "Got character ZDOID from Ragnhild : 0:0",
+          "Closing socket playfab/EFEFD7F454DC3473")
+    seen = []
+    tracker = PlayerTracker(on_event=seen.append)
+    tracker.observe_log(XP[0])
+    check("a PlayFab session alone is not a player id",
+          tracker.players[0].player_id == "" and not seen, (tracker.players[0], seen))
+    tracker.observe_log(XP[1])
+    xp_player = tracker.players[0]
+    check("the platform id becomes the player id",
+          xp_player.player_id == XID and xp_player.platform == "Steam", xp_player)
+    check("so the player can be moderated", xp_player.to_dict()["can_moderate"])
+    for line in XP[2:]:
+        tracker.observe_log(line)
+    check("every event carries the platform id, never the session",
+          [(e.kind, e.player_id) for e in seen]
+          == [("connect", XID), ("named", XID), ("died", XID), ("disconnect", XID)],
+          [(e.kind, e.player_id) for e in seen])
+    check("the session ends on its socket closing", tracker.players == [])
+
+    flipped = []
+    reorder = PlayerTracker(on_event=flipped.append)
+    for line in (XP[1], XP[0], XP[2]):
+        reorder.observe_log(line)
+    check("either order gives one player and one connect",
+          len(reorder.players) == 1 and [e.kind for e in flipped] == ["connect", "named"],
+          [e.kind for e in flipped])
+
+    record = app.state.manager.get(iid)
+    for event in seen[:2]:
+        record.roster.observe(event)
+    r = c.get(f"/api/instances/{iid}/players/{XID}/history")
+    check("a crossplay player's history downloads",
+          r.status_code == 200 and "Ragnhild" in r.text and "connected" in r.text,
+          (r.status_code, r.text[:120]))
+    panel = c.get(f"/api/instances/{iid}/players").text
+    check("no per-player link carries a PlayFab session", "playfab/" not in panel)
+    r = c.post(f"/api/instances/{iid}/players/{XID}/admin")
+    check("and the player can be made admin",
+          "now an admin" in r.text
+          and XID in (ROOT/"instances"/iid/"saves"/"adminlist.txt").read_text(), r.text[:90])
+    c.post(f"/api/instances/{iid}/players/{XID}/unadmin")
+    c.post(f"/api/instances/{iid}/players/{XID}/forget")
+
+    # Rosters written before this recorded crossplay players under the session,
+    # which no list accepts and no URL can address. They are dropped on load.
+    stale = ROOT / "stale-roster.json"
+    stale.write_text(json.dumps({"version": 1, "players": [
+        {"player_id": "playfab/EFEFD7F454DC3473", "names": ["Ragnhild"]},
+        {"player_id": XID, "names": ["Ragnhild"]}]}))
+    check("a roster entry keyed on a PlayFab session is dropped on load",
+          [e.player_id for e in Roster(stale).entries()] == [XID])
+    stale.unlink()
+
+    # End to end: a crossplay instance of the stand-in server logs players the
+    # way a real one does.
+    r = c.post("/instances", data={"name":"Crossy","world":"Crossy","password":"hammertime",
+               "port":"2520","crossplay":"on","save_interval":"1800","backups":"4",
+               "backup_short":"7200","backup_long":"43200"}, follow_redirects=False)
+    xp_id = r.headers["location"].rsplit("/", 1)[-1]
+    c.post(f"/instances/{xp_id}/start")
+    wait_status(c, xp_id, "running")
+    deadline, xp_players = time.time() + 40, []
+    while time.time() < deadline:
+        xp_players = [p for p in c.get(f"/api/instances/{xp_id}").json()["players"]["players"]
+                      if p["player_id"]]
+        if xp_players:
+            break
+        time.sleep(1)
+    check("a crossplay server's player is tracked by platform id",
+          bool(xp_players) and xp_players[0]["player_id"].startswith("Steam_"),
+          [p["player_id"] for p in xp_players])
+    if xp_players:
+        r = c.get(f"/api/instances/{xp_id}/players/{xp_players[0]['player_id']}/history")
+        check("and their history downloads", r.status_code == 200 and "connected" in r.text,
+              (r.status_code, r.text[:120]))
+    c.post(f"/instances/{xp_id}/stop")
+    wait_status(c, xp_id, "stopped")
+    c.post(f"/instances/{xp_id}/delete", data={"remove_files": "on"})
+
     print("\n[minor fix 1: whitelist]")
     lists = app.state.manager.get(iid).lists
     saved = ROOT/"instances"/iid/"saves"

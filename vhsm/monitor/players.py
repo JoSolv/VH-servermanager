@@ -22,6 +22,10 @@ RE_CONNECT = re.compile(r"Got connection SteamID (\S+)")
 RE_HANDSHAKE = re.compile(r"Got handshake from client (\S+)")
 RE_CHARACTER = re.compile(r"Got character ZDOID from (.+?) : (-?\d+):(-?\d+)")
 RE_DISCONNECT = re.compile(r"Closing socket (\S+)")
+#: Crossplay: the handshake names a PlayFab session ("playfab/<hex>"), and only
+#: this line, right after it, says which platform account is behind it -- the
+#: Steam_/Xbox_/... id Valheim's admin, ban and permit lists key on.
+RE_PLATFORM_ID = re.compile(r"PlayFab socket with remote ID (\S+) received local Platform ID (\S+)")
 RE_CONNECTIONS = re.compile(r"Connections (\d+) ZDOS")
 
 
@@ -49,6 +53,8 @@ class Player:
     query_duration: float | None = None
     #: Character id from the ZDOID line; present once the player is in-world.
     character_id: str = ""
+    #: Crossplay only: the platform account behind a PlayFab session.
+    platform_id: str = ""
 
     @property
     def playtime(self) -> float:
@@ -57,17 +63,24 @@ class Player:
     @property
     def player_id(self) -> str:
         """The id Valheim's admin/ban lists key on, when we know it."""
-        return self.session_id if self.source == "log" else ""
+        if self.source != "log":
+            return ""
+        if self.platform_id:
+            return self.platform_id
+        # A PlayFab session is not such an id, and its slash would break every
+        # per-player URL. The platform id follows it within a line or two.
+        return "" if "/" in self.session_id else self.session_id
 
     @property
     def platform(self) -> str:
         """Best-effort platform label for the id we hold."""
-        if self.source != "log":
+        player_id = self.player_id
+        if not player_id:
             return "unknown"
-        if self.session_id.isdigit() and self.session_id.startswith("7656"):
+        if player_id.isdigit() and player_id.startswith("7656"):
             return "Steam"
-        if "_" in self.session_id:
-            return self.session_id.split("_", 1)[0]
+        if "_" in player_id:
+            return player_id.split("_", 1)[0]
         return "other"
 
     def to_dict(self, lists: Any = None) -> dict[str, Any]:
@@ -117,6 +130,15 @@ class PlayerTracker:
         except Exception:  # a listener must never break log processing
             pass
 
+    def _connect(self, session_id: str) -> Player | None:
+        """Start tracking a session. Returns None if it is already tracked."""
+        if session_id in self._players:
+            return None
+        player = Player(session_id=session_id)
+        self._players[session_id] = player
+        self._pending.append(session_id)
+        return player
+
     def reset(self) -> None:
         self._players.clear()
         self._pending.clear()
@@ -128,11 +150,23 @@ class PlayerTracker:
     def observe_log(self, line: str) -> None:
         match = RE_CONNECT.search(line) or RE_HANDSHAKE.search(line)
         if match:
-            session_id = match.group(1)
-            if session_id not in self._players:
-                self._players[session_id] = Player(session_id=session_id)
-                self._pending.append(session_id)
-                self._emit(LogEvent("connect", player_id=session_id, raw=line))
+            player = self._connect(match.group(1))
+            if player is not None and player.player_id:
+                self._emit(LogEvent("connect", player_id=player.player_id, raw=line))
+            return
+
+        match = RE_PLATFORM_ID.search(line)
+        if match:
+            # Whichever comes first, the session is known once; its connect
+            # event waits for this line, since only now is there an id.
+            session_id, platform_id = match.groups()
+            player = self._connect(session_id) or self._players[session_id]
+            if not player.platform_id:
+                player.platform_id = platform_id
+                self._emit(LogEvent("connect", player_id=platform_id, raw=line))
+                if player.name:
+                    self._emit(LogEvent("named", player_id=platform_id,
+                                        name=player.name, raw=line))
             return
 
         match = RE_CHARACTER.search(line)
@@ -158,7 +192,7 @@ class PlayerTracker:
                     player.name = name
                     player.character_id = character_id
                     self._emit(
-                        LogEvent("named", player_id=session_id, name=name, raw=line)
+                        LogEvent("named", player_id=player.player_id, name=name, raw=line)
                     )
                     return
             return
@@ -172,7 +206,7 @@ class PlayerTracker:
             if gone is not None:
                 self._emit(
                     LogEvent(
-                        "disconnect", player_id=session_id,
+                        "disconnect", player_id=gone.player_id,
                         name=gone.name, count=round(gone.playtime), raw=line,
                     )
                 )
