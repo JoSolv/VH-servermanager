@@ -2,13 +2,23 @@
 {% if probe.libraries and not probe.libraries.ok and probe.libraries.available %}
   <div class="alert error" style="margin-top:12px">
     <strong>The server is missing shared libraries.</strong>
-    Steam's <code>steamclient.so</code> is loaded at run time, and a missing dependency
-    there fails without saying so: the game starts and accepts direct connections while
-    Steam never initialises — so the query port stays silent and the server never appears
-    in the browser. That matches what you are seeing.
+    {% if probe.libraries.crossplay_broken %}
+      PlayFab Party, which crossplay runs on, cannot load. That fails without an error:
+      PlayFab login works, but the Party network the join code belongs to is never
+      created, so no code is issued and the console repeats
+      <code>PlayFab reconnect server</code>.
+    {% else %}
+      Steam's <code>steamclient.so</code> is loaded at run time, and a missing dependency
+      there fails without saying so: the game starts and accepts direct connections while
+      Steam never initialises — so the query port stays silent and the server never appears
+      in the browser. That matches what you are seeing.
+    {% endif %}
     <ul class="probe-list">
       {% for file, libs in probe.libraries.missing.items() %}
-        <li><code>{{ file }}</code> needs {{ libs | join(', ') }}</li>
+        <li><code>{{ file }}</code> needs
+          {% for lib in libs %}{{ lib }}{% if probe.libraries.packages[lib] %}
+            (<code>{{ probe.libraries.packages[lib] }}</code>){% endif %}{{ ', ' if not loop.last }}{% endfor %}
+        </li>
       {% endfor %}
     </ul>
     <span class="subtle">Install the missing libraries in the host or image and restart.</span>

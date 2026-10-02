@@ -430,8 +430,9 @@ the connectivity probe calls it out.
 The manager also checks that the server's shared libraries resolve, because
 Steam's `steamclient.so` is loaded at run time and a missing dependency there
 fails silently in the same shape: the game runs while Steam never initialises,
-so the query port stays quiet and the server never registers. **Settings**
-reports anything unresolved, with the Debian package that provides it.
+so the query port stays quiet and the server never registers. Crossplay's
+PlayFab Party library is checked the same way. **Settings** reports anything
+unresolved, with the Debian package that provides it.
 
 ### If a server shows as unreachable in the client
 
@@ -463,6 +464,40 @@ holds, every address tried, and which one answered. From there:
   through `port+2` need forwarding; the listing uses the query port.
 - Crossplay servers are joined by their join code rather than through the Steam
   list, so the Steam entry can look wrong regardless of configuration.
+
+### If a crossplay server never gets a join code
+
+```
+New session server "Midgard" that has join code , now 0 player(s)
+Register PlayFab server "Midgard" with IP 203.0.113.7:2456
+Server 'Midgard' begin PlayFab create and join network for server
+PlayFab reconnect server 'Midgard'
+Server 'Midgard' begin PlayFab create and join network for server
+```
+
+and the last two lines repeat every 30 seconds.
+
+The empty code on the first line is normal — a healthy server prints it too,
+then `Joined PlayFab Party network`, `Created PlayFab lobby` and
+`Session "Midgard" registered with join code 123456` within a minute. A server
+that only ever repeats `PlayFab reconnect server` has logged in to PlayFab but
+cannot create the Party network that the join code belongs to.
+
+One cause fails exactly like this without an error of its own: crossplay runs
+on PlayFab Party (`libParty.so`), which links against
+`libpulse-mainloop-glib.so.0` as well as `libpulse.so.0` — and that one comes
+in its own package, `libpulse-mainloop-glib0`, which `libpulse0` does not pull
+in. A desktop usually has it already, which is why the same server can work
+on a PC and not in a container. The image installs it; on a host of your own,
+install it (or `libpulse-dev`, which is what Valheim's instructions ask for and
+which depends on it). **Settings** and the connectivity panel check
+`libParty.so` along with the Steam libraries and name the package if anything
+is missing.
+
+Once Party can load, it loads in every server — crossplay or not — and
+crashes with signal 11 at `BumblelionLogger::BumblelionLogger()` when the
+server runs as a uid with no account. See `PUID` under configuration above:
+the image creates that account; a container started as a bare uid cannot.
 
 ### If a crossplay server floods the console with `externalIP` errors
 
