@@ -147,10 +147,10 @@
     renderNotices(scope, snapshot.notices || []);
   }
 
-  // A notice is raised while a server runs -- the crossplay IP loop only shows
-  // itself once the loop is going -- so it has to arrive without a reload. The
-  // key list decides whether anything changed, because re-rendering on every
-  // tick would fight with the user trying to select the text.
+  // A notice can be raised while a server runs -- some failures only show in
+  // its console -- so it has to arrive without a reload. The key list decides
+  // whether anything changed, because re-rendering on every tick would fight
+  // with the user trying to select the text.
   function renderNotices(scope, notices) {
     var host = scope.querySelector('[data-f="notices"]');
     if (!host) return;

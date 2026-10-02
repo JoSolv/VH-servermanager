@@ -112,29 +112,13 @@ def player_churn() -> None:
         log(f"Connections {count} ZDOS:{count * 137} sent:0 recv:0")
 
 
-#: The crossplay public-IP retry loop, verbatim from a real server. It is the
-#: one failure the manager has to survive rather than fix -- the game reuses a
-#: single HttpClient and sets a timeout on it before each request, so every
-#: retry after the first throws at once and the loop runs at CPU speed.
-#: VHSM_FAKE_LOOP=1 reproduces it.
-IP_LOOP = (
-    "Exception while waiting for respons from https://api6.ipify.org -> "
-    "System.InvalidOperationException: This instance has already started one or "
-    "more requests. Properties can only be modified before sending the first request.",
-    "  at System.Net.Http.HttpClient.CheckDisposedOrStarted () [0x00010] in "
-    "<b40a11c7e558480c8010e5eef077b1e0>:0 ",
-    "  at System.Net.Http.HttpClient.set_Timeout (System.TimeSpan value) [0x00032] in "
-    "<b40a11c7e558480c8010e5eef077b1e0>:0 ",
-    "{stamp}: Could not extract valid IP address from externalIP download string.",
-)
+def flood() -> None:
+    """Spin like a server stuck retrying something: one line at CPU speed.
 
-
-def external_ip_loop() -> None:
-    """Spin exactly like a crossplay server that cannot reach an IPv6 lookup."""
+    Exercises the console throttle. VHSM_FAKE_FLOOD=1 turns it on.
+    """
     while running:
-        stamp = time.strftime("%m/%d/%Y %H:%M:%S")
-        for line in IP_LOOP:
-            log(line.format(stamp=stamp))
+        log(f"{time.strftime('%m/%d/%Y %H:%M:%S')}: Request failed, retrying")
         time.sleep(0.001)
 
 
@@ -163,8 +147,8 @@ def main() -> int:
         daemon=True,
     ).start()
     threading.Thread(target=player_churn, daemon=True).start()
-    if os.environ.get("VHSM_FAKE_LOOP", "") not in ("", "0"):
-        threading.Thread(target=external_ip_loop, daemon=True).start()
+    if os.environ.get("VHSM_FAKE_FLOOD", "") not in ("", "0"):
+        threading.Thread(target=flood, daemon=True).start()
     time.sleep(1.5)
     log("Game server connected")
     log(f"DungeonDB Start {random.randint(1000, 9999)}")

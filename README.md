@@ -31,7 +31,10 @@ tested end to end, and the structure is meant to be built on.
   restart half-finished. The UI shows `starting` / `stopping` / `restarting`
   while the work is in flight.
 - Console output is streamed to the browser over a websocket and mirrored to
-  `logs/console.log`.
+  `logs/console.log`. A line repeated faster than anyone could read it — a
+  server stuck in a retry loop — is collapsed into a periodic count, so the
+  loop cannot fill the disk or push everything before it out of the console.
+  Player tracking and version detection still see every line.
 
 **Monitoring**
 - Per-instance CPU, RSS, memory share, thread count and disk I/O via `psutil`,
@@ -498,49 +501,3 @@ Once Party can load, it loads in every server — crossplay or not — and
 crashes with signal 11 at `BumblelionLogger::BumblelionLogger()` when the
 server runs as a uid with no account. See `PUID` under configuration above:
 the image creates that account; a container started as a bare uid cannot.
-
-### If a crossplay server floods the console with `externalIP` errors
-
-```
-Exception while waiting for respons from https://api6.ipify.org -> System.InvalidOperationException:
-  This instance has already started one or more requests. Properties can only be modified
-  before sending the first request.
-  at System.Net.Http.HttpClient.CheckDisposedOrStarted () ...
-  at ZNet.<GetPublicIP>g__DownloadStringAsync|15_1 (System.String downloadUrl, System.Int32 timeoutMS) ...
-Could not extract valid IP address from externalIP download string.
-```
-
-repeated until something stops the server.
-
-A crossplay server looks its public **IPv6** address up on the way to the
-PlayFab relay, and only the first of those requests can ever reach the
-network: the game reuses one `HttpClient` and sets a timeout on it before
-every request, which .NET refuses once that client has sent anything. On a
-host with a routable IPv6 address the first lookup succeeds and the matter
-ends there. On a host without one it fails — and every retry then throws
-`InvalidOperationException` before it gets as far as the network, so the loop
-runs at CPU speed instead of at network speed.
-
-This is in the game binary; nothing in the manager can patch it. What the
-manager does about it:
-
-- **The repeats are collapsed.** Console lines are grouped by shape — two
-  copies that differ only in a timestamp or an id are one line — and once one
-  shape arrives faster than anyone could read it, further copies are left out
-  and replaced with a periodic count. Left alone this loop writes on the order
-  of a gigabyte an hour into `console.log`, which on a NAS fills the dataset
-  the worlds live on. Nothing is lost by collapsing it: the player tracker and
-  version detection are fed every line either way, so only the repeated text
-  is dropped.
-- **It is named.** Once the loop is recognised the instance page says what it
-  is and what to do about it, instead of leaving you to work it out from the
-  stack trace.
-- **It is predicted.** Starting an instance with crossplay on when the host
-  has no routable IPv6 address writes the same explanation into the console
-  *before* the server launches, since after it launches its own repeats are
-  what you would have to read past to find it.
-
-To actually end the loop, give the host a routable IPv6 address — with
-Docker's default bridge network the container has none, so either use host
-networking on an IPv6-capable host or turn IPv6 on for the network — or turn
-crossplay off, which is what wants the address in the first place.
