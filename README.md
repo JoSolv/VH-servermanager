@@ -291,6 +291,13 @@ suite runnable — without downloading the game.
 CLI flags `--host`, `--port`, `--data-root`, `--fake-server` and `--reload`
 override these.
 
+Set the container's user with `PUID`/`PGID`, not with Docker's `--user` or
+compose's `user:`. Valheim cannot run as a uid that has no account: it loads
+PlayFab Party at start-up, crossplay or not, and Party crashes with signal 11
+when it looks the current user up and finds nothing. The entrypoint creates an
+account for `PUID` before dropping to it; a container started as a bare uid
+has nobody to do that.
+
 ### Data layout
 
 ```

@@ -517,6 +517,41 @@ with TestClient(app) as c:
           preflight_notices(crossplay=False, ipv6="")[0] == [])
     check("the host IPv6 probe answers without raising", isinstance(global_ipv6(), str))
 
+    print("\n[a uid with no account]")
+    # PlayFab Party, loaded at start-up crossplay or not, calls
+    # getpwuid(getuid()) and reads ->pw_dir unchecked. In a container started
+    # with a bare numeric uid that is a null pointer. Real output, verbatim:
+    from vhsm.logspam import NO_USER_ACCOUNT
+    CRASH = ("Caught fatal signal - signo:11 code:1 errno:0 addr:0x20",
+             "Obtained 22 stack frames.",
+             "#0  0x007faa23327211 in BumblelionLogger::BumblelionLogger()",
+             "#1  0x007faa23328da6 in BumblelionLogger::GetInstance()")
+    crash_watch = IssueWatcher()
+    crashed = [crash_watch.observe(line) for line in CRASH]
+    check("the PlayFab start-up crash is recognised from its stack",
+          [n.key for n in crashed if n] == ["no-user-account"], crashed)
+    check("and explained with the way out",
+          "PUID" in NO_USER_ACCOUNT.detail and "/etc/passwd" in NO_USER_ACCOUNT.detail)
+
+    def account_preflight(has):
+        config = InstanceConfig(name="Lonely", world="Lonely", password="hammertime",
+                                port=2610, public=False, crossplay=False)
+        layout = InstanceLayout.for_instance(settings, config.id)
+        sup = Supervisor(config, layout, settings)
+        real, supervisor_mod.has_account = supervisor_mod.has_account, lambda: has
+        try:
+            sup._preflight()
+        finally:
+            supervisor_mod.has_account = real
+        return sup.notices, sup.recent_logs()
+
+    flagged, logged = account_preflight(False)
+    check("a uid with no account is flagged before launch, crossplay or not",
+          [n["key"] for n in flagged] == ["no-user-account"], flagged)
+    check("and said in the console", any("no account" in line for line in logged), logged)
+    check("a uid with an account is left alone", account_preflight(True)[0] == [])
+    check("this process's own account is found", supervisor_mod.has_account() is True)
+
     snap = c.get(f"/api/instances/{iid}").json()
     check("notices ride on every instance snapshot",
           snap["notices"] == [], snap.get("notices"))
