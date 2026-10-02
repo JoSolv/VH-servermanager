@@ -88,7 +88,7 @@ def a2s_server(port: int, name: str, world: str, public: bool) -> None:
 # --------------------------------------------------------------------------- #
 # Simulated player churn
 # --------------------------------------------------------------------------- #
-def player_churn() -> None:
+def player_churn(crossplay: bool) -> None:
     while running:
         time.sleep(random.uniform(8, 20))
         if not running:
@@ -97,44 +97,35 @@ def player_churn() -> None:
             joining = len(players) < 4 and (not players or random.random() < 0.6)
             if joining:
                 steam_id = str(random.randint(76561197960265728, 76561199999999999))
+                # Crossplay knows a player by PlayFab session first, and learns
+                # the platform account behind it on the very next line.
+                session = f"playfab/{random.getrandbits(64):016X}" if crossplay else steam_id
                 name = random.choice([n for n in NAMES if n not in players.values()] or NAMES)
-                players[steam_id] = name
+                players[session] = name
             else:
-                steam_id, name = random.choice(list(players.items()))
-                del players[steam_id]
+                session, name = random.choice(list(players.items()))
+                del players[session]
             count = len(players)
-        if joining:
+        if joining and crossplay:
+            log(f"Got handshake from client {session}")
+            log(f"PlayFab socket with remote ID {session} received local Platform ID Steam_{steam_id}")
+        elif joining:
             log(f"Got connection SteamID {steam_id}")
             log(f"Got handshake from client {steam_id}")
+        if joining:
             log(f"Got character ZDOID from {name} : {random.randint(1, 10**9)}:1")
         else:
-            log(f"Closing socket {steam_id}")
+            log(f"Closing socket {session}")
         log(f"Connections {count} ZDOS:{count * 137} sent:0 recv:0")
 
 
-#: The crossplay public-IP retry loop, verbatim from a real server. It is the
-#: one failure the manager has to survive rather than fix -- the game reuses a
-#: single HttpClient and sets a timeout on it before each request, so every
-#: retry after the first throws at once and the loop runs at CPU speed.
-#: VHSM_FAKE_LOOP=1 reproduces it.
-IP_LOOP = (
-    "Exception while waiting for respons from https://api6.ipify.org -> "
-    "System.InvalidOperationException: This instance has already started one or "
-    "more requests. Properties can only be modified before sending the first request.",
-    "  at System.Net.Http.HttpClient.CheckDisposedOrStarted () [0x00010] in "
-    "<b40a11c7e558480c8010e5eef077b1e0>:0 ",
-    "  at System.Net.Http.HttpClient.set_Timeout (System.TimeSpan value) [0x00032] in "
-    "<b40a11c7e558480c8010e5eef077b1e0>:0 ",
-    "{stamp}: Could not extract valid IP address from externalIP download string.",
-)
+def flood() -> None:
+    """Spin like a server stuck retrying something: one line at CPU speed.
 
-
-def external_ip_loop() -> None:
-    """Spin exactly like a crossplay server that cannot reach an IPv6 lookup."""
+    Exercises the console throttle. VHSM_FAKE_FLOOD=1 turns it on.
+    """
     while running:
-        stamp = time.strftime("%m/%d/%Y %H:%M:%S")
-        for line in IP_LOOP:
-            log(line.format(stamp=stamp))
+        log(f"{time.strftime('%m/%d/%Y %H:%M:%S')}: Request failed, retrying")
         time.sleep(0.001)
 
 
@@ -145,6 +136,7 @@ def main() -> int:
     parser.add_argument("-port", type=int, default=2456)
     parser.add_argument("-public", default="0")
     parser.add_argument("-savedir", default=".")
+    parser.add_argument("-crossplay", action="store_true")
     known, _ = parser.parse_known_args()
 
     def handle_stop(signum, _frame):
@@ -162,9 +154,9 @@ def main() -> int:
         args=(known.port + 1, known.name, known.world, known.public == "1"),
         daemon=True,
     ).start()
-    threading.Thread(target=player_churn, daemon=True).start()
-    if os.environ.get("VHSM_FAKE_LOOP", "") not in ("", "0"):
-        threading.Thread(target=external_ip_loop, daemon=True).start()
+    threading.Thread(target=player_churn, args=(known.crossplay,), daemon=True).start()
+    if os.environ.get("VHSM_FAKE_FLOOD", "") not in ("", "0"):
+        threading.Thread(target=flood, daemon=True).start()
     time.sleep(1.5)
     log("Game server connected")
     log(f"DungeonDB Start {random.randint(1000, 9999)}")

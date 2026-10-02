@@ -21,9 +21,8 @@ from typing import Callable, TextIO
 
 from .config import Settings, VALHEIM_CLIENT_APPID
 from .instance import InstanceConfig, InstanceLayout
-from .logspam import CROSSPLAY_PUBLIC_IP_LOOP, NO_USER_ACCOUNT, IssueWatcher, LogThrottle
+from .logspam import NO_USER_ACCOUNT, IssueWatcher, LogThrottle
 from .mods import bepinex
-from .monitor.ports import global_ipv6
 
 #: Lines of console output kept in memory per instance.
 LOG_BUFFER_LINES = 1000
@@ -213,28 +212,17 @@ class Supervisor:
     def _preflight(self) -> None:
         """Say up front what this host will make the server do wrong.
 
-        The alternative is finding out from the console, and the console is
-        the one place a failure like the crossplay IP loop is unreadable --
-        by the time anyone looks, its own repeats have scrolled everything
-        else away.
+        The alternative is finding out from the console, and a server that
+        crashes while loading its plugins says nothing there but a stack.
         """
-        if not has_account():
-            notice = self._issues.raise_now(NO_USER_ACCOUNT)
-            if notice is not None:
-                self._say(
-                    f"[manager] this process runs as uid {os.getuid()}, which has "
-                    "no account, and the server will crash at start-up:"
-                )
-                for text in notice.console_lines():
-                    self._say(text)
-        if not self.config.crossplay or global_ipv6():
+        if has_account():
             return
-        notice = self._issues.raise_now(CROSSPLAY_PUBLIC_IP_LOOP)
+        notice = self._issues.raise_now(NO_USER_ACCOUNT)
         if notice is None:
             return
         self._say(
-            "[manager] crossplay is on and this host has no routable IPv6 "
-            "address, which the server does not cope with:"
+            f"[manager] this process runs as uid {os.getuid()}, which has "
+            "no account, and the server will crash at start-up:"
         )
         for text in notice.console_lines():
             self._say(text)

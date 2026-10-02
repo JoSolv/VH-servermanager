@@ -259,6 +259,96 @@ with TestClient(app) as c:
     check("history carries the events", "connected" in r.text, r.text[:120])
     check("history is an attachment", "attachment" in r.headers.get("content-disposition", ""))
 
+    print("\n[crossplay players]")
+    # A crossplay server knows a player by PlayFab session first. The platform
+    # account -- the id Valheim's admin, ban and permit lists key on -- comes
+    # on the next line. Shapes verbatim from real servers:
+    from vhsm.monitor.players import PlayerTracker
+    from vhsm.roster import Roster
+    XID = "Steam_76561198373857942"
+    XP = ("Got handshake from client playfab/EFEFD7F454DC3473",
+          f"PlayFab socket with remote ID playfab/EFEFD7F454DC3473 received local Platform ID {XID}",
+          "Got character ZDOID from Ragnhild : 1234567:1",
+          "Got character ZDOID from Ragnhild : 0:0",
+          "Closing socket playfab/EFEFD7F454DC3473")
+    seen = []
+    tracker = PlayerTracker(on_event=seen.append)
+    tracker.observe_log(XP[0])
+    check("a PlayFab session alone is not a player id",
+          tracker.players[0].player_id == "" and not seen, (tracker.players[0], seen))
+    tracker.observe_log(XP[1])
+    xp_player = tracker.players[0]
+    check("the platform id becomes the player id",
+          xp_player.player_id == XID and xp_player.platform == "Steam", xp_player)
+    check("so the player can be moderated", xp_player.to_dict()["can_moderate"])
+    for line in XP[2:]:
+        tracker.observe_log(line)
+    check("every event carries the platform id, never the session",
+          [(e.kind, e.player_id) for e in seen]
+          == [("connect", XID), ("named", XID), ("died", XID), ("disconnect", XID)],
+          [(e.kind, e.player_id) for e in seen])
+    check("the session ends on its socket closing", tracker.players == [])
+
+    flipped = []
+    reorder = PlayerTracker(on_event=flipped.append)
+    for line in (XP[1], XP[0], XP[2]):
+        reorder.observe_log(line)
+    check("either order gives one player and one connect",
+          len(reorder.players) == 1 and [e.kind for e in flipped] == ["connect", "named"],
+          [e.kind for e in flipped])
+
+    record = app.state.manager.get(iid)
+    for event in seen[:2]:
+        record.roster.observe(event)
+    r = c.get(f"/api/instances/{iid}/players/{XID}/history")
+    check("a crossplay player's history downloads",
+          r.status_code == 200 and "Ragnhild" in r.text and "connected" in r.text,
+          (r.status_code, r.text[:120]))
+    panel = c.get(f"/api/instances/{iid}/players").text
+    check("no per-player link carries a PlayFab session", "playfab/" not in panel)
+    r = c.post(f"/api/instances/{iid}/players/{XID}/admin")
+    check("and the player can be made admin",
+          "now an admin" in r.text
+          and XID in (ROOT/"instances"/iid/"saves"/"adminlist.txt").read_text(), r.text[:90])
+    c.post(f"/api/instances/{iid}/players/{XID}/unadmin")
+    c.post(f"/api/instances/{iid}/players/{XID}/forget")
+
+    # Rosters written before this recorded crossplay players under the session,
+    # which no list accepts and no URL can address. They are dropped on load.
+    stale = ROOT / "stale-roster.json"
+    stale.write_text(json.dumps({"version": 1, "players": [
+        {"player_id": "playfab/EFEFD7F454DC3473", "names": ["Ragnhild"]},
+        {"player_id": XID, "names": ["Ragnhild"]}]}))
+    check("a roster entry keyed on a PlayFab session is dropped on load",
+          [e.player_id for e in Roster(stale).entries()] == [XID])
+    stale.unlink()
+
+    # End to end: a crossplay instance of the stand-in server logs players the
+    # way a real one does.
+    r = c.post("/instances", data={"name":"Crossy","world":"Crossy","password":"hammertime",
+               "port":"2520","crossplay":"on","save_interval":"1800","backups":"4",
+               "backup_short":"7200","backup_long":"43200"}, follow_redirects=False)
+    xp_id = r.headers["location"].rsplit("/", 1)[-1]
+    c.post(f"/instances/{xp_id}/start")
+    wait_status(c, xp_id, "running")
+    deadline, xp_players = time.time() + 40, []
+    while time.time() < deadline:
+        xp_players = [p for p in c.get(f"/api/instances/{xp_id}").json()["players"]["players"]
+                      if p["player_id"]]
+        if xp_players:
+            break
+        time.sleep(1)
+    check("a crossplay server's player is tracked by platform id",
+          bool(xp_players) and xp_players[0]["player_id"].startswith("Steam_"),
+          [p["player_id"] for p in xp_players])
+    if xp_players:
+        r = c.get(f"/api/instances/{xp_id}/players/{xp_players[0]['player_id']}/history")
+        check("and their history downloads", r.status_code == 200 and "connected" in r.text,
+              (r.status_code, r.text[:120]))
+    c.post(f"/instances/{xp_id}/stop")
+    wait_status(c, xp_id, "stopped")
+    c.post(f"/instances/{xp_id}/delete", data={"remove_files": "on"})
+
     print("\n[minor fix 1: whitelist]")
     lists = app.state.manager.get(iid).lists
     saved = ROOT/"instances"/iid/"saves"
@@ -466,30 +556,26 @@ with TestClient(app) as c:
           "PlayFab Party" in panel and "libpulse-mainloop-glib0" in panel)
     check("without blaming Steam", "steamclient.so</code> is loaded at run time" not in panel)
 
-    print("\n[crossplay: the public-IP retry loop]")
-    # A crossplay server on a host without IPv6 cannot look its public address
-    # up, and the game retries that in a tight loop -- thousands of lines a
-    # second, all of them the same two. Real output, verbatim:
+    print("\n[console flood throttle]")
+    # A server stuck retrying something writes the same line thousands of
+    # times a second. Left alone that fills the disk and scrolls everything
+    # the server said before it out of the console.
+    import re
     import vhsm.supervisor as supervisor_mod
-    from vhsm.logspam import (
-        CROSSPLAY_PUBLIC_IP_LOOP, IssueWatcher, LogThrottle, signature)
-    from vhsm.monitor.ports import global_ipv6
+    from vhsm.logspam import IssueWatcher, KnownIssue, LogThrottle, signature
     from vhsm.supervisor import Supervisor
     from vhsm.instance import InstanceConfig, InstanceLayout
 
-    EXC = ("Exception while waiting for respons from https://api6.ipify.org -> "
-           "System.InvalidOperationException: This instance has already started "
-           "one or more requests. Properties can only be modified before sending "
-           "the first request.")
-    FAILED = "09/19/2026 16:00:52: Could not extract valid IP address from externalIP download string."
-    LATER = "09/19/2026 16:11:02: Could not extract valid IP address from externalIP download string."
+    FAILED = "09/19/2026 16:00:52: Request failed, retrying"
+    LATER = "09/19/2026 16:11:02: Request failed, retrying"
+    OTHER = "09/19/2026 16:00:52: World saved"
 
     check("a repeat is recognised through its timestamp", signature(FAILED) == signature(LATER))
-    check("unrelated lines keep their own signature", signature(EXC) != signature(FAILED))
+    check("unrelated lines keep their own signature", signature(OTHER) != signature(FAILED))
 
     throttle = LogThrottle(burst=5, window=10.0, note_interval=1.0)
     kept = notes = 0
-    for i in range(400):                      # the real loop, ~1000 lines/s
+    for i in range(400):                      # ~1000 lines/s
         verdict = throttle.admit(FAILED, now=100.0 + i * 0.001)
         kept += verdict.keep
         notes += bool(verdict.note)
@@ -524,52 +610,27 @@ with TestClient(app) as c:
     check("the console resumes once the loop stops",
           resumed.keep and "left out" in resumed.note, resumed)
 
-    watcher = IssueWatcher()
-    check("one failed lookup is not a diagnosis",
+    # The watcher counts a known pattern and raises one notice per failure.
+    REPEATING = KnownIssue(
+        key="repeating", pattern=re.compile(r"Request failed"), threshold=15,
+        title="Something keeps failing.", detail="What it is.\nWhat to do.")
+    watcher = IssueWatcher([REPEATING])
+    check("one occurrence is not a diagnosis",
           watcher.observe(FAILED) is None and not watcher.notices)
     raised = None
-    for _ in range(CROSSPLAY_PUBLIC_IP_LOOP.threshold):
+    for _ in range(REPEATING.threshold):
         raised = watcher.observe(FAILED) or raised
-    check("a loop is a diagnosis", raised is not None and raised.key == "crossplay-public-ip-loop", raised)
+    check("a loop is a diagnosis", raised is not None and raised.key == "repeating", raised)
     check("it is raised once, not once per line",
           all(watcher.observe(FAILED) is None for _ in range(50)))
     check("while the count keeps rising",
-          watcher.notices[0].hits > CROSSPLAY_PUBLIC_IP_LOOP.threshold, watcher.notices[0].hits)
-    check("the notice names the cause and the way out",
-          "IPv6" in raised.detail and "crossplay off" in raised.detail)
-    check("it reaches the console as manager lines",
-          all(line.startswith("[manager] ") for line in raised.console_lines()))
+          watcher.notices[0].hits > REPEATING.threshold, watcher.notices[0].hits)
+    check("it reaches the console as manager lines, a paragraph each",
+          raised.console_lines() == ["[manager] Something keeps failing.",
+                                     "[manager] What it is.", "[manager] What to do."],
+          raised.console_lines())
     check("ordinary output raises nothing",
           IssueWatcher().observe("Game server connected") is None)
-
-    # Preflight: said before the server starts, so it is not buried by the very
-    # loop it is about. Pinned rather than read off this host, which may have
-    # IPv6 of its own.
-    def preflight_notices(crossplay, ipv6):
-        config = InstanceConfig(name="Vanaheim", world="Vanaheim", password="hammertime",
-                                port=2600, public=False, crossplay=crossplay)
-        layout = InstanceLayout.for_instance(settings, config.id)
-        sup = Supervisor(config, layout, settings)
-        real, supervisor_mod.global_ipv6 = supervisor_mod.global_ipv6, lambda: ipv6
-        try:
-            sup._preflight()
-        finally:
-            supervisor_mod.global_ipv6 = real
-        transcript = layout.console_log.read_text() if layout.console_log.is_file() else ""
-        return sup.notices, sup.recent_logs(), transcript
-
-    flagged, logged, written = preflight_notices(crossplay=True, ipv6="")
-    check("crossplay without IPv6 is flagged before launch",
-          [n["key"] for n in flagged] == ["crossplay-public-ip-loop"], flagged)
-    check("and explained in the console the user is watching",
-          any("no routable IPv6" in line for line in logged), logged)
-    check("and in the transcript they would download",
-          "no routable IPv6" in written and "Turning crossplay off" in written, written[:120])
-    check("crossplay with IPv6 is left alone",
-          preflight_notices(crossplay=True, ipv6="2001:db8::1")[0] == [])
-    check("a non-crossplay server is never flagged",
-          preflight_notices(crossplay=False, ipv6="")[0] == [])
-    check("the host IPv6 probe answers without raising", isinstance(global_ipv6(), str))
 
     print("\n[a uid with no account]")
     # PlayFab Party, loaded at start-up crossplay or not, calls
@@ -612,27 +673,16 @@ with TestClient(app) as c:
     check("the instance page has somewhere to put them",
           'data-f="notices"' in c.get(f"/instances/{iid}").text)
 
-    # End to end, against a process actually spinning: crossplay is left OFF
-    # so the preflight cannot be what raises the notice -- only reading the
-    # console can be. VHSM_FAKE_LOOP makes the stand-in server reproduce the
-    # real loop, thousands of lines a second.
-    os.environ["VHSM_FAKE_LOOP"] = "1"
+    # End to end, against a process actually spinning: VHSM_FAKE_FLOOD makes
+    # the stand-in server repeat one line thousands of times a second.
+    os.environ["VHSM_FAKE_FLOOD"] = "1"
     r = c.post("/instances", data={"name":"Loopy","world":"Loopy","password":"hammertime",
                "port":"2510","save_interval":"1800","backups":"4","backup_short":"7200",
                "backup_long":"43200"}, follow_redirects=False)
     loop_id = r.headers["location"].rsplit("/", 1)[-1]
     c.post(f"/instances/{loop_id}/start")
     wait_status(c, loop_id, "running")
-    os.environ.pop("VHSM_FAKE_LOOP", None)
-
-    deadline, live = time.time() + 20, []
-    while time.time() < deadline:
-        live = c.get(f"/api/instances/{loop_id}").json()["notices"]
-        if live:
-            break
-        time.sleep(0.5)
-    check("a running loop is recognised from the console alone",
-          [n["key"] for n in live] == ["crossplay-public-ip-loop"], live)
+    os.environ.pop("VHSM_FAKE_FLOOD", None)
 
     time.sleep(3)
     supervisor = app.state.manager.get(loop_id).supervisor

@@ -14,10 +14,10 @@ are left out and replaced by a periodic count. Leaving a line out is
 cosmetic: callers hand every line to their log hooks either way, so player
 tracking and version detection still see the whole stream.
 
-:class:`IssueWatcher` reads the same stream for failures that are known,
-survivable, and impossible to diagnose from the log itself -- above all the
-crossplay public-IP loop, which is a bug in the game binary rather than
-anything the manager can fix -- and turns them into one plain explanation.
+:class:`IssueWatcher` reads the same stream for failures that are known and
+impossible to diagnose from the log itself -- such as PlayFab crashing at
+start-up on a uid with no account, which leaves nothing but a native stack --
+and turns them into one plain explanation.
 """
 
 from __future__ import annotations
@@ -198,41 +198,6 @@ class Notice:
         }
 
 
-CROSSPLAY_PUBLIC_IP_LOOP = KnownIssue(
-    key="crossplay-public-ip-loop",
-    # Every turn of the loop ends with this line, whichever lookup service it
-    # tried, so counting it counts the loop itself.
-    pattern=re.compile(
-        r"could not extract valid ip address from externalip", re.IGNORECASE
-    ),
-    #: A handful of these at boot is ordinary; a loop passes this in a blink.
-    threshold=15,
-    title=(
-        "This server cannot look up its public IPv6 address and is retrying "
-        "it in a tight loop."
-    ),
-    detail=(
-        "A crossplay server asks an outside service for its public IPv6 address "
-        "on the way to the PlayFab relay. Only the first of those requests can "
-        "ever reach the network: the game reuses one HttpClient and sets a "
-        "timeout on it before each request, which .NET refuses once that client "
-        "has sent anything, so every retry throws InvalidOperationException "
-        "immediately instead of waiting. On a host with a routable IPv6 address "
-        "the first lookup succeeds and the matter ends there; on a host without "
-        "one it fails, and the retries then spin as fast as the CPU allows.\n"
-        "This is in the game binary and nothing here can patch it. The repeats "
-        "are left out of the console so the rest of the log stays "
-        "readable, and the server itself carries on -- this is a background "
-        "lookup, not the game loop -- though a server spinning like this can be "
-        "slow to shut down.\n"
-        "To end it, give this host a routable IPv6 address: with Docker's "
-        "default bridge network the container has none, so either use host "
-        "networking on an IPv6-capable host or turn IPv6 on for the network. "
-        "Turning crossplay off also ends it, since crossplay is what wants the "
-        "address, at the cost of console and Game Pass players."
-    ),
-)
-
 NO_USER_ACCOUNT = KnownIssue(
     key="no-user-account",
     # The top frame of the crash Unity prints. Nothing else in it is ours.
@@ -257,7 +222,7 @@ NO_USER_ACCOUNT = KnownIssue(
 )
 
 #: Every issue the watcher knows how to recognise.
-ISSUES: tuple[KnownIssue, ...] = (CROSSPLAY_PUBLIC_IP_LOOP, NO_USER_ACCOUNT)
+ISSUES: tuple[KnownIssue, ...] = (NO_USER_ACCOUNT,)
 
 
 class IssueWatcher:
