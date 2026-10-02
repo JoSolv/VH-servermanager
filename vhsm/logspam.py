@@ -233,8 +233,31 @@ CROSSPLAY_PUBLIC_IP_LOOP = KnownIssue(
     ),
 )
 
+NO_USER_ACCOUNT = KnownIssue(
+    key="no-user-account",
+    # The top frame of the crash Unity prints. Nothing else in it is ours.
+    pattern=re.compile(r"in BumblelionLogger::BumblelionLogger\(\)"),
+    threshold=1,
+    title=(
+        "The server runs as a user with no account, and PlayFab crashes on it "
+        "at start-up."
+    ),
+    detail=(
+        "Valheim loads PlayFab Party when it starts, whether crossplay is on or "
+        "not, and Party's logger looks the current user up and uses the answer "
+        "without checking it. A uid with no entry in /etc/passwd makes that a "
+        "null pointer, so the server dies with signal 11 before it logs anything "
+        "of its own.\n"
+        "The container image creates an account for PUID/PGID when it starts. "
+        "If the container's user is set directly instead (Docker's --user, or "
+        "user: in compose), nothing can add one -- run the container as root "
+        "and set PUID and PGID instead. Outside a container, run the manager "
+        "as a real user."
+    ),
+)
+
 #: Every issue the watcher knows how to recognise.
-ISSUES: tuple[KnownIssue, ...] = (CROSSPLAY_PUBLIC_IP_LOOP,)
+ISSUES: tuple[KnownIssue, ...] = (CROSSPLAY_PUBLIC_IP_LOOP, NO_USER_ACCOUNT)
 
 
 class IssueWatcher:

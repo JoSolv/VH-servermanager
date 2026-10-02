@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import enum
 import os
+import pwd
 import re
 import signal
 import time
@@ -20,7 +21,7 @@ from typing import Callable, TextIO
 
 from .config import Settings, VALHEIM_CLIENT_APPID
 from .instance import InstanceConfig, InstanceLayout
-from .logspam import CROSSPLAY_PUBLIC_IP_LOOP, IssueWatcher, LogThrottle
+from .logspam import CROSSPLAY_PUBLIC_IP_LOOP, NO_USER_ACCOUNT, IssueWatcher, LogThrottle
 from .mods import bepinex
 from .monitor.ports import global_ipv6
 
@@ -33,6 +34,20 @@ SIGTERM_GRACE = 15.0
 #: The server announces its build on the first line of output, e.g.
 #: ``Valheim version: l-0.217.46``. This is the version a client must match.
 RE_VERSION = re.compile(r"Valheim version:?\s*(?:l-)?([0-9][0-9.]*)", re.IGNORECASE)
+
+
+def has_account() -> bool:
+    """Whether this process's uid has an entry in the user database.
+
+    The server inherits the uid, and PlayFab Party -- which Valheim loads at
+    start-up, crossplay or not -- crashes when it looks the user up and finds
+    nothing. A container started with a bare numeric uid is exactly that.
+    """
+    try:
+        pwd.getpwuid(os.getuid())
+    except KeyError:
+        return False
+    return True
 
 
 class Status(str, enum.Enum):
@@ -203,6 +218,15 @@ class Supervisor:
         by the time anyone looks, its own repeats have scrolled everything
         else away.
         """
+        if not has_account():
+            notice = self._issues.raise_now(NO_USER_ACCOUNT)
+            if notice is not None:
+                self._say(
+                    f"[manager] this process runs as uid {os.getuid()}, which has "
+                    "no account, and the server will crash at start-up:"
+                )
+                for text in notice.console_lines():
+                    self._say(text)
         if not self.config.crossplay or global_ipv6():
             return
         notice = self._issues.raise_now(CROSSPLAY_PUBLIC_IP_LOOP)

@@ -11,6 +11,14 @@ FROM python:3.11-slim-bookworm
 # accepts connections while Steam never initialises, so the query port stays
 # quiet and the server never appears in the browser. The library check on the
 # Settings page reports anything still unresolved.
+# libpulse-mainloop-glib0 is for crossplay: PlayFab Party (libParty.so) links
+# against it as well as libpulse0, and it is a separate package that nothing
+# else here pulls in. Without it the Party library cannot load, which fails
+# just as quietly -- PlayFab login works, the Party network is never created,
+# so no join code is issued and the console repeats "PlayFab reconnect server".
+# Valheim's own instructions get it in by asking for libpulse-dev. Once Party
+# can load it runs in every server, crossplay or not, and crashes on a uid
+# with no account -- which is why the entrypoint creates one for PUID.
 # nftables is optional and only used for per-instance network counters.
 # gosu drops privileges cleanly when PUID/PGID are set (setpriv lives in
 # util-linux-extra on bookworm, not util-linux, so it is not a safe default).
@@ -24,6 +32,7 @@ RUN dpkg --add-architecture i386 \
       libatomic1 \
       libcurl4 \
       libpulse0 \
+      libpulse-mainloop-glib0 \
       libsdl2-2.0-0 \
       libstdc++6 \
       procps \

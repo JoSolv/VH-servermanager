@@ -412,6 +412,60 @@ with TestClient(app) as c:
           not report.available and bool(report.reason), report.to_dict())
     check("a report with nothing checked is not called ok", not report.ok)
 
+    # Crossplay: PlayFab Party (libParty.so) needs libpulse-mainloop-glib.so.0,
+    # which libpulse0 does not ship. Without it the Party network is never
+    # created and a crossplay server never gets a join code -- with nothing in
+    # the console but "PlayFab reconnect server" every 30 seconds.
+    import vhsm.manager as manager_mod
+    import vhsm.web.routes as routes_mod
+    from vhsm.diagnostics import LibraryReport
+    check("the glib mainloop maps to its own package, not libpulse0",
+          package_for("libpulse-mainloop-glib.so.0") == "libpulse-mainloop-glib0")
+    check("plain libpulse still maps to libpulse0", package_for("libpulse.so.0") == "libpulse0")
+
+    if shutil.which("ldd"):
+        # The plugin is found by name wherever Unity put it. Any real shared
+        # object stands in for it; only being found and checked is tested here.
+        import _ctypes
+        plugins = settings.game_dir / "valheim_server_Data" / "Plugins"
+        plugins.mkdir(parents=True, exist_ok=True)
+        shutil.copy(_ctypes.__file__, plugins / "libParty.so")
+        try:
+            found_party = check_libraries(settings).checked
+        finally:
+            shutil.rmtree(settings.game_dir / "valheim_server_Data")
+        check("the PlayFab Party plugin is checked",
+              "valheim_server_Data/Plugins/libParty.so" in found_party, found_party)
+
+    PARTY = "valheim_server_Data/Plugins/libParty.so"
+    party_gap = LibraryReport([PARTY], {PARTY: ["libpulse-mainloop-glib.so.0"]})
+    steam_gap = LibraryReport(["linux64/steamclient.so"],
+                              {"linux64/steamclient.so": ["libSDL2-2.0.so.0"]})
+    check("a missing Party dependency is a crossplay failure", party_gap.crossplay_broken)
+    check("a missing Steam dependency is not", not steam_gap.crossplay_broken)
+    check("the report names the package that fixes it",
+          party_gap.to_dict()["packages"] == {"libpulse-mainloop-glib.so.0": "libpulse-mainloop-glib0"},
+          party_gap.to_dict()["packages"])
+
+    real_routes, routes_mod.check_libraries = routes_mod.check_libraries, lambda s: party_gap
+    try:
+        page = c.get("/settings").text
+    finally:
+        routes_mod.check_libraries = real_routes
+    check("settings explains a crossplay library gap",
+          "PlayFab Party" in page and "PlayFab reconnect server" in page)
+    check("and lists the file and its package",
+          "libParty.so" in page and "libpulse-mainloop-glib0" in page)
+
+    real_manager, manager_mod.check_libraries = manager_mod.check_libraries, lambda s: party_gap
+    try:
+        panel = c.get(f"/api/instances/{iid}/connectivity").text
+    finally:
+        manager_mod.check_libraries = real_manager
+    check("the connectivity panel explains it too",
+          "PlayFab Party" in panel and "libpulse-mainloop-glib0" in panel)
+    check("without blaming Steam", "steamclient.so</code> is loaded at run time" not in panel)
+
     print("\n[crossplay: the public-IP retry loop]")
     # A crossplay server on a host without IPv6 cannot look its public address
     # up, and the game retries that in a tight loop -- thousands of lines a
@@ -516,6 +570,41 @@ with TestClient(app) as c:
     check("a non-crossplay server is never flagged",
           preflight_notices(crossplay=False, ipv6="")[0] == [])
     check("the host IPv6 probe answers without raising", isinstance(global_ipv6(), str))
+
+    print("\n[a uid with no account]")
+    # PlayFab Party, loaded at start-up crossplay or not, calls
+    # getpwuid(getuid()) and reads ->pw_dir unchecked. In a container started
+    # with a bare numeric uid that is a null pointer. Real output, verbatim:
+    from vhsm.logspam import NO_USER_ACCOUNT
+    CRASH = ("Caught fatal signal - signo:11 code:1 errno:0 addr:0x20",
+             "Obtained 22 stack frames.",
+             "#0  0x007faa23327211 in BumblelionLogger::BumblelionLogger()",
+             "#1  0x007faa23328da6 in BumblelionLogger::GetInstance()")
+    crash_watch = IssueWatcher()
+    crashed = [crash_watch.observe(line) for line in CRASH]
+    check("the PlayFab start-up crash is recognised from its stack",
+          [n.key for n in crashed if n] == ["no-user-account"], crashed)
+    check("and explained with the way out",
+          "PUID" in NO_USER_ACCOUNT.detail and "/etc/passwd" in NO_USER_ACCOUNT.detail)
+
+    def account_preflight(has):
+        config = InstanceConfig(name="Lonely", world="Lonely", password="hammertime",
+                                port=2610, public=False, crossplay=False)
+        layout = InstanceLayout.for_instance(settings, config.id)
+        sup = Supervisor(config, layout, settings)
+        real, supervisor_mod.has_account = supervisor_mod.has_account, lambda: has
+        try:
+            sup._preflight()
+        finally:
+            supervisor_mod.has_account = real
+        return sup.notices, sup.recent_logs()
+
+    flagged, logged = account_preflight(False)
+    check("a uid with no account is flagged before launch, crossplay or not",
+          [n["key"] for n in flagged] == ["no-user-account"], flagged)
+    check("and said in the console", any("no account" in line for line in logged), logged)
+    check("a uid with an account is left alone", account_preflight(True)[0] == [])
+    check("this process's own account is found", supervisor_mod.has_account() is True)
 
     snap = c.get(f"/api/instances/{iid}").json()
     check("notices ride on every instance snapshot",
