@@ -208,6 +208,7 @@ async def mods_page(request: Request, instance_id: str):
         orphans=[m.package_full_name for m in profile.orphans()],
         config_files=config_index(record.layout, profile.mods),
         index_count=manager.index.count,
+        index_fetched_at=manager.index.fetched_at,
         index_error=index_error,
         categories=manager.index.categories(),
     )

@@ -9,6 +9,7 @@ to disk; searching then happens locally and instantly.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,6 +35,36 @@ def parse_dependency(text: str) -> tuple[str, str, str]:
     if not namespace or not name or not version:
         raise ThunderstoreError(f"malformed dependency string {text!r}")
     return namespace, name, version
+
+
+_VERSION_PREFIX = re.compile(r"\s*v?(\d+(?:\.\d+)*)")
+
+
+def _version_key(text: str) -> tuple[int, ...] | None:
+    """The numeric parts of a version: ``1.10.4`` -> ``(1, 10, 4)``.
+
+    Only the leading dotted run counts, so a browser's ``1.10.4 (1)`` download
+    suffix still reads as 1.10.4. ``None`` when there is nothing numeric.
+    """
+    match = _VERSION_PREFIX.match(text or "")
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def is_newer(candidate: str, current: str) -> bool:
+    """Whether version *candidate* is later than *current*.
+
+    Different is not the same as newer: a mod installed from a zip can be
+    ahead of the catalogue, and calling the catalogue's version an update
+    would offer a downgrade. Versions that do not parse fall back to
+    "different", the most that can be said about them.
+    """
+    new, old = _version_key(candidate), _version_key(current)
+    if new is None or old is None:
+        return candidate != current
+    width = max(len(new), len(old))
+    return new + (0,) * (width - len(new)) > old + (0,) * (width - len(old))
 
 
 @dataclass(slots=True)
@@ -164,6 +195,10 @@ class ThunderstoreIndex:
         return bool(self._packages)
 
     @property
+    def fetched_at(self) -> float:
+        return self._fetched_at
+
+    @property
     def age(self) -> float:
         return time.time() - self._fetched_at if self._fetched_at else float("inf")
 
@@ -204,9 +239,12 @@ class ThunderstoreIndex:
                     response.raise_for_status()
                     payload = response.json()
             except (httpx.HTTPError, ValueError) as exc:
-                if self._packages:
+                if self._packages and not force:
                     # Keep serving the stale catalogue rather than breaking the page.
                     return
+                # An explicit refresh has to say it failed: reporting success
+                # while the old copy stays in use hides releases indefinitely.
+                # The old copy is still loaded either way.
                 raise ThunderstoreError(
                     f"could not reach Thunderstore: {exc}"
                 ) from exc
