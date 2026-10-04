@@ -27,6 +27,7 @@ from .thunderstore import (
     PackageVersion,
     ThunderstoreError,
     ThunderstoreIndex,
+    is_newer,
     parse_dependency,
 )
 
@@ -266,12 +267,12 @@ class ModProfile:
         return found
 
     def updates_available(self) -> list[dict[str, str]]:
-        """Installed mods whose Thunderstore latest differs from what is here."""
+        """Installed mods that Thunderstore has a newer version of."""
         updates = []
         for mod in self._mods:
             package = self.index.get(mod.package_full_name)
             latest = package.latest if package else None
-            if latest and latest.version_number != mod.version:
+            if latest and is_newer(latest.version_number, mod.version):
                 updates.append(
                     {
                         "package_full_name": mod.package_full_name,

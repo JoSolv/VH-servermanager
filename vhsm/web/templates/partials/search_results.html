@@ -23,7 +23,9 @@
               hx-target="#installed-mods" hx-swap="outerHTML" hx-indicator="closest .mod">
           <input type="hidden" name="package_full_name" value="{{ package.full_name }}">
           <button class="small {{ '' if current else 'primary' }}" type="submit">
-            {% if current and current != package.latest_version %}Update{% elif current %}Reinstall{% else %}Install{% endif %}
+            {% if current and package.latest_version is newer_than(current) %}Update
+            {%- elif current and current is newer_than(package.latest_version) %}Downgrade
+            {%- elif current %}Reinstall{% else %}Install{% endif %}
           </button>
           <span class="spinner">…</span>
         </form>

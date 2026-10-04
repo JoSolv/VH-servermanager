@@ -1341,6 +1341,55 @@ with TestClient(app) as c:
           m.get("ValheimModding-Jotunn", {}).get("version") == "2.30.2"
           and m["ValheimModding-Jotunn"]["dependency_only"], m.get("ValheimModding-Jotunn"))
 
+    print("\n[versions ahead of the catalogue]")
+    from vhsm.mods.thunderstore import is_newer
+    check("versions compare as numbers", is_newer("1.10.0", "1.9.9") and not is_newer("1.9.9", "1.10.0"))
+    check("an older version is not newer", not is_newer("1.10.3", "1.10.4"))
+    check("a download suffix is ignored", not is_newer("1.10.4", "1.10.4 (1)"))
+    check("a missing trailing zero is ignored", not is_newer("1.0.0", "1.0"))
+    # A release the catalogue has not caught up with yet, installed from its
+    # zip: the catalogue's older version is not an update to it.
+    seed(idx, "shudnal", "Seasons", "1.10.3",
+         {"manifest.json": "{}", "plugins/Seasons.dll": "MZ 1.10.3"})
+    seasons_zip = io.BytesIO()
+    with zipfile.ZipFile(seasons_zip, "w") as z:
+        z.writestr("manifest.json", json.dumps({"name": "Seasons", "version_number": "1.10.4"}))
+        z.writestr("plugins/Seasons.dll", "MZ 1.10.4")
+    r = c.post(f"/api/instances/{iid}/mods/upload",
+               files={"file": ("shudnal-Seasons-1.10.4.zip", seasons_zip.getvalue(), "application/zip")})
+    check("a zip ahead of the catalogue installs",
+          mods_on(prof).get("shudnal-Seasons", {}).get("version") == "1.10.4", r.text[:160])
+    check("the older catalogue version is not offered as an update", "1.10.3" not in r.text)
+    pending = [u["package_full_name"] for u in app.state.manager.profile(iid).updates_available()]
+    check("update-all leaves it alone", "shudnal-Seasons" not in pending, pending)
+    r = c.get("/api/mods/search", params={"instance_id": iid, "q": "seasons"})
+    check("the catalogue button says it would downgrade",
+          "Downgrade" in r.text and "Update" not in r.text, r.text[-600:])
+    seed(idx, "shudnal", "Seasons", "1.10.5",
+         {"manifest.json": "{}", "plugins/Seasons.dll": "MZ 1.10.5"})
+    r = c.get(f"/instances/{iid}/mods")
+    check("a genuinely newer version is still offered", "&rarr; 1.10.5" in r.text)
+    r = c.get("/api/mods/search", params={"instance_id": iid, "q": "seasons"})
+    check("and the catalogue button says Update", "Update" in r.text)
+    c.post(f"/api/instances/{iid}/mods/shudnal-Seasons/uninstall")
+
+    print("\n[catalogue refresh]")
+    r = c.get(f"/instances/{iid}/mods")
+    check("the mods page says how old the catalogue is", "packages, fetched just now" in r.text)
+    import httpx
+    real_get = httpx.AsyncClient.get
+    async def offline(self, *args, **kwargs):
+        raise httpx.ConnectError("offline")
+    httpx.AsyncClient.get = offline
+    try:
+        r = c.post("/api/mods/refresh")
+    finally:
+        httpx.AsyncClient.get = real_get
+    check("a failed refresh says so instead of claiming success",
+          "alert error" in r.text and "Catalogue refreshed" not in r.text, r.text[:200])
+    check("and says the old copy is still in use", "Still using the copy fetched" in r.text, r.text[:200])
+    check("the old copy is kept", idx.get("shudnal-Seasons") is not None)
+
     print("\n[r2modman profile export / import]")
     seed(idx, "Zenox", "Zenox", "1.0.53",
          {"manifest.json": "{}", "plugins/Zenox.dll": "MZ", "plugins/zen.json": "{}"})

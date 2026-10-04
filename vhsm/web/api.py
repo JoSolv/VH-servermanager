@@ -13,6 +13,7 @@ import logging
 import shutil
 import tempfile
 from functools import partial
+from html import escape
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -33,7 +34,7 @@ from ..mods.profile import InstalledMod, ModError, read_export
 from ..mods.thunderstore import ThunderstoreError
 from ..monitor.metrics import host_metrics
 from ..steam import server_status
-from .templating import TEMPLATES
+from .templating import TEMPLATES, timeago
 
 log = logging.getLogger("vhsm.web.api")
 router = APIRouter()
@@ -257,7 +258,12 @@ async def refresh_index(request: Request, instance_id: str = Form(default="")) -
     try:
         await manager.index.ensure(force=True)
     except ThunderstoreError as exc:
-        return HTMLResponse(f'<div class="alert error">{exc}</div>')  # targets #refresh-note
+        note = str(exc)
+        if manager.index.loaded:
+            note = note.rstrip(".") + (
+                f". Still using the copy fetched {timeago(manager.index.fetched_at)}."
+            )
+        return HTMLResponse(f'<div class="alert error">{escape(note)}</div>')  # targets #refresh-note
     return HTMLResponse(
         f'<div class="alert ok">Catalogue refreshed: {manager.index.count} packages.</div>'
     )

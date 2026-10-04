@@ -14,6 +14,7 @@ from typing import Any
 from fastapi.templating import Jinja2Templates
 
 from ..config import build_info
+from ..mods.thunderstore import is_newer
 from ..util import human_bytes
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
@@ -89,3 +90,4 @@ TEMPLATES.env.globals["vhsm_build"] = build_info()
 TEMPLATES.env.filters["timeago"] = timeago
 TEMPLATES.env.filters["datetime"] = as_datetime
 TEMPLATES.env.filters["rules_note"] = rules_note
+TEMPLATES.env.tests["newer_than"] = is_newer

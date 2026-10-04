@@ -24,7 +24,7 @@
   <div class="panel">
     <div class="row spread" style="margin-bottom:12px">
       <h2 style="margin:0">Thunderstore</h2>
-      <span class="subtle">{{ index_count }} packages</span>
+      <span class="subtle">{{ index_count }} packages{% if index_fetched_at %}, fetched {{ index_fetched_at | timeago }}{% endif %}</span>
     </div>
 
     <form hx-get="/api/mods/search" hx-target="#search-results" hx-swap="outerHTML"
