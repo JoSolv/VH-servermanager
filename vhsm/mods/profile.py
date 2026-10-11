@@ -22,7 +22,7 @@ from ..instance import InstanceLayout
 from ..util import read_json, write_json
 from . import rules
 from .bepinex import BEPINEX_PACKAGE
-from .cache import MAX_PACKAGE_BYTES, ensure_cached
+from .cache import MAX_PACKAGE_BYTES, ensure_cached, member_path
 from .thunderstore import (
     PackageVersion,
     ThunderstoreError,
@@ -188,12 +188,14 @@ def read_export(raw: bytes) -> ProfileExport:
         return export
     total = 0
     for info in archive.infolist():
-        name = info.filename
-        if info.is_dir() or name == R2X_NAME:
+        # Separators are normalised for the same reason as in the package
+        # cache: a profile zipped on Windows may use backslashes throughout.
+        name = member_path(info.filename)
+        if not name or name.endswith("/") or name == R2X_NAME:
             continue
         relative = PurePosixPath(name)
-        if relative.is_absolute() or ".." in relative.parts or name.startswith("\\"):
-            raise ModError(f"unsafe path in the profile: {name}")
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ModError(f"unsafe path in the profile: {info.filename}")
         top, lower = relative.parts[0], name.lower()
         if top == "config" and len(relative.parts) > 1 and not lower.endswith(BLOCKED_EXTENSIONS):
             export.files.append((info, PurePosixPath("BepInEx") / relative))

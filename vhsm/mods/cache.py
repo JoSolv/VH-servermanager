@@ -19,8 +19,12 @@ import httpx
 from .thunderstore import PackageVersion
 
 #: Written once extraction finished, so a partially extracted directory left
-#: behind by a crash is never mistaken for a usable cache entry.
+#: behind by a crash is never mistaken for a usable cache entry. It holds
+#: :data:`EXTRACT_VERSION`, so an entry unpacked by an older and
+#: differently-behaving unpacker is re-extracted rather than trusted.
 COMPLETE_MARKER = ".vhsm-complete"
+#: Bumped whenever :func:`_safe_extract` would lay a package out differently.
+EXTRACT_VERSION = 2
 MAX_PACKAGE_BYTES = 512 * 1024 * 1024
 
 ProgressHook = Callable[[str], None]
@@ -35,7 +39,36 @@ def entry_path(cache_dir: Path, version: PackageVersion) -> Path:
 
 
 def is_cached(cache_dir: Path, version: PackageVersion) -> bool:
-    return (entry_path(cache_dir, version) / COMPLETE_MARKER).is_file()
+    try:
+        marker = (entry_path(cache_dir, version) / COMPLETE_MARKER).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    return marker.strip() == str(EXTRACT_VERSION)
+
+
+def mark_complete(entry: Path) -> None:
+    """Record that *entry* holds a package unpacked by this version of the rules."""
+    (entry / COMPLETE_MARKER).write_text(f"{EXTRACT_VERSION}\n", encoding="utf-8")
+
+
+def member_path(name: str) -> str:
+    """An archive member's name as a POSIX path.
+
+    A zip is specified to separate directories with ``/`` and nothing else
+    (APPNOTE 4.4.17.1), but PowerShell's ``Compress-Archive`` writes Windows
+    separators instead, and plenty of Valheim mods are packaged with it --
+    ValheimRAFT among them. Windows unpackers split on either separator, so
+    those packages look well-formed there; taking the names literally on Linux
+    instead gives one flat file *called* ``plugins\\ValheimRAFT.dll``, with no
+    ``plugins`` directory at all. BepInEx still finds such a file by its
+    ``*.dll`` glob and loads the plugin, but it can no longer resolve a
+    *library* beside it -- ``Zolantris.Shared.dll`` becomes
+    ``plugins\\Zolantris.Shared.dll``, which is not the file name any
+    assembly reference asks for -- so the mod loads and then dies on a
+    missing assembly. Normalising here, where member names first become
+    paths, keeps both separators meaning the same thing they mean on Windows.
+    """
+    return name.replace("\\", "/")
 
 
 def _safe_extract(archive: zipfile.ZipFile, destination: Path) -> None:
@@ -43,12 +76,12 @@ def _safe_extract(archive: zipfile.ZipFile, destination: Path) -> None:
     destination = destination.resolve()
     total = 0
     for info in archive.infolist():
-        name = info.filename
-        if name.endswith("/"):
+        name = member_path(info.filename)
+        if not name or name.endswith("/"):
             continue
         relative = PurePosixPath(name)
-        if relative.is_absolute() or ".." in relative.parts or name.startswith("\\"):
-            raise CacheError(f"unsafe archive member: {name}")
+        if relative.is_absolute() or ".." in relative.parts:
+            raise CacheError(f"unsafe archive member: {info.filename}")
         total += info.file_size
         if total > MAX_PACKAGE_BYTES:
             raise CacheError("package is unreasonably large")
@@ -73,7 +106,7 @@ def _extract_blocking(payload_path: Path, destination: Path) -> None:
         shutil.rmtree(staging, ignore_errors=True)
         raise CacheError(f"downloaded file is not a valid zip: {exc}") from exc
 
-    (staging / COMPLETE_MARKER).write_text("ok\n", encoding="utf-8")
+    mark_complete(staging)
     if destination.exists():
         shutil.rmtree(destination, ignore_errors=True)
     destination.parent.mkdir(parents=True, exist_ok=True)
