@@ -1306,6 +1306,59 @@ with TestClient(app) as c:
     check("deletion explains what happens next", "writes a fresh one" in r.text)
     c.post(f"/api/instances/{iid}/mods/ValheimModding-Jotunn/uninstall")
 
+    print("\n[a config bigger than one form may carry]")
+    # Starlette caps a form at 1000 fields and refuses the rest with a 400
+    # before the handler is reached; htmx does not swap a 4xx, so the page
+    # just did nothing. The form view posts a section, a key and a value for
+    # every setting, so any file past ~330 settings was unsavable there while
+    # the text view, which posts three fields, saved the same file --
+    # Therzie.Wizardry declares 1026 settings and posts 3080 fields.
+    SETTINGS = 500
+    lines = ["## Settings file was created by plugin Big v1.0.0",
+             "## Plugin GUID: big.mod", "", "[General]", ""]
+    for i in range(SETTINGS):
+        lines += ["# Setting type: String", f"# Default value: d{i}", f"Key{i} = v{i}", ""]
+    (cfgdir/"big.mod.cfg").write_text("\n".join(lines))
+    whole_form = {"path": "big.mod.cfg", "mode": "form"}
+    for i in range(SETTINGS):
+        whole_form[f"s{i}"] = "General"
+        whole_form[f"n{i}"] = f"Key{i}"
+        whole_form[f"v{i}"] = f"v{i}"
+    whole_form["v7"] = "changed"
+
+    r = c.post(f"/api/instances/{iid}/mods/config/save", data=whole_form)
+    check(f"a form of {len(whole_form)} fields is not refused outright",
+          r.status_code == 200, r.status_code)
+    saved = (cfgdir/"big.mod.cfg").read_text()
+    check("the one changed setting saved", "Key7 = changed" in saved, saved[:200])
+    check("the rest are untouched", "Key8 = v8" in saved and f"Key{SETTINGS - 1} = v{SETTINGS - 1}" in saved)
+    check("save reported", "Saved 1 setting" in r.text, r.text[:160])
+    # Every button in the editor sits inside that one form and htmx sends the
+    # whole form with each, so reset and delete arrive just as large.
+    r = c.post(f"/api/instances/{iid}/mods/config/reset",
+               data={**whole_form, "section": "General", "key": "Key7"})
+    check("reset carries the whole form too",
+          r.status_code == 200 and "Key7 = d7" in (cfgdir/"big.mod.cfg").read_text(), r.status_code)
+    r = c.post(f"/api/instances/{iid}/mods/config/delete", data=whole_form)
+    check("delete carries the whole form too",
+          r.status_code == 200 and not (cfgdir/"big.mod.cfg").exists(), r.status_code)
+
+    # The text view posts a whole file in one field, and Starlette caps a
+    # single field at 1MB -- under the size this editor agrees to open, so a
+    # file between the two was refused there as well.
+    wide = "[General]\n" + "".join(f"Key{i} = {'x' * 40}\n" for i in range(24000))
+    (cfgdir/"wide.cfg").write_text("[General]\nKey0 = x\n")
+    r = c.post(f"/api/instances/{iid}/mods/config/save",
+               data={"path": "wide.cfg", "mode": "raw", "text": wide})
+    check(f"a {len(wide) // 1024}KB file saves from the text view",
+          r.status_code == 200 and (cfgdir/"wide.cfg").read_text() == wide, r.status_code)
+    # Past what the editor will open, the operator gets a message, not a 400.
+    r = c.post(f"/api/instances/{iid}/mods/config/save",
+               data={"path": "wide.cfg", "mode": "raw", "text": "x" * (2 * 1024 * 1024 + 1)})
+    check("and past that limit it says so instead of failing silently",
+          r.status_code == 200 and "too much text" in r.text, (r.status_code, r.text[:160]))
+    (cfgdir/"wide.cfg").unlink()
+
     print("\n[dependency versions]")
     bep = "denikson-BepInExPack_Valheim"
     def mods_on(root):

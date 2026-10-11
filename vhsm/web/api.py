@@ -374,6 +374,20 @@ async def prune_orphans(request: Request, instance_id: str) -> HTMLResponse:
 # --------------------------------------------------------------------------- #
 # per-mod configuration
 # --------------------------------------------------------------------------- #
+async def _config_form(request: Request) -> Any:
+    """Read a submission from the config editor.
+
+    Every button in the editor -- save, reset, delete -- sits inside the one
+    form, and htmx sends the whole form with each of them, so they all arrive
+    carrying a field per setting in the file and all need the same room. See
+    :data:`modconfig.MAX_FORM_FIELDS` for why Starlette's defaults are not it.
+    """
+    return await request.form(
+        max_fields=modconfig.MAX_FORM_FIELDS,
+        max_part_size=modconfig.MAX_FORM_PART_BYTES,
+    )
+
+
 def _submitted_values(form: Any, document: "modconfig.ConfigDocument") -> dict[tuple[str, str], str]:
     """Read the config form back.
 
@@ -415,7 +429,7 @@ async def config_view(
 
 @router.post("/api/instances/{instance_id}/mods/config/save", response_class=HTMLResponse)
 async def config_save(request: Request, instance_id: str) -> HTMLResponse:
-    form = await request.form()
+    form = await _config_form(request)
     path = str(form.get("path") or "")
     mode = "raw" if str(form.get("mode") or "") == "raw" else "form"
     record = _manager(request).get(instance_id)
@@ -455,7 +469,7 @@ async def config_save(request: Request, instance_id: str) -> HTMLResponse:
 @router.post("/api/instances/{instance_id}/mods/config/reset", response_class=HTMLResponse)
 async def config_reset(request: Request, instance_id: str) -> HTMLResponse:
     """Put one setting, or a whole file, back to the values the mod shipped."""
-    form = await request.form()
+    form = await _config_form(request)
     path = str(form.get("path") or "")
     section = str(form.get("section") or "")
     key = str(form.get("key") or "")
@@ -498,7 +512,7 @@ async def config_reset(request: Request, instance_id: str) -> HTMLResponse:
 @router.post("/api/instances/{instance_id}/mods/config/delete", response_class=HTMLResponse)
 async def config_delete(request: Request, instance_id: str) -> HTMLResponse:
     """Delete a config file so the mod writes a fresh one at the next boot."""
-    form = await request.form()
+    form = await _config_form(request)
     path = str(form.get("path") or "")
     record = _manager(request).get(instance_id)
     try:
