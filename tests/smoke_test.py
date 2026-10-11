@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from vhsm.config import Settings
 from vhsm.web.app import create_app
 from vhsm.mods.thunderstore import Package
-from vhsm.mods.cache import COMPLETE_MARKER
+from vhsm.mods.cache import mark_complete
 from make_world import make_folder_world
 
 settings = Settings(); settings.ensure_dirs()
@@ -69,7 +69,7 @@ def seed(idx, ns, name, ver, files, deps=()):
     d = settings.cache_dir/f"{ns}-{name}"/ver; d.mkdir(parents=True, exist_ok=True)
     for rel, c in files.items():
         p = d/rel; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(c)
-    (d/COMPLETE_MARKER).write_text("ok")
+    mark_complete(d)
     key = f"{ns}-{name}".lower()
     earlier = [v.to_dict() for v in idx._packages[key].versions] if key in idx._packages else []
     idx._packages[key] = Package.from_api({
@@ -1372,6 +1372,47 @@ with TestClient(app) as c:
     r = c.get("/api/mods/search", params={"instance_id": iid, "q": "seasons"})
     check("and the catalogue button says Update", "Update" in r.text)
     c.post(f"/api/instances/{iid}/mods/shudnal-Seasons/uninstall")
+
+    print("\n[a package zipped on Windows]")
+    # PowerShell's Compress-Archive writes backslash separators into the zip,
+    # against the spec. Windows unpackers split on them anyway, so packages
+    # built that way -- ValheimRAFT is one -- look fine there; unpacked
+    # literally they become flat files called "plugins\\ValheimRAFT.dll", and
+    # BepInEx loads the plugin by its *.dll glob but can then no longer resolve
+    # the library beside it, so the mod dies on a missing assembly.
+    winzip = io.BytesIO()
+    with zipfile.ZipFile(winzip, "w") as z:
+        z.writestr("manifest.json", json.dumps({"name": "Raftlike", "version_number": "5.0.9"}))
+        z.writestr("plugins\\Assets\\", "")          # a directory entry, backslash-terminated
+        z.writestr("plugins\\Raftlike.dll", "MZ plugin")
+        z.writestr("plugins\\Shared.Lib.dll", "MZ library")
+        z.writestr("plugins\\Assets\\Translations\\English\\raftlike.json", "{}")
+        z.writestr("config\\raftlike.cfg", "Tuned = 1\n")
+    r = c.post(f"/api/instances/{iid}/mods/upload",
+               files={"file": ("zolantris-Raftlike-5.0.9.zip", winzip.getvalue(), "application/zip")})
+    modroot = prof/"BepInEx/plugins/zolantris-Raftlike"
+    check("a backslash-separated package installs", r.status_code == 200, r.text[:200])
+    check("its plugin lands in the mod folder, not as a flat name",
+          (modroot/"Raftlike.dll").is_file(), sorted(p.name for p in modroot.rglob("*")))
+    check("the library beside it is resolvable by its own file name",
+          (modroot/"Shared.Lib.dll").is_file())
+    check("nested assets keep their shape",
+          (modroot/"Assets/Translations/English/raftlike.json").is_file())
+    check("the directory entry did not become a file",
+          not (modroot/"plugins\\Assets\\").exists())
+    check("config still routes to BepInEx/config",
+          (prof/"BepInEx/config/raftlike.cfg").is_file())
+    check("no installed path carries a backslash",
+          not [p for p in prof.rglob("*") if "\\" in p.name],
+          [p.name for p in prof.rglob("*") if "\\" in p.name])
+    check("the manifest records the real paths",
+          sorted(mods_on(prof)["zolantris-Raftlike"]["files"]) == [
+              "BepInEx/plugins/zolantris-Raftlike/Assets/Translations/English/raftlike.json",
+              "BepInEx/plugins/zolantris-Raftlike/Raftlike.dll",
+              "BepInEx/plugins/zolantris-Raftlike/Shared.Lib.dll"],
+          mods_on(prof)["zolantris-Raftlike"]["files"])
+    c.post(f"/api/instances/{iid}/mods/zolantris-Raftlike/uninstall")
+    check("uninstall leaves nothing behind", not modroot.exists())
 
     print("\n[catalogue refresh]")
     r = c.get(f"/instances/{iid}/mods")
