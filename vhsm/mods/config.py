@@ -41,6 +41,23 @@ EDITABLE_SUFFIXES = {
 STRUCTURED_SUFFIX = ".cfg"
 #: A config file large enough to hang the browser is better left to an editor.
 MAX_EDITABLE_BYTES = 2 * 1024 * 1024
+#: What reading the editor's own form back is allowed to cost, in place of
+#: Starlette's defaults of 1000 fields and 1MB in any single field.
+#:
+#: The form view posts a section, a key and a value for every setting in the
+#: file, plus one field per ticked box on a flags enum, so a big mod's config
+#: runs to thousands of fields -- Therzie.Wizardry declares 1026 settings and
+#: posts 3080. Past the default Starlette turns the request into a 400 before
+#: the handler is reached, and htmx does not swap a 4xx, so the page did
+#: nothing at all while the text view, which posts three fields, saved the
+#: same file. 64k fields is an order of magnitude past the largest config on
+#: Thunderstore.
+MAX_FORM_FIELDS = 64 * 1024
+#: The text view posts a whole file in one field, so a single part has to hold
+#: the largest file the editor will open -- the field name counts towards this
+#: too, hence the slack. Over that, :func:`read_document`'s own size limit
+#: gives the operator a readable message instead.
+MAX_FORM_PART_BYTES = MAX_EDITABLE_BYTES + 1024
 #: Shortest name that may be matched to a mod by prefix alone.
 MIN_PREFIX_MATCH = 6
 
