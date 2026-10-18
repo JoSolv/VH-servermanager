@@ -106,9 +106,11 @@
 
     <h4>Announce</h4>
     <p class="hint" style="margin-top:0">
-      Which of this server's events are posted to its channel. Set per server,
-      so a busy public one can stay quiet about joins while a small one says
-      everything.
+      What this server's players are told in its channel. Set per server, so a
+      busy public one can stay quiet about joins while a small one says
+      everything. Stops and restarts the manager does for an update are not
+      announced &mdash; the message players get instead is what changed, once
+      the server is actually running it.
     </p>
     <div class="form-grid">
       {% for kind, label in announce_labels %}

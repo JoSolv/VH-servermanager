@@ -99,7 +99,7 @@ section:
 | **Channel ID** | the channel ID from step 2 |
 | **Answer slash commands in this channel** | tick, unless you only want announcements |
 | **Include this server's join address** | your call — see the note below |
-| **Announce** | tick what you want to hear about; see step 6 |
+| **Announce** | tick what the players should be told; see step 6 |
 
 **Save Discord settings.**
 
@@ -167,33 +167,51 @@ command registration — repeat the Save from step 4.
 
 ## 6. Choose what each server announces
 
-The **Announce** switches are on each server's own page, so a busy public server
-can stay quiet about joins while a server of four friends says everything.
+The **Announce** switches are on each server's own page, and they are written
+for the people in that channel — its players — rather than for you.
 
-On by default:
+| Switch | When it posts | On by default |
+|---|---|---|
+| Server is online and joinable | when the server is actually reachable, not merely when the process started | yes |
+| Server is shutting down | a stop somebody asked for | yes |
+| Server is restarting | a restart somebody asked for | yes |
+| Server came back with updated mods | when it comes up running a different mod set than last time | yes |
+| Server was updated to a new Valheim build | when it comes up on a newer build than last time | yes |
+| A player joined | | no |
+| A player left | | no |
 
-- server starting, running or stopped; up and accepting players; crashed
-- a recognised failure in the console
-- a mod with a newer version; mods changed so a restart is needed; what the
-  scheduled mod check found
-- a newer Valheim build published, and the server files being updated
-- reachable or unreachable from outside
+Joins and leaves are the ones people most often want and most often regret: on
+a busy evening it is two lines per player. Try it for a week.
 
-Off by default, because they are the noisy ones:
+### Updates are announced as one thing, not four
 
-- a player joined / left / died
-- an automatic world snapshot was taken
-- the manager started or stopped
-- somebody asked for a start, stop or restart
+When the manager takes a server down for a scheduled server update, or restarts
+it because a mod update installed something, the *stop*, the *restart* and the
+*online* are all held back. Players would otherwise get three messages at 4am
+telling them nothing they can act on.
 
-Player joins and leaves are the ones people most often want and most often
-regret: on a busy evening it is two lines per player. Try it for a week.
+What they get instead is the part that matters, posted once the server is back
+up and actually running it:
 
-A few events are about the manager rather than one server — a new Valheim build
-being published, the manager restarting. Those go to **every channel that asked
-for them, once each**: two servers sharing a channel get one message, two
-servers in two Discords get one each, and a server with that switch off gets
-nothing.
+> **Midgard** is running updated mods.
+> • Jotunn 2.20.0 → 2.30.2
+> • EpicLoot 0.14.13 (new)
+
+> **Midgard** has been updated.
+> Now running Valheim 0.217.46.
+
+Both compare what the server is **running** against what it was running last
+time it came up — so a mod installed but not yet loaded is not announced until
+the server restarts into it, and a manager restart does not report your whole
+mod list as new. A restart *you* ask for, from the GUI, is announced normally.
+
+### What is not announced yet
+
+Crashes, console failures, "a mod has a newer version", build ids,
+reachability, and who asked for a restart are all operator business. Their
+switches still exist and still remember what you set, but nothing posts them —
+they are waiting for a second, admin channel. One channel belongs to the
+players, so only their news goes to it.
 
 ## 7. Narrow who can use it (optional)
 
@@ -232,15 +250,18 @@ separately.
 
 ## The commands
 
-All four are about the server whose channel you typed them in. None takes a
+All three are about the server whose channel you typed them in. None takes a
 server argument.
 
 | Command | What it answers |
 |---|---|
 | `/vh status` | is it up, uptime, version, players, join address, mods |
-| `/vh players` | who is on right now, and for how long |
-| `/vh mods` | which mods it runs, and what has an update |
-| `/vh player <name>` | one player's stats on this server, online or not |
+| `/vh mods` | the mods it is running: names and versions, nothing else |
+| `/vh player` | with a name, that player's stats; without one, everybody who has ever played here, online first |
+
+`/vh mods` is deliberately just the list to match in r2modman. Which of them has
+an update, and whether the server needs restarting to pick one up, are your
+problem and are on the instance page.
 
 `/vh player` reads the roster, so it answers for somebody who left an hour ago
 — which is the point of keeping a roster. It searches only this server's roster.
@@ -334,6 +355,17 @@ Two switches have to line up on that server's page: *Use Discord for this
 server*, and the particular event under **Announce**. The counter on the
 Settings panel shows how many announcements have been sent in total.
 
+**The server restarted for an update and said nothing.**
+Working as intended — see step 6. The stop, the restart and the "online" are
+held back for a maintenance restart; what you should see instead, once it is
+back up, is one message naming what changed. If you see neither, the mod set
+and the build were the same as last time, so there was nothing to say.
+
+**A crash is not announced.**
+Crashes are operator news, not player news, so they wait for the admin channel.
+Players see the server go quiet and then "online" when it is back. If you want
+to know, the instance page and the manager log both say so immediately.
+
 **It announced nothing when I restarted the manager.**
 Working as intended. The bot announces *changes*, and the state it sees in its
 first few seconds is what was already true — a manager restart would otherwise
@@ -396,6 +428,9 @@ Worth knowing before you go looking for it:
   channel, because the channel is how a command is matched to a server. If you
   want everything in one channel you can have announcements there from one
   server only.
+- **No admin channel yet.** The operator-facing announcements and `/vh players`
+  are stored and switchable but go nowhere. A second channel per server is the
+  planned home for them.
 
 ## Where things are kept
 

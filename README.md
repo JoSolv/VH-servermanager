@@ -181,24 +181,34 @@ tested end to end, and the structure is meant to be built on.
   the join address is shared, and (later) who may control it. You paste one
   channel ID per server; the Discord server it belongs to is looked up from it
   rather than asked for.
-- It announces what the manager already knows: a server starting, up and
-  accepting players, stopping or crashing (with the exit code); players joining,
-  leaving and dying; a mod with a newer version; mods changed but not loaded
-  yet; what the scheduled mod check found; a new Valheim build published or
-  installed; and a server that has stopped answering from its public address.
-  Each kind is a switch on that instance's own page, so a busy public server can
-  stay quiet about joins while a small one says everything; the noisy ones —
-  joins, leaves, deaths, snapshots — are off until you turn them on.
-- Events that belong to no single instance, like a new Valheim build, go to
-  every channel that asked for them, once each — two servers sharing a channel
-  get one message, two servers in two Discords get one each.
+- **What it announces is written for players**, not for whoever runs the host:
+  the server is online and joinable, it is shutting down, it is restarting, it
+  came back with updated mods, it was updated to a new Valheim build, somebody
+  joined, somebody left. Seven switches on that server's own page, so a busy
+  public server can stay quiet about joins while a small one says everything.
+  Joins and leaves are off until you turn them on.
+- **A restart the manager does for an update is not announced.** Players do not
+  need the stop, the start and the "it is online" of a routine update at 4am —
+  they need to know what changed. So those are held back, and what arrives
+  instead is *"now running these mods"* or *"updated to Valheim 0.217.46"*,
+  posted when the server is actually up and running it. A restart somebody
+  asked for by hand is announced normally.
+- Mod and update announcements compare what the server is **running** against
+  what it was running the last time it came up, so a mod sitting on disk
+  unloaded is not news yet, and a manager restart does not report everything as
+  new.
+- The operator-facing announcements — crashes, console failures, mod releases,
+  build ids, reachability, who asked for a restart — are **kept and switchable
+  but not posted**, waiting for a second, admin channel. One channel belongs to
+  the players, so only their news goes to it.
 - Announcements are *changes*, not state. A manager restart does not re-announce
   the world it just re-read, a flapping reachability probe is held until three
   samples agree, and the same news is never posted twice.
-- Read-only slash commands, all of them about the channel's own server and
-  taking no server argument: `/vh status`, `/vh players`, `/vh mods` and
-  `/vh player <name>` (from the roster, so it works for somebody who left an
-  hour ago).
+- Three read-only slash commands, all about the channel's own server and taking
+  no server argument: `/vh status`, `/vh mods` (the names and versions to
+  install, nothing else) and `/vh player` — with a name for that player's
+  stats, without one for everybody who has ever played here, online first.
+  It reads the roster, so it answers for somebody who left an hour ago.
 - **It opens no port.** Commands arrive over a websocket the manager dials out
   on, not over an HTTP endpoint Discord posts to, so there is nothing to forward
   and no certificate to get — which is what makes it work on a box behind NAT
@@ -424,7 +434,7 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 .venv/bin/python tests/smoke_test.py
 ```
 
-622 checks covering page rendering, instance creation and validation, the
+657 checks covering page rendering, instance creation and validation, the
 start/stop/restart lifecycle, the live-metrics and console websockets, CPU
 normalisation, version reporting, player detail, every moderation path, query
 socket discovery (including a socket bound to a single interface), the
@@ -458,10 +468,14 @@ nobody and that switching control on for one server does not unlock another),
 cooldowns, token handling (environment over
 file, `0600`, never echoed), event derivation from samples (first sight and
 start-up are silent, reachability must agree three times, each notice and mod
-release announced once), per-instance announcement routing and the fan-out of
-manager-wide events to every channel that wants them exactly once, a channel
-Discord refuses being reported rather than crashing the bot, and the one-time
-move of the old manager-wide settings down onto the instances.
+release announced once), **the player-facing announcements and their
+suppression — a restart somebody asked for is announced, one the manager does
+for an update is not, and neither is the start-up at the end of it** — that the
+operator-facing kinds are stored but never posted to a player channel, that
+saving the page leaves the switches it does not show alone, per-instance
+announcement routing, a channel Discord refuses being reported rather than
+crashing the bot, and the one-time move of the old manager-wide settings down
+onto the instances.
 
 Runs against the simulated server and a local stand-in for Discord
 (`tools/fake_discord.py`, which speaks both the REST API and a gateway
@@ -495,7 +509,10 @@ purpose:
   somebody without the right role is told.
 - **Nothing manager-level is reachable from Discord.** No command reports the
   manager's version, the shared game install's build, or that other servers
-  exist. Players in a channel see their own server and no further.
+  exist. Players in a channel see their own server and no further. The
+  operator-facing *announcements* are held back for the same reason: they are
+  stored and switchable, and nothing posts them until there is an admin
+  channel.
 - Commands can be restricted to named roles **per instance**. Empty means
   "whoever can see the channel", which is Discord's own gate and the sensible
   default for read-only questions.
@@ -522,6 +539,12 @@ way.
   duration (which is shown). A per-player ping would have to be invented, so
   the field is reported as `null` rather than filled with a guess.
 - No RCON-style console input — commands would need a server-side mod.
+- **There is no admin channel yet.** Each server has one channel and it belongs
+  to its players. The operator-facing announcements (crashes, console failures,
+  mod releases, build ids, reachability, who asked for a restart) and the
+  `/vh players` command are kept, switchable and tested, but nothing offers or
+  posts them. A second channel per instance is the natural next step; the
+  audience tagging that makes it a small change is already in place.
 - **Starting and stopping servers from Discord is not implemented.** The
   permission tier, the allowlists, the cooldown and the audit trail are in place
   and tested; the commands themselves are deliberately not, because a command

@@ -76,6 +76,11 @@ class Command:
     #: ``read`` or ``control``. See the module docstring.
     tier: str
     handler: Callable[["CommandContext"], Awaitable[dict[str, Any]]]
+    #: ``player`` commands are registered and answered. ``admin`` ones are
+    #: kept, handler and all, and are neither offered nor answered until there
+    #: is an admin channel to offer them in -- so a stale menu in somebody's
+    #: client cannot reach one.
+    audience: str = "player"
     #: Any arguments of its own. There is deliberately no "which server"
     #: argument on any command: the channel already says which, so offering
     #: one would be offering a way to ask about something else.
@@ -289,51 +294,42 @@ async def _players(ctx: CommandContext) -> dict[str, Any]:
 
 
 async def _mods(ctx: CommandContext) -> dict[str, Any]:
+    """The mods this server is running: names and versions, and nothing else.
+
+    What a player wants from this is the list to match in r2modman. Which of
+    them has an update, and whether the server needs restarting to pick one
+    up, are the operator's problem and are on the instance page.
+    """
     record = ctx.record
     if not record.config.mods_enabled:
         return _message(f"**{record.config.name}** does not run mods.")
 
-    summary = ctx.manager.profile(record.config.id).summary()
-    active = [mod for mod in summary["mods"] if mod["enabled"]]
+    profile = ctx.manager.profile(record.config.id)
+    active = sorted(
+        (mod for mod in profile.mods if mod.enabled),
+        key=lambda mod: mod.name.lower(),
+    )
     if not active:
         return _message(f"**{record.config.name}** has no mods enabled.")
 
-    lines = [f"• {mod['name']} `{mod['version']}`" for mod in active]
-    fields = []
-    updates = summary.get("updates_active") or []
-    if updates:
-        fields.append(
-            {
-                "name": f"{len(updates)} update(s) available",
-                "value": "\n".join(
-                    f"{u['name']} {u['current']} → {u['latest']}" for u in updates
-                ),
-                "inline": False,
-            }
-        )
-    if record.restart_pending:
-        fields.append(
-            {
-                "name": "Restart pending",
-                "value": "Mods have changed since this server started, so it is "
-                         "not running them yet.",
-                "inline": False,
-            }
-        )
-
     return _embed_message(
         render.embed(
-            f"{record.config.name} — mods",
-            description="\n".join(lines),
-            level="important" if updates or record.restart_pending else "info",
-            fields=fields,
-            footer=f"{len(active)} active of {summary['count']} installed",
+            f"{record.config.name} \u2014 mods",
+            description="\n".join(
+                f"\u2022 {mod.name} `{mod.version}`" for mod in active
+            ),
+            level="info",
+            footer=f"{len(active)} mod(s)",
         )
     )
 
 
 async def _player(ctx: CommandContext) -> dict[str, Any]:
-    """Roster stats for one player on this channel's server.
+    """One player's stats, or everyone who has ever played here.
+
+    With no name it is the roster, online first: the question "who plays on
+    this server" and the question "is Freyja on right now" are the same
+    question asked at two widths, so they are one command.
 
     Deliberately not restricted to who is online: the roster exists precisely
     so that somebody who left an hour ago can still be looked up. It is
@@ -341,31 +337,35 @@ async def _player(ctx: CommandContext) -> dict[str, Any]:
     the players of another.
     """
     record = ctx.record
-    wanted = str(ctx.options.get("name") or "").strip().lower()
-    if not wanted:
-        raise Denied("Which player? Give a character name.")
-
-    online = any(
-        player.name and player.name.lower() == wanted
+    online = {
+        player.name.lower()
         for player in record.players.players
-    )
+        if player.name
+    }
+    wanted = str(ctx.options.get("name") or "").strip()
+
+    if not wanted:
+        return _roster(record, online)
+
     entry = next(
         (e for e in record.roster.entries()
-         if any(name.lower() == wanted for name in e.names)),
+         if any(name.lower() == wanted.lower() for name in e.names)),
         None,
     )
     if entry is None:
         return _message(
-            f"Nobody called **{ctx.options.get('name')}** has joined "
-            f"**{record.config.name}**."
+            f"Nobody called **{wanted}** has played on **{record.config.name}**."
         )
 
+    here = (entry.display_name or "").lower() in online or any(
+        name.lower() in online for name in entry.names
+    )
     fields = [
         {"name": "Sessions", "value": str(entry.sessions)},
         {"name": "Time played", "value": render.duration(entry.playtime)},
         {
             "name": "Last seen",
-            "value": "**online now**" if online else render.timestamp(entry.last_seen),
+            "value": "**online now**" if here else render.timestamp(entry.last_seen),
             "inline": False,
         },
     ]
@@ -378,10 +378,47 @@ async def _player(ctx: CommandContext) -> dict[str, Any]:
 
     return _embed_message(
         render.embed(
-            entry.display_name or str(ctx.options.get("name")),
-            level="good" if online else "info",
+            entry.display_name or wanted,
+            level="good" if here else "info",
             fields=fields,
             footer=record.config.name,
+        )
+    )
+
+
+def _roster(record: Any, online: set[str]) -> dict[str, Any]:
+    """Everyone who has played here, the ones online now first."""
+    entries = record.roster.entries()
+    if not entries:
+        return _message(f"Nobody has played on **{record.config.name}** yet.")
+
+    def is_here(entry: Any) -> bool:
+        return any(name.lower() in online for name in entry.names)
+
+    # Online first, then most recently seen -- which is what roster.entries()
+    # already gives, so only the online ones need lifting.
+    ordered = sorted(entries, key=lambda e: not is_here(e))
+    lines = []
+    for entry in ordered[:40]:
+        name = entry.display_name or "(unnamed)"
+        if is_here(entry):
+            lines.append(f"\U0001F7E2 **{name}** \u00b7 online now")
+        else:
+            lines.append(
+                f"\u26AB {name} \u00b7 {render.duration(entry.playtime)} played "
+                f"\u00b7 {render.timestamp(entry.last_seen)}"
+            )
+    here = sum(1 for entry in entries if is_here(entry))
+    footer = f"{len(entries)} player(s) ever, {here} online now"
+    if len(ordered) > 40:
+        footer += " \u00b7 showing the first 40"
+
+    return _embed_message(
+        render.embed(
+            f"{record.config.name} \u2014 players",
+            description="\n".join(lines),
+            level="good" if here else "info",
+            footer=footer,
         )
     )
 
@@ -395,6 +432,10 @@ async def _player(ctx: CommandContext) -> dict[str, Any]:
 #: else. There is no command that reports the manager's own version, the shared
 #: game install's build, or that any other server exists: the people in a
 #: server's channel are its players, and none of that is theirs to see.
+#:
+#: ``audience="admin"`` keeps a command without offering or answering it, for
+#: the second channel. Three are offered today -- status, player, mods -- which
+#: is "is it up", "who plays here" and "what do I need to install".
 #:
 #: Adding a control command is one entry here plus its handler. The gate, the
 #: cooldown and the audit trail already understand ``tier="control"``, and
@@ -415,31 +456,36 @@ COMMANDS: dict[str, Command] = {
         tier="read",
         handler=_status,
     ),
-    "players": Command(
-        name="players",
-        description="Who is on this server right now",
-        tier="read",
-        handler=_players,
-    ),
-    "mods": Command(
-        name="mods",
-        description="Which mods this server is running, and what has an update",
-        tier="read",
-        handler=_mods,
-    ),
     "player": Command(
         name="player",
-        description="Stats for one player on this server, online or not",
+        description="Everyone who plays here, or one player's stats",
         tier="read",
         handler=_player,
         extra_options=[
             {
                 "type": OPTION_STRING,
                 "name": "name",
-                "description": "Character name",
-                "required": True,
+                "description": "Character name. Leave it out to list everybody.",
+                "required": False,
             }
         ],
+    ),
+    "mods": Command(
+        name="mods",
+        description="The mods this server is running",
+        tier="read",
+        handler=_mods,
+    ),
+    # -- kept for the admin channel ------------------------------------- #
+    # Answered by nothing today: /vh player with no name is the player-facing
+    # version of this, and a second command that lists only who is connected
+    # is one more thing in the menu for no extra answer.
+    "players": Command(
+        name="players",
+        description="Who is connected right now",
+        tier="read",
+        handler=_players,
+        audience="admin",
     ),
 }
 
@@ -471,7 +517,8 @@ def definitions_for_guild(manager: Any, guild_id: str) -> list[dict[str, Any]]:
     options = [
         command.to_option()
         for command in COMMANDS.values()
-        if command.tier != "control" or controllable
+        if command.audience == "player"
+        and (command.tier != "control" or controllable)
     ]
     return [
         {
@@ -532,7 +579,10 @@ class CommandRouter:
         """
         name, options, _ = parse_command(interaction)
         command = COMMANDS.get(name)
-        if command is None:
+        # An admin command is stored, not available: a client holding a stale
+        # menu must not be able to reach one, so this checks rather than
+        # relying on it not having been registered.
+        if command is None or command.audience != "player":
             return _reply(_message("I do not know that command.", ephemeral=True))
 
         if not interaction.get("guild_id"):

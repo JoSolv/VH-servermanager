@@ -2012,15 +2012,34 @@ with TestClient(app) as c:
     )
     from vhsm.discord.announce import StateWatcher
     from vhsm.discord.config import InstanceDiscord
-    from vhsm.events import DEFAULT_ANNOUNCE, KINDS, Event, EventBus
+    from vhsm.events import (
+        ADMIN_KINDS, DEFAULT_ANNOUNCE, KINDS, PLAYER_KINDS, Event, EventBus,
+        is_player_facing,
+    )
     from vhsm.web.routes import announce_labels
 
-    check("every event kind has a label on the settings page",
+    check("every switch on screen has a label",
           all(label != kind for kind, label in announce_labels())
-          and len(announce_labels()) == len(KINDS))
-    check("noisy announcements are off by default",
-          not DEFAULT_ANNOUNCE["player_join"] and not DEFAULT_ANNOUNCE["player_death"]
-          and DEFAULT_ANNOUNCE["crash"])
+          and [k for k, _ in announce_labels()] == list(PLAYER_KINDS),
+          announce_labels())
+    check("every kind has a default, shown or not",
+          all(kind in DEFAULT_ANNOUNCE for kind in KINDS))
+    check("the seven player announcements are the ones listed",
+          PLAYER_KINDS == ("online", "stopping", "restarting", "mods_changed",
+                           "updated", "player_join", "player_leave"), PLAYER_KINDS)
+    check("joins and leaves are off by default, the rest on",
+          not DEFAULT_ANNOUNCE["player_join"] and not DEFAULT_ANNOUNCE["player_leave"]
+          and all(DEFAULT_ANNOUNCE[k] for k in
+                  ("online", "stopping", "restarting", "mods_changed", "updated")))
+    check("the old switches are kept, not deleted",
+          {"status", "ready", "crash", "player_death", "notice", "mod_update",
+           "mod_restart_pending", "mod_check", "server_update", "server_updated",
+           "reachability", "snapshot", "manager", "lifecycle"} <= set(ADMIN_KINDS),
+          sorted(ADMIN_KINDS))
+    check("...and are not player-facing",
+          not any(is_player_facing(kind) for kind in ADMIN_KINDS))
+    check("an unknown kind is treated as admin, not leaked to players",
+          not is_player_facing("something_new"))
 
     for bad in ("not-a-number", "12345678901234567890123", "123 456", "<#123>"):
         try:
@@ -2064,21 +2083,26 @@ with TestClient(app) as c:
           "permissions=19456" in dconfig.invite_url("1")
           and "applications.commands" in dconfig.invite_url("1"))
 
-    print("\n[discord: nothing manager-level is exposed]")
+    print("\n[discord: what is on offer, and what is stored]")
     check("there is no command listing the servers", "servers" not in COMMANDS)
     check("there is no command reporting manager or Steam versions",
           "version" not in COMMANDS)
-    check("what is left is only ever about one server",
-          set(COMMANDS) == {"status", "players", "mods", "player"}, sorted(COMMANDS))
+    offered = [n for n, c_ in COMMANDS.items() if c_.audience == "player"]
+    check("three commands are offered to players",
+          offered == ["status", "player", "mods"], offered)
+    check("/vh players is kept for the admin channel, not deleted",
+          COMMANDS["players"].audience == "admin")
     check("no command takes a server argument",
           all(opt["name"] != "server"
               for command in COMMANDS.values()
               for opt in command.to_option().get("options", [])),
-          [c.to_option() for c in COMMANDS.values()])
+          [c_.to_option() for c_ in COMMANDS.values()])
     check("...so nothing needs autocompleting",
           all(not opt.get("autocomplete")
               for command in COMMANDS.values()
               for opt in command.to_option().get("options", [])))
+    check("/vh player's name is optional",
+          COMMANDS["player"].to_option()["options"][0]["required"] is False)
 
     print("\n[discord: settings survive a round trip]")
     rt = app.state.manager.get(iid).config.__class__
@@ -2168,6 +2192,10 @@ with TestClient(app) as c:
           discord_wait(lambda: {r_["guild_id"] for r_ in discord_state()["registered"]}
                        >= {GUILD_A, GUILD_B}, 15, "two registrations"),
           [r_["guild_id"] for r_ in discord_state()["registered"]])
+    registered = [o["name"] for o in
+                  discord_state()["registered"][-1]["commands"][0]["options"]]
+    check("only the three player commands are registered",
+          registered == ["status", "player", "mods"], registered)
 
     print("\n[discord: a command means the channel it was typed in]")
     reply = ask("status", guild=GUILD_A, channel=CHANNEL_A)
@@ -2179,8 +2207,12 @@ with TestClient(app) as c:
           "Helheim" in said(reply) and "Midgard" not in said(reply), said(reply)[:300])
     reply = ask("mods", guild=GUILD_B, channel=CHANNEL_B)
     check("/vh mods needs no argument either", "Helheim" in said(reply), said(reply)[:300])
+    reply = ask("player", guild=GUILD_A, channel=CHANNEL_A)
+    check("/vh player with no name is the roster",
+          "Midgard" in said(reply), said(reply)[:300])
     reply = ask("players", guild=GUILD_A, channel=CHANNEL_A)
-    check("/vh players too", "Midgard" in said(reply), said(reply)[:200])
+    check("a command kept for the admin channel is not answered",
+          "do not know that command" in said(reply), said(reply)[:200])
 
     reply = ask("status", {"server": "Helheim"}, guild=GUILD_A, channel=CHANNEL_A)
     check("a stray server argument is ignored rather than obeyed",
@@ -2270,72 +2302,96 @@ with TestClient(app) as c:
 
     print("\n[discord: announcements go to each server's own channel]")
     bus_events = manager.events
-    set_discord(iid, channel_id=CHANNEL_A, announce=["status", "server_update"])
-    set_discord(hid, channel_id=CHANNEL_B, announce=["status"])
+    set_discord(iid, channel_id=CHANNEL_A, announce=["online", "stopping"])
+    set_discord(hid, channel_id=CHANNEL_B, announce=["online"])
 
     discord_reset()
-    bus_events.publish(Event(kind="status", instance_id=iid, instance_name="Midgard",
-                             title="Midgard has stopped.", key="pc1"))
+    bus_events.publish(Event(kind="online", instance_id=iid, instance_name="Midgard",
+                             title="Midgard is online.", key="pc1"))
     check("one server's event goes to its own channel",
           discord_wait(lambda: discord_state()["messages"], 10, "channel A")
           and [m["channel_id"] for m in discord_state()["messages"]] == [CHANNEL_A],
           discord_state()["messages"])
 
     discord_reset()
-    bus_events.publish(Event(kind="status", instance_id=hid, instance_name="Helheim",
-                             title="Helheim has stopped.", key="pc2"))
+    bus_events.publish(Event(kind="online", instance_id=hid, instance_name="Helheim",
+                             title="Helheim is online.", key="pc2"))
     check("the other's goes to the other channel",
           discord_wait(lambda: discord_state()["messages"], 10, "channel B")
           and [m["channel_id"] for m in discord_state()["messages"]] == [CHANNEL_B],
           discord_state()["messages"])
 
     discord_reset()
-    bus_events.publish(Event(kind="server_update", title="A new build is out.", key="pc3"))
-    check("a manager-wide event reaches only the channels that want it",
-          discord_wait(lambda: discord_state()["messages"], 10, "fan-out")
-          and [m["channel_id"] for m in discord_state()["messages"]] == [CHANNEL_A],
+    bus_events.publish(Event(kind="stopping", instance_id=iid, instance_name="Midgard",
+                             title="Midgard is shutting down.", key="pc3"))
+    check("a kind this server wants is announced",
+          discord_wait(lambda: discord_state()["messages"], 10, "stopping"),
           discord_state()["messages"])
-
-    set_discord(hid, channel_id=CHANNEL_B, announce=["status", "server_update"])
     discord_reset()
-    bus_events.publish(Event(kind="server_update", title="Another build.", key="pc4"))
-    check("once both want it, both get it",
-          discord_wait(lambda: len(discord_state()["messages"]) == 2, 10, "both")
-          and sorted(m["channel_id"] for m in discord_state()["messages"])
-          == sorted([CHANNEL_A, CHANNEL_B]),
-          discord_state()["messages"])
-
-    discord_reset()
-    bus_events.publish(Event(kind="snapshot", instance_id=iid, instance_name="Midgard",
-                             title="Snapshot taken.", key="pc5"))
-    check("a kind switched off for that server is not announced",
+    bus_events.publish(Event(kind="stopping", instance_id=hid, instance_name="Helheim",
+                             title="Helheim is shutting down.", key="pc4"))
+    check("...and a kind it does not is not",
           not discord_wait(lambda: discord_state()["messages"], 2, ""))
+
+    print("\n[discord: admin news is stored, not posted]")
+    for kind, title in (("status", "Midgard has stopped."),
+                        ("crash", "Midgard crashed."),
+                        ("server_update", "A new build is out."),
+                        ("mod_update", "A mod has an update."),
+                        ("notice", "Something is wrong."),
+                        ("manager", "The manager is up.")):
+        set_discord(iid, channel_id=CHANNEL_A, announce=["online", kind])
+        discord_reset()
+        bus_events.publish(Event(kind=kind, instance_id=iid, instance_name="Midgard",
+                                 title=title, key=f"admin-{kind}"))
+        check(f"{kind} is not posted to a player channel",
+              not discord_wait(lambda: discord_state()["messages"], 2, ""),
+              discord_state()["messages"])
+    stored = manager.get(iid).config.discord.announce
+    check("...and the stored switches are untouched by the player form",
+          stored["crash"] and stored["notice"] and stored["status"], stored)
+    check("...which cannot set them either, since it does not own them",
+          stored["manager"] is False, stored)
+
+    print("\n[discord: saving the page leaves the stored switches alone]")
+    manager.update(iid, {"discord": {
+        **manager.get(iid).config.discord.to_dict(),
+        "announce": {**manager.get(iid).config.discord.announce,
+                     "crash": True, "notice": True, "snapshot": True},
+    }})
+    set_discord(iid, channel_id=CHANNEL_A, announce=["online"])
+    kept = manager.get(iid).config.discord.announce
+    check("a switch that is not on the page survives a save",
+          kept["crash"] and kept["notice"] and kept["snapshot"], kept)
+    check("...while the ones on the page are set from it",
+          kept["online"] and not kept["stopping"] and not kept["player_join"], kept)
 
     r = c.post(f"/instances/{iid}/discord", data={"channel_id": CHANNEL_A})
     check("switching a server off is accepted", "will not use Discord" in r.text,
           r.text[:200])
     discord_reset()
-    bus_events.publish(Event(kind="status", instance_id=iid, instance_name="Midgard",
-                             title="Midgard is starting.", key="pc6"))
+    bus_events.publish(Event(kind="online", instance_id=iid, instance_name="Midgard",
+                             title="Midgard is online.", key="pc6"))
     check("...and it then says nothing at all",
           not discord_wait(lambda: discord_state()["messages"], 2, ""))
     reply = ask("status", guild=GUILD_A, channel=CHANNEL_A)
     check("...and answers nothing either",
           "No Valheim server is set up" in said(reply), said(reply)[:200])
     set_discord(iid, channel_id=CHANNEL_A,
-                announce=["status", "server_update", "player_join", "player_leave"])
+                announce=["online", "stopping", "restarting", "player_join",
+                          "player_leave"])
 
     print("\n[discord: the address is per server too]")
     reply = ask("status", guild=GUILD_A, channel=CHANNEL_A)
     check("a server that shares its address shows it", "2456" in said(reply),
           said(reply)[:300])
     set_discord(iid, channel_id=CHANNEL_A, show_address=None,
-                announce=["status", "server_update", "player_join", "player_leave"])
+                announce=["online", "player_join", "player_leave"])
     reply = ask("status", guild=GUILD_A, channel=CHANNEL_A)
     check("...and one that does not, does not", "2456" not in said(reply),
           said(reply)[:300])
     set_discord(iid, channel_id=CHANNEL_A,
-                announce=["status", "server_update", "player_join", "player_leave"])
+                announce=["online", "player_join", "player_leave"])
 
     print("\n[discord: a bad id is refused on the instance page]")
     r = c.post(f"/instances/{iid}/discord",
@@ -2350,7 +2406,10 @@ with TestClient(app) as c:
     print("\n[discord: /vh player, scoped to one server]")
     reply = ask("player", {"name": "Nobody At All"}, guild=GUILD_A, channel=CHANNEL_A)
     check("an unknown player is said plainly, naming only this server",
-          "has joined" in said(reply) and "Midgard" in said(reply), said(reply)[:300])
+          "has played on" in said(reply) and "Midgard" in said(reply), said(reply)[:300])
+    reply = ask("player", guild=GUILD_A, channel=CHANNEL_A)
+    check("the roster is listed when no name is given",
+          "players" in said(reply).lower(), said(reply)[:300])
 
     print("\n[discord: player traffic]")
     record = manager.get(iid)
@@ -2377,9 +2436,14 @@ with TestClient(app) as c:
 
     reply = ask("player", {"name": "Freyja"}, guild=GUILD_A, channel=CHANNEL_A)
     check("/vh player finds them on this server", "Freyja" in said(reply), said(reply)[:300])
+    check("...and says they are online", "online now" in said(reply), said(reply)[:300])
+    reply = ask("player", guild=GUILD_A, channel=CHANNEL_A)
+    check("the roster puts the ones online first",
+          said(reply).index("Freyja") > 0 and "online now" in said(reply),
+          said(reply)[:300])
     reply = ask("player", {"name": "Freyja"}, guild=GUILD_B, channel=CHANNEL_B)
     check("...and not from the other server's channel",
-          "has joined" in said(reply) and "Helheim" in said(reply), said(reply)[:300])
+          "has played on" in said(reply) and "Helheim" in said(reply), said(reply)[:300])
 
     discord_reset()
     record.players.observe_log(f"Closing socket {NAMED}")
@@ -2409,11 +2473,15 @@ with TestClient(app) as c:
         payload = {"id": "i1", "name": "Midgard", "status": "stopped", "world": "Midgard",
                    "listening": False, "query_answered": False, "version": "",
                    "reachable": None, "notices": [], "uptime": 0, "exit_code": None,
+                   "operation": "", "maintenance": "",
                    "players": {"count": 0, "max": 10, "players": []},
                    "mods": {"installed": 0, "enabled": 0, "updates_active": [],
                             "restart_pending": False}}
         payload.update(overrides)
         watcher.observe({"instances": [payload]})
+
+    def kinds():
+        return [e.kind for e in drain()]
 
     sample()
     check("nothing is announced on first sight", not drain())
@@ -2428,9 +2496,14 @@ with TestClient(app) as c:
     sample(status="running")
     sample(status="running", listening=True, version="0.217.46")
     events = drain()
-    check("running, then ready", [e.kind for e in events] == ["status", "ready"],
+    check("running, then online, then ready",
+          [e.kind for e in events] == ["status", "online", "ready"],
           [e.kind for e in events])
-    check("ready says what players care about", "accepting players" in events[1].title)
+    ready = next(e for e in events if e.kind == "ready")
+    check("ready says what players care about", "accepting players" in ready.title)
+    online = next(e for e in events if e.kind == "online")
+    check("...and the player-facing one says it plainly",
+          "is online" in online.title, online.title)
     sample(status="running", listening=True, version="0.217.46")
     check("ready is announced once per run", not drain())
     sample(status="crashed", exit_code=139, listening=False)
@@ -2485,6 +2558,83 @@ with TestClient(app) as c:
     watcher.observe_build({"available": True, "installed": "100", "latest": "200"})
     check("...once per build", not drain())
 
+    print("\n[discord: what players are told about a restart]")
+    bus2 = EventBus()
+    queue2 = bus2.subscribe()
+    watcher2 = StateWatcher(bus2)
+    watcher2._started_at -= 120
+
+    def player_sample(**overrides):
+        payload = {"id": "p1", "name": "Midgard", "status": "running",
+                   "world": "Midgard", "listening": True, "query_answered": True,
+                   "version": "0.217.46", "reachable": None, "notices": [],
+                   "uptime": 60, "exit_code": None, "operation": "", "maintenance": "",
+                   "players": {"count": 0, "max": 10, "players": []},
+                   "mods": {"installed": 0, "enabled": 0, "updates_active": [],
+                            "restart_pending": False}}
+        payload.update(overrides)
+        watcher2.observe({"instances": [payload]})
+
+    def player_kinds():
+        """Only the player-facing kinds: the watcher publishes both audiences
+        and it is the announcer that decides which ones leave the house."""
+        out = []
+        while not queue2.empty():
+            kind = queue2.get_nowait().kind
+            if is_player_facing(kind):
+                out.append(kind)
+        return out
+
+    player_sample()                       # first sight: baseline only
+    player_kinds()
+    player_sample(status="stopping", operation="stopping", listening=False,
+                  query_answered=False)
+    check("a stop somebody asked for is announced to players",
+          "stopping" in player_kinds())
+    player_sample(status="stopped", listening=False, query_answered=False)
+    player_sample(status="running", listening=True, query_answered=True)
+    check("and so is coming back online", "online" in player_kinds())
+
+    player_sample(status="stopping", operation="restarting", listening=False,
+                  query_answered=False)
+    said_kinds = player_kinds()
+    check("a restart says restarting, not shutting down",
+          "restarting" in said_kinds and "stopping" not in said_kinds, said_kinds)
+    player_sample(status="running", operation="", listening=True, query_answered=True)
+    check("...then online when it is back", "online" in player_kinds())
+
+    print("\n[discord: a maintenance restart is not players' business]")
+    player_sample(status="stopping", operation="stopping", maintenance="update",
+                  listening=False, query_answered=False)
+    check("a stop for an update is not announced", not player_kinds())
+    player_sample(status="stopped", maintenance="update", listening=False,
+                  query_answered=False)
+    player_sample(status="running", maintenance="update", listening=True,
+                  query_answered=True)
+    check("...nor is the server coming back up", not player_kinds())
+    player_sample(status="running", maintenance="", listening=True, query_answered=True)
+    check("...and it is not announced late either, once the window closes",
+          not player_kinds())
+    player_sample(status="stopping", operation="restarting", maintenance="mod-update",
+                  listening=False, query_answered=False)
+    check("a restart for a mod update is not announced either", not player_kinds())
+    player_sample(status="running", operation="", maintenance="mod-update",
+                  listening=True, query_answered=True)
+    check("...nor the server coming back from it", not player_kinds())
+    player_sample(status="running", operation="", maintenance="", listening=True,
+                  query_answered=True)
+    check("...even once the window closes a tick later", not player_kinds())
+
+    # A plain restart after all that still reaches the players.
+    player_sample(status="stopping", operation="restarting", listening=False,
+                  query_answered=False)
+    check("a restart somebody asks for afterwards is announced again",
+          "restarting" in player_kinds())
+    player_sample(status="running", operation="", listening=True, query_answered=True)
+    check("...and so is it coming back", "online" in player_kinds())
+    player_sample(status="running", listening=True, query_answered=True)
+    check("online is said once per run, not every tick", not player_kinds())
+
     print("\n[discord: the test button is per server]")
     discord_reset()
     r = c.post(f"/instances/{iid}/discord/test")
@@ -2499,15 +2649,16 @@ with TestClient(app) as c:
     print("\n[discord: when Discord refuses a channel]")
     httpx.post(DISCORD_BASE + "/_test/channel-guild",
                json={"999000000000000000": GUILD_A}, trust_env=False)
-    set_discord(iid, channel_id="999000000000000000", announce=["server_update"])
+    set_discord(iid, channel_id="999000000000000000", announce=["online"])
     discord_reset()
-    bus_events.publish(Event(kind="server_update", title="Refused build.", key="pc7"))
+    bus_events.publish(Event(kind="online", instance_id=iid, instance_name="Midgard",
+                             title="Refused message.", key="pc7"))
     check("a channel it cannot post to is reported, not crashed out",
           discord_wait(lambda: "not allowed to do that" in (bot.status()["last_error"] or ""),
                        10, "forbidden"),
           bot.status()["last_error"])
     check("...and the bot stays connected", bot.status()["connected"])
-    set_discord(iid, channel_id=CHANNEL_A, announce=["server_update"])
+    set_discord(iid, channel_id=CHANNEL_A, announce=["online"])
 
     print("\n[discord: unmapping a server takes its commands away]")
     r = c.post(f"/instances/{hid}/discord", data={"channel_id": CHANNEL_B})

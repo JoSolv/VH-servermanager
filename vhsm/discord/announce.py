@@ -49,6 +49,13 @@ class InstanceState:
     status: str = ""
     listening: bool = False
     version: str = ""
+    #: The lifecycle operation last seen in flight, so a restart is told apart
+    #: from a stop that happens to be the first half of one.
+    operation: str = ""
+    #: Whether this server was last seen reachable by a player, which is what
+    #: "online" means to them -- not whether a process exists.
+    connectable: bool = False
+    announced_online: bool = False
     reachable: bool | None = None
     #: Candidate reachability and how many samples have agreed on it.
     pending_reachable: bool | None = None
@@ -125,6 +132,49 @@ class StateWatcher:
         # anything during the settling period: both are the manager learning
         # the state, not the state changing.
         quiet = first_sight or self.settling
+
+        # What players are told: it is up, it is going down, it is coming
+        # back. Suppressed while the manager itself has the instance down for
+        # maintenance, since the message they want then is "here is what
+        # changed", which the manager publishes once it is actually running it.
+        maintenance = bool(snapshot.get("maintenance"))
+        operation = str(snapshot.get("operation") or "")
+        if operation != state.operation:
+            state.operation = operation
+            # A restart is a stop and a start, so it is matched first: a
+            # player wants "restarting", not "shutting down" then "online".
+            if operation == "restarting" and not quiet and not maintenance:
+                self._publish(
+                    ev.RESTARTING,
+                    instance_id=instance_id, instance_name=name,
+                    title=f"\U0001F504 **{name}** is restarting.",
+                    level="info", key=f"restarting:{instance_id}:{snapshot.get('uptime')}",
+                )
+            elif operation == "stopping" and not quiet and not maintenance:
+                self._publish(
+                    ev.STOPPING,
+                    instance_id=instance_id, instance_name=name,
+                    title=f"\u26AB **{name}** is shutting down.",
+                    level="info", key=f"stopping:{instance_id}:{snapshot.get('uptime')}",
+                )
+
+        connectable = bool(
+            snapshot.get("listening") or snapshot.get("query_answered")
+        )
+        if not connectable:
+            state.announced_online = False
+        elif not state.announced_online:
+            state.announced_online = True
+            if not quiet and not maintenance:
+                self._publish(
+                    ev.ONLINE,
+                    instance_id=instance_id, instance_name=name,
+                    title=f"\U0001F7E2 **{name}** is online.",
+                    level="good",
+                    key=f"online:{instance_id}:{snapshot.get('uptime')}",
+                    data={"snapshot": snapshot},
+                )
+        state.connectable = connectable
 
         if status != state.status:
             previous, state.status = state.status, status
@@ -378,6 +428,13 @@ class Announcer:
 
     def channels_for(self, event: Event) -> list[str]:
         """Every channel this event should be posted to, without repeats."""
+        # There is one channel per server and it belongs to that server's
+        # players, so only their news goes out. Everything else -- failures,
+        # mod releases, build ids, who asked for a restart -- keeps its switch
+        # and its plumbing, and waits for the admin channel. Lifting this is
+        # the whole of that change on this side.
+        if not ev.is_player_facing(event.kind):
+            return []
         if event.instance_id:
             try:
                 record = self.manager.get(event.instance_id)
@@ -460,19 +517,22 @@ class Announcer:
             self.last_error = ""
         return sent_any
 
-    def render(self, event: Event) -> dict[str, Any]:
-        """One event as a Discord message payload.
+    #: Kinds sent as a plain line rather than an embed. A join, a leave, a
+    #: "going down" are one-line facts, and a channel full of boxes for them
+    #: reads like an alarm going off rather than a server people play on.
+    PLAIN: tuple[str, ...] = (
+        ev.PLAYER_JOIN, ev.PLAYER_LEAVE, ev.PLAYER_DEATH,
+        ev.STOPPING, ev.RESTARTING,
+    )
 
-        Player traffic is sent as a plain line rather than an embed: a join
-        and a leave are one-line facts, and a channel of boxes for them reads
-        like an alarm going off.
-        """
-        if event.kind in (ev.PLAYER_JOIN, ev.PLAYER_LEAVE, ev.PLAYER_DEATH):
+    def render(self, event: Event) -> dict[str, Any]:
+        """One event as a Discord message payload."""
+        if event.kind in self.PLAIN:
             return {"content": event.title}
 
         fields: list[dict[str, Any]] = []
         snapshot = (event.data or {}).get("snapshot") or {}
-        if event.kind in (ev.STATUS, ev.READY, ev.CRASH) and snapshot:
+        if event.kind in (ev.STATUS, ev.READY, ev.CRASH, ev.ONLINE) and snapshot:
             players = snapshot.get("players") or {}
             if snapshot.get("status") == "running":
                 maximum = players.get("max") or 0
