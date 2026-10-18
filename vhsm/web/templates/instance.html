@@ -133,6 +133,22 @@
   </div>
 </details>
 
+<details class="section" data-remember="mod-updates">
+  <summary>
+    <span class="sec-title">Mod updates</span>
+    <span class="sec-note">
+      {%- if config.mod_update_check %}
+        daily at {{ config.mod_update_at }} &middot;
+        {{ 'installs' if config.mod_update_install else 'reports only' }}
+        {{- ' and restarts' if config.mod_update_install and config.mod_update_restart }}
+      {%- else %}not scheduled{% endif -%}
+    </span>
+  </summary>
+  <div class="section-body">
+    {% include "partials/mod_schedule.html" %}
+  </div>
+</details>
+
 <details class="section" data-remember="danger">
   <summary><span class="sec-title">Danger zone</span></summary>
   <div class="section-body">

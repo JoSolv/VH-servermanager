@@ -11,6 +11,14 @@
     <tr><th>Server</th><td>{% if status.server_installed %}<code>{{ status.server_path }}</code>{% else %}<span class="muted">not installed</span>{% endif %}</td></tr>
     <tr><th>Disk space</th><td>{{ status.disk_free | human_bytes }}</td></tr>
     <tr><th>Mode</th><td>{% if status.fake_server %}<strong>development</strong> (simulated server){% else %}production{% endif %}</td></tr>
+    {# Said even when it is fine: a missing dependency here fails silently at
+       run time, so "we looked, and they are all there" is worth as much as
+       the warning below. #}
+    <tr><th>Libraries</th><td>
+      {%- if not libraries.available %}<span class="muted">not checked ({{ libraries.reason or 'server not installed' }})</span>
+      {%- elif libraries.ok %}<span class="tag ok-tag">all present</span>
+      {%- else %}<span class="tag upd">{{ libraries.missing | length }} file(s) with missing dependencies</span>{% endif -%}
+    </td></tr>
   </table>
 
 

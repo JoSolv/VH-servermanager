@@ -30,6 +30,11 @@ tested end to end, and the structure is meant to be built on.
   navigates away (or a button that re-renders mid-request) cannot abandon a
   restart half-finished. The UI shows `starting` / `stopping` / `restarting`
   while the work is in flight.
+- A stop does not return until the exit has been read and the status is
+  settled, which is what makes a restart a restart: starting an instance that
+  still looks active is refused, so a stop that reported itself done a moment
+  early took the server down and left it down — by hand, around an update, and
+  after a mod update alike.
 - Console output is streamed to the browser over a websocket and mirrored to
   `logs/console.log`. A line repeated faster than anyone could read it — a
   server stuck in a retry loop — is collapsed into a periodic count, so the
@@ -139,9 +144,13 @@ tested end to end, and the structure is meant to be built on.
   stays about the host, and says one line when an update is waiting.
 - One-click update that stops running instances, updates, and starts them again
   — including when the update fails, since that is a bad reason to leave servers
-  down.
+  down. Unchecking *Restart running servers* means exactly that: the update is
+  refused rather than quietly taking them down.
 - Optional daily scheduled update at a chosen time, with the same stop/start
-  handling.
+  handling. The schedule has an hour of slack rather than one exact minute, so
+  a manager that was busy — or briefly down — at the appointed moment still
+  does the day's update instead of skipping it; a manager started later than
+  that waits for tomorrow rather than restarting every server on boot.
 - The full steamcmd transcript is written to `steamcmd.log` and downloadable,
   so a failed install can still be read after its output has scrolled away. Each
   instance's own console log is downloadable from its page for the same reason:
@@ -185,7 +194,28 @@ tested end to end, and the structure is meant to be built on.
 - Config files are never renamed on disable or deleted on uninstall, and never
   overwritten on update — tuned settings survive.
 - Update detection with one-click update-all, orphaned-dependency pruning,
-  and manual `.zip` upload for packages not on Thunderstore.
+  and manual `.zip` upload for packages not on Thunderstore. Updating a mod
+  that is switched off leaves it switched off — its files are installed under
+  their active names, so without that an update handed a disabled mod back to
+  the server.
+- **The instance page says when an active mod has a newer version**, listing
+  what moved and where to act on it. Only the mods that server loads count: a
+  disabled mod is not running, so a release of it is not news about it.
+- **And it says when mods have changed but the server has not been restarted.**
+  A server reads its plugins once, at start-up, and says nothing about them
+  afterwards, so mods installed, updated, enabled or disabled since are sitting
+  in the profile unused with nothing on screen to say so. Both notices arrive
+  over the live metrics socket, so a page left open learns about a release, or
+  about an install from another tab, without being reloaded.
+- **A per-instance scheduled mod check**, the mod counterpart of the scheduled
+  server update: daily at a chosen time, it refreshes the catalogue and either
+  reports what it found or installs it, optionally restarting that server
+  afterwards — and only when something was actually installed, since a restart
+  nobody needed is still players disconnected. *Check now* runs exactly what
+  the schedule would do, and the panel keeps the last result, which is the only
+  way a daily job ever answers "did that do anything". If Thunderstore cannot
+  be reached the check falls back to the catalogue already on disk and says so,
+  rather than reporting nothing at all.
 - **Profile export and import in r2modman's `.r2z` format**, so a server's mods
   can go to players' r2modman and back. Export writes the mod list and
   `BepInEx/config`, plus the config-type files from the plugin folders, in the
@@ -380,7 +410,10 @@ edit form, as the server needs them on its command line.
   duration (which is shown). A per-player ping would have to be invented, so
   the field is reported as `null` rather than filled with a guess.
 - No RCON-style console input — commands would need a server-side mod.
-- No scheduled *restarts* (scheduled updates exist) and no crash auto-restart.
+- No scheduled *restarts* for their own sake, and no crash auto-restart.
+  Restarts happen around a scheduled server update, and around a scheduled mod
+  update that installed something, but there is no "restart nightly at 05:00"
+  of its own.
 - Backups are Valheim's own; the manager does not run its own backup schedule
   beyond the snapshots it takes before a rollback and before an import
   overwrites a world.

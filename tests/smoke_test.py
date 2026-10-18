@@ -783,7 +783,85 @@ with TestClient(app) as c:
     check("schedule saved + normalised", "04:05" in r.text, r.text[:90])
     check("schedule persisted", json.loads((ROOT/"manager.json").read_text())["auto_update"]["at"] == "04:05")
     r = c.post("/settings/auto-update", data={"enabled": "1", "at": "99:99"})
-    check("bad time rejected", r.status_code == 400)
+    # Reported in the banner the form swaps in, which means a 2xx: htmx leaves
+    # an error status unswapped, so a 400 here was a form that said nothing.
+    check("bad time rejected", "Use a time like 04:00" in r.text and r.status_code == 200,
+          (r.status_code, r.text[:90]))
+    check("...and the schedule is unchanged",
+          json.loads((ROOT/"manager.json").read_text())["auto_update"]["at"] == "04:05")
+
+    print("\n[the daily schedule]")
+    from datetime import datetime
+    from vhsm.manager import AutoUpdate
+    from vhsm.util import daily_due
+    at_four = lambda d, h, m: datetime(2026, 5, d, h, m)
+    plan = AutoUpdate(enabled=True, at="04:00")
+    check("due at the appointed minute", plan.due(at_four(1, 4, 0)))
+    check("not due before it", not plan.due(at_four(1, 3, 59)))
+    # The loop that asks also takes snapshots and can be inside an update, so
+    # a schedule that was only due during one exact minute was a schedule that
+    # skipped the day whenever that minute was busy.
+    check("still due a few minutes late", plan.due(at_four(1, 4, 7)))
+    check("still due well after a missed tick", plan.due(at_four(1, 4, 55)))
+    # ...but a manager started in the evening does not update and restart
+    # every server the moment it comes up.
+    check("not due hours later", not plan.due(at_four(1, 9, 30)))
+    check("disabled is never due", not AutoUpdate(at="04:00").due(at_four(1, 4, 0)))
+    ran = AutoUpdate(enabled=True, at="04:00", last_run_date="2026-05-01")
+    check("not due twice in a day", not ran.due(at_four(1, 4, 5)))
+    check("due again the next day", ran.due(at_four(2, 4, 5)))
+    check("an unreadable time never comes due", not daily_due("half four", "", at_four(1, 4, 0)))
+    check("midnight is a time of day", daily_due("00:00", "", at_four(1, 0, 0)))
+
+    # The schedule itself, driven by the manager's own loop rather than by
+    # calling into it: what is worth proving is that the loop fires it.
+    manager = app.state.manager
+    snap = wait_status(c, iid, "running", timeout=30)
+    check("instance running before the scheduled update", snap["status"] == "running", snap["status"])
+    was_pid = snap["pid"]
+    manager.auto_update.enabled = True
+    manager.auto_update.restart_instances = True
+    manager.auto_update.at = datetime.now().strftime("%H:%M")
+    manager.auto_update.last_run_date = ""
+    today = datetime.now().strftime("%Y-%m-%d")
+    deadline = time.time() + 60
+    while time.time() < deadline and manager.auto_update.last_run_date != today:
+        time.sleep(0.5)
+    check("the scheduler fires the daily update",
+          manager.auto_update.last_run_date == today, manager.auto_update.last_run_date)
+    for _ in range(160):
+        if not manager.job.running: break
+        time.sleep(0.25)
+    manager.auto_update.enabled = False
+    # steamcmd is absent, so the update itself fails. The servers it stopped
+    # must still be running afterwards: that is the whole point of the
+    # restart, and it is exactly where a stop followed by a start used to
+    # leave them down.
+    snap = wait_status(c, iid, "running", timeout=60)
+    check("the scheduled update brought the server back",
+          snap["status"] == "running" and snap["pid"] and snap["pid"] != was_pid,
+          (was_pid, snap["status"], snap["pid"]))
+
+    print("\n[install: the restart checkbox]")
+    # An unchecked checkbox is submitted by leaving the field out, so a
+    # default of "1" made "do not restart my servers" impossible to ask for.
+    before = c.get(f"/api/instances/{iid}").json()["pid"]
+    c.post("/settings/install")
+    for _ in range(80):
+        if not manager.job.running: break
+        time.sleep(0.25)
+    check("unchecked means the running server is not touched",
+          any("restart is disabled" in line for line in manager.job.lines),
+          manager.job.lines[-3:])
+    snap = c.get(f"/api/instances/{iid}").json()
+    check("...and it is still the same process", snap["pid"] == before, (before, snap["pid"]))
+    c.post("/settings/install", data={"restart_instances": "1"})
+    for _ in range(120):
+        if not manager.job.running: break
+        time.sleep(0.25)
+    snap = wait_status(c, iid, "running", timeout=40)
+    check("checked means it is stopped and started again",
+          snap["status"] == "running" and snap["pid"] != before, (before, snap["pid"]))
 
     print("\n[query socket discovery]")
     import socket as _socket
@@ -1483,6 +1561,187 @@ with TestClient(app) as c:
           "alert error" in r.text and "Catalogue refreshed" not in r.text, r.text[:200])
     check("and says the old copy is still in use", "Still using the copy fetched" in r.text, r.text[:200])
     check("the old copy is kept", idx.get("shudnal-Seasons") is not None)
+
+    print("\n[mod update notices]")
+    # Its own server: what follows installs, disables, updates and restarts
+    # mods, and the sections after it are about the first server's profile.
+    free_port = max(rec.config.port for rec in manager.records) + 3
+    r = c.post("/instances", data={"name": "Nidavellir", "world": "Nidavellir",
+               "password": "brokksindri", "port": str(free_port), "save_interval": "1800",
+               "backups": "4", "backup_short": "7200", "backup_long": "43200"},
+               follow_redirects=False)
+    check("a second server to try mod updates on", r.status_code == 303, r.text[:160])
+    nid = r.headers["location"].rsplit("/", 1)[-1]
+    nprof = ROOT/"instances"/nid
+    seed(idx, "Smith", "Anvil", "1.0.0", {"manifest.json": "{}", "plugins/Anvil.dll": "MZ 1.0.0"})
+    c.post(f"/api/instances/{nid}/mods/install", data={"package_full_name": "Smith-Anvil"})
+    check("no update notice while the installed version is the latest",
+          'data-notice="mod-updates' not in c.get(f"/instances/{nid}").text)
+
+    seed(idx, "Smith", "Anvil", "1.1.0", {"manifest.json": "{}", "plugins/Anvil.dll": "MZ 1.1.0"})
+    r = c.get(f"/instances/{nid}")
+    check("the instance page says an active mod has an update",
+          'data-notice="mod-updates' in r.text and "1.0.0 \u2192 1.1.0" in r.text, r.text[:0])
+    snap = c.get(f"/api/instances/{nid}").json()
+    notices = {n["key"].split(":")[0]: n for n in snap["notices"]}
+    check("the notice rides the live snapshot, so an open page is told",
+          "mod-updates" in notices, [n["key"] for n in snap["notices"]])
+    check("it reads as news rather than a failure, and offers the way to act",
+          notices["mod-updates"]["level"] == "info"
+          and notices["mod-updates"]["link"]["href"] == f"/instances/{nid}/mods",
+          notices.get("mod-updates"))
+    check("the snapshot names what is out of date",
+          [u["package_full_name"] for u in snap["mods"]["updates_active"]] == ["Smith-Anvil"],
+          snap["mods"])
+    # The key carries the version, because the client compares keys to decide
+    # whether anything changed and "one update" becoming another is news.
+    first_key = notices["mod-updates"]["key"]
+    seed(idx, "Smith", "Anvil", "1.1.1", {"manifest.json": "{}", "plugins/Anvil.dll": "MZ 1.1.1"})
+    c.get(f"/instances/{nid}")
+    later = c.get(f"/api/instances/{nid}").json()["notices"]
+    check("a different release is a different notice",
+          [n["key"] for n in later if n["key"].startswith("mod-updates")] != [first_key],
+          (first_key, [n["key"] for n in later]))
+
+    c.post(f"/api/instances/{nid}/mods/Smith-Anvil/toggle")
+    check("a disabled mod is not news about this server",
+          'data-notice="mod-updates' not in c.get(f"/instances/{nid}").text)
+    c.post(f"/api/instances/{nid}/mods/Smith-Anvil/toggle")
+    check("...and it is again once it is switched back on",
+          'data-notice="mod-updates' in c.get(f"/instances/{nid}").text)
+
+    print("\n[mods changed but not loaded yet]")
+    c.post(f"/instances/{nid}/start")
+    snap = wait_status(c, nid, "running")
+    check("the second server runs", snap["status"] == "running", snap["status"])
+    check("nothing owed before anything changes",
+          'data-notice="mods-need-restart"' not in c.get(f"/instances/{nid}").text)
+    seed(idx, "Smith", "Bellows", "1.0.0",
+         {"manifest.json": "{}", "plugins/Bellows.dll": "MZ 1.0.0"})
+    c.post(f"/api/instances/{nid}/mods/install", data={"package_full_name": "Smith-Bellows"})
+    r = c.get(f"/instances/{nid}")
+    check("installing a mod on a running server asks for a restart",
+          'data-notice="mods-need-restart"' in r.text, r.text[:0])
+    snap = c.get(f"/api/instances/{nid}").json()
+    check("...and the snapshot says so too", snap["mods"]["restart_pending"] is True, snap["mods"])
+    r = c.post(f"/api/instances/{nid}/mods/Smith-Bellows/toggle")
+    check("the mod list says it where the change was made",
+          "still running the mods it started with" in r.text, r.text[:0])
+    c.post(f"/api/instances/{nid}/mods/Smith-Bellows/toggle")
+    c.post(f"/instances/{nid}/restart")
+    snap = wait_status(c, nid, "running")
+    check("restarting clears it", snap["mods"]["restart_pending"] is False, snap["mods"])
+    check("...and the notice is gone from the page",
+          'data-notice="mods-need-restart"' not in c.get(f"/instances/{nid}").text)
+    # A stopped server has nothing to reload, so it is owed nothing either.
+    c.post(f"/instances/{nid}/stop")
+    wait_status(c, nid, "stopped")
+    c.post(f"/api/instances/{nid}/mods/Smith-Bellows/uninstall")
+    check("a stopped server is not asked to restart",
+          'data-notice="mods-need-restart"' not in c.get(f"/instances/{nid}").text)
+
+    print("\n[updating a mod that is switched off]")
+    seed(idx, "Smith", "Tongs", "1.0.0", {"manifest.json": "{}", "plugins/Tongs.dll": "MZ 1.0.0"})
+    c.post(f"/api/instances/{nid}/mods/install", data={"package_full_name": "Smith-Tongs"})
+    c.post(f"/api/instances/{nid}/mods/Smith-Tongs/toggle")
+    seed(idx, "Smith", "Tongs", "2.0.0", {"manifest.json": "{}", "plugins/Tongs.dll": "MZ 2.0.0"})
+    c.post(f"/api/instances/{nid}/mods/update-all")
+    tongs = mods_on(nprof)["Smith-Tongs"]
+    # Files are installed under their active names, so an update used to hand
+    # a mod the operator had switched off back to the server.
+    check("an update leaves a disabled mod disabled",
+          tongs["version"] == "2.0.0" and tongs["enabled"] is False, tongs)
+    check("...and its files stay parked",
+          (nprof/"BepInEx/plugins/Smith-Tongs/Tongs.dll.old").is_file()
+          and not (nprof/"BepInEx/plugins/Smith-Tongs/Tongs.dll").exists())
+    c.post(f"/api/instances/{nid}/mods/Smith-Tongs/uninstall")
+
+    print("\n[per-instance mod updates]")
+    changed = json.loads((nprof/"mods.json").read_text())["changed_at"]
+    check("the manifest records when the mods last changed", changed > 0, changed)
+    c.post(f"/api/instances/{nid}/mods/prune")
+    check("a save that changes nothing does not count as a change",
+          json.loads((nprof/"mods.json").read_text())["changed_at"] == changed)
+
+    from vhsm.mods.thunderstore import ThunderstoreIndex
+    real_ensure = ThunderstoreIndex.ensure
+    async def seeded_ensure(self, force=False):
+        return None            # the catalogue here is the one seed() built
+    ThunderstoreIndex.ensure = seeded_ensure
+    try:
+        r = c.post(f"/instances/{nid}/mod-updates", data={"enabled": "1", "at": "5:7"})
+        check("the schedule saves, normalised", "daily at 05:07" in r.text, r.text[:200])
+        check("...and says it only reports", "it reports them" in r.text, r.text[:200])
+        check("...and is persisted with the instance",
+              json.loads((nprof/"instance.json").read_text())["mod_update_at"] == "05:07")
+        r = c.post(f"/instances/{nid}/mod-updates", data={"enabled": "1", "at": "99:99"})
+        check("a bad time is refused", "Use a time like 05:00" in r.text, r.text[:200])
+        check("...and the schedule is left as it was",
+              json.loads((nprof/"instance.json").read_text())["mod_update_at"] == "05:07")
+        check("the section is on the instance page",
+              'data-remember="mod-updates"' in c.get(f"/instances/{nid}").text)
+
+        seed(idx, "Smith", "Anvil", "1.2.0", {"manifest.json": "{}", "plugins/Anvil.dll": "MZ 1.2.0"})
+        r = c.post(f"/instances/{nid}/mod-updates/run")
+        check("a check that only reports says what it found",
+              "update(s) available" in r.text and "Anvil" in r.text, r.text[:300])
+        check("...and installs nothing",
+              mods_on(nprof)["Smith-Anvil"]["version"] == "1.1.1",
+              mods_on(nprof)["Smith-Anvil"]["version"])
+
+        r = c.post(f"/instances/{nid}/mod-updates",
+                   data={"enabled": "1", "at": "05:07", "install": "1", "restart": "1"})
+        check("installing and restarting is spelled out",
+              "installs them and restarts the server" in r.text, r.text[:200])
+        c.post(f"/instances/{nid}/start")
+        was = wait_status(c, nid, "running")["pid"]
+        r = c.post(f"/instances/{nid}/mod-updates/run")
+        check("the check installs what it finds", "Updated 1 mod(s)" in r.text, r.text[:300])
+        check("...the new file is the one on disk",
+              (nprof/"BepInEx/plugins/Smith-Anvil/Anvil.dll").read_text() == "MZ 1.2.0")
+        check("...and it restarted the server", "The server was restarted." in r.text, r.text[:300])
+        snap = wait_status(c, nid, "running")
+        check("the restart really happened", snap["pid"] and snap["pid"] != was, (was, snap["pid"]))
+        check("so nothing is left owed", snap["mods"]["restart_pending"] is False, snap["mods"])
+
+        # The schedule itself, fired by the manager's loop.
+        today = datetime.now().strftime("%Y-%m-%d")
+        nrecord = manager.get(nid)
+        manager.update(nid, {"mod_update_check": True, "mod_update_install": True,
+                             "mod_update_restart": False, "mod_update_last_run": "",
+                             "mod_update_at": datetime.now().strftime("%H:%M")})
+        seed(idx, "Smith", "Anvil", "1.3.0", {"manifest.json": "{}", "plugins/Anvil.dll": "MZ 1.3.0"})
+        deadline = time.time() + 60
+        while time.time() < deadline and nrecord.config.mod_update_last_run != today:
+            time.sleep(0.5)
+        check("the scheduler fires the per-instance mod check",
+              nrecord.config.mod_update_last_run == today, nrecord.config.mod_update_last_run)
+        check("...and it installed the release",
+              mods_on(nprof)["Smith-Anvil"]["version"] == "1.3.0",
+              mods_on(nprof)["Smith-Anvil"]["version"])
+        check("...and the page reports what it did",
+              "Updated 1 mod(s)" in c.get(f"/instances/{nid}").text)
+        check("...without restarting, since it was told not to",
+              nrecord.mod_check.restarted is False and nrecord.restart_pending is True,
+              nrecord.mod_check.to_dict())
+        manager.update(nid, {"mod_update_check": False})
+    finally:
+        ThunderstoreIndex.ensure = real_ensure
+
+    real_get = httpx.AsyncClient.get
+    async def offline_get(self, *args, **kwargs):
+        raise httpx.ConnectError("offline")
+    httpx.AsyncClient.get = offline_get
+    try:
+        r = c.post(f"/instances/{nid}/mod-updates/run")
+    finally:
+        httpx.AsyncClient.get = real_get
+    check("an unreachable Thunderstore does not cost the whole check",
+          "could not be reached" in r.text and "up to date" in r.text, r.text[:300])
+
+    c.post(f"/instances/{nid}/stop")
+    wait_status(c, nid, "stopped")
+    c.post(f"/instances/{nid}/delete")
 
     print("\n[r2modman profile export / import]")
     seed(idx, "Zenox", "Zenox", "1.0.53",

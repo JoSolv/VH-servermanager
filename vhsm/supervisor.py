@@ -29,6 +29,10 @@ LOG_BUFFER_LINES = 1000
 #: How long to wait for a graceful save-and-exit before escalating signals.
 SIGINT_GRACE = 45.0
 SIGTERM_GRACE = 15.0
+#: How long to wait for the log pump to finish after the process has exited.
+#: Only reached if something inherited the server's stdout and kept it open,
+#: so waiting longer would just stall whoever asked for the stop.
+PUMP_DRAIN = 5.0
 
 #: The server announces its build on the first line of output, e.g.
 #: ``Valheim version: l-0.217.46``. This is the version a client must match.
@@ -274,15 +278,19 @@ class Supervisor:
             self.pid = self._process.pid
             self.started_at = time.time()
             self.status = Status.RUNNING
-            self._pump = asyncio.create_task(self._pump_output())
+            # The pump is handed its own process rather than reading
+            # ``self._process``: it outlives the run it belongs to by however
+            # long the final lines take to drain, and by then the attribute
+            # may already describe the next one.
+            self._pump = asyncio.create_task(self._pump_output(self._process))
 
-    async def _pump_output(self) -> None:
-        assert self._process is not None and self._process.stdout is not None
+    async def _pump_output(self, process: asyncio.subprocess.Process) -> None:
+        assert process.stdout is not None
         log_file = self.layout.console_log
         log_file.parent.mkdir(parents=True, exist_ok=True)
         try:
             with log_file.open("a", encoding="utf-8", errors="replace") as sink:
-                async for raw in self._process.stdout:
+                async for raw in process.stdout:
                     line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                     # A line the throttle holds back is still accounted for:
                     # _emit feeds the hooks either way, so only the text is
@@ -303,12 +311,19 @@ class Supervisor:
         except Exception as exc:
             self._emit(f"[manager] log pump error: {exc}")
         finally:
-            await self._reap()
+            await self._reap(process)
 
-    async def _reap(self) -> None:
-        if self._process is None:
+    async def _reap(self, process: asyncio.subprocess.Process) -> None:
+        """Record how *process* ended, unless this run is already history.
+
+        A pump that is still draining when the instance is started again would
+        otherwise report the old process's exit over the new run: clearing its
+        pid, and calling a healthy server crashed.
+        """
+        exit_code = await process.wait()
+        if self._process is not process:
             return
-        self.exit_code = await self._process.wait()
+        self.exit_code = exit_code
         was_stopping = self.status is Status.STOPPING
         self.status = Status.STOPPED if was_stopping or self.exit_code == 0 else Status.CRASHED
         if self.status is Status.CRASHED:
@@ -319,28 +334,63 @@ class Supervisor:
         self._process = None
 
     async def stop(self, timeout: float = SIGINT_GRACE) -> None:
-        """Ask the server to save and exit, escalating if it refuses."""
+        """Ask the server to save and exit, escalating if it refuses.
+
+        Returns only once the status is final, which is what makes a restart
+        a restart: see :meth:`_drain`.
+        """
         async with self._lock:
             process = self._process
             if process is None or process.returncode is not None:
+                await self._drain()
                 self.status = Status.STOPPED
                 return
 
             self.status = Status.STOPPING
             self._emit("[manager] stopping (SIGINT, waiting for world save)")
 
-            # SIGINT is Valheim's documented graceful shutdown: it saves the
-            # world before exiting. Escalate only if it does not comply.
-            for sig, grace in ((signal.SIGINT, timeout), (signal.SIGTERM, SIGTERM_GRACE)):
-                self._signal_group(sig)
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(process.wait(), timeout=grace)
-                    return
-                self._emit(f"[manager] still alive after {sig.name}, escalating")
+            try:
+                # SIGINT is Valheim's documented graceful shutdown: it saves
+                # the world before exiting. Escalate only if it does not comply.
+                for sig, grace in ((signal.SIGINT, timeout), (signal.SIGTERM, SIGTERM_GRACE)):
+                    self._signal_group(sig)
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(process.wait(), timeout=grace)
+                        return
+                    self._emit(f"[manager] still alive after {sig.name}, escalating")
 
-            self._signal_group(signal.SIGKILL)
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(process.wait(), timeout=10)
+                self._signal_group(signal.SIGKILL)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(process.wait(), timeout=10)
+            finally:
+                await self._drain()
+
+    async def _drain(self) -> None:
+        """Wait for the log pump to finish, so the status is settled.
+
+        The process exiting and this supervisor noticing are two different
+        moments: the pump reads the last of the output, reaps the process and
+        only then records the exit. Returning from :meth:`stop` in between
+        left the status at ``stopping``, and a restart -- which starts the
+        server the instant the stop returns -- refused to start an instance
+        that still looked active, so it stopped the server and left it down.
+        """
+        pump = self._pump
+        if pump is not None and not pump.done():
+            # Shielded: a pump still holding open stdout must not be cancelled
+            # part-way through writing the transcript. Its reap is guarded
+            # against landing on a later run, so letting it finish is safe.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(asyncio.shield(pump), timeout=PUMP_DRAIN)
+        if self.status.is_active and (
+            self._process is None or self._process.returncode is not None
+        ):
+            # No pump, or one that outlasted the wait above: settle here so a
+            # start that follows is not refused for an instance that is gone.
+            self.status = Status.STOPPED
+            self.pid = None
+            self.started_at = None
+            self._process = None
 
     def _signal_group(self, sig: signal.Signals) -> None:
         if self.pid is None:

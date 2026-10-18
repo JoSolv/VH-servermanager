@@ -1,0 +1,75 @@
+{# The per-instance mod update schedule, and what the last check made of it.
+
+   Both of its endpoints re-render this whole block, so saving the schedule
+   and running a check report in the same place -- and the summary below is
+   then the answer to "did that do anything", which a daily job otherwise
+   never gives anybody. #}
+<div id="mod-schedule" hx-target="this" hx-swap="outerHTML">
+  {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <form hx-post="/instances/{{ config.id }}/mod-updates">
+    <div class="form-grid">
+      <div class="field">
+        <label for="mod_update_at">Daily at (server local time)</label>
+        <input type="time" id="mod_update_at" name="at" value="{{ config.mod_update_at }}">
+      </div>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="mod_update_check" name="enabled" value="1"
+             {{ 'checked' if config.mod_update_check }}>
+      <label for="mod_update_check">Check this server's mods for new versions daily</label>
+    </div>
+    <div class="check stacked">
+      <input type="checkbox" id="mod_update_install" name="install" value="1"
+             {{ 'checked' if config.mod_update_install }}>
+      <label for="mod_update_install">
+        Install what it finds
+        <span class="hint">Off means the check only says so, on this page.</span>
+      </label>
+    </div>
+    <div class="check stacked">
+      <input type="checkbox" id="mod_update_restart" name="restart" value="1"
+             {{ 'checked' if config.mod_update_restart }}>
+      <label for="mod_update_restart">
+        Restart this server afterwards
+        <span class="hint">
+          Only when something was actually installed. A server loads its mods
+          when it starts, so without a restart an update is on disk and not in
+          the game.
+        </span>
+      </label>
+    </div>
+    <button class="primary" type="submit">Save schedule</button>
+  </form>
+
+  <p class="hint">
+    Only the mods this server loads are checked — a disabled mod is not
+    running, so a release of it is not news about this server. Updates are
+    installed at their latest version; mod config files are never overwritten.
+  </p>
+
+  <div class="row" style="margin-top:10px">
+    {% set installs = config.mod_update_install %}
+    <button class="small" hx-post="/instances/{{ config.id }}/mod-updates/run"
+            hx-indicator="#mod-check-spinner"
+            {% if installs %}hx-confirm="Check for mod updates and install them now{{ ', restarting the server afterwards' if config.mod_update_restart }}?"{% endif %}>
+      {{ 'Run check now' if installs else 'Check now' }}
+    </button>
+    <div id="mod-check-spinner" class="spinner htmx-indicator">
+      <span class="spinner-icon"></span> checking Thunderstore…
+    </div>
+  </div>
+  <p class="subtle" style="margin-bottom:0">
+    {% if ran %}
+      {# Just reported above; saying it again here reads as two checks. #}
+      Checked {{ record.mod_check.at | timeago }}.
+    {% elif record.mod_check.at %}
+      {{ record.mod_check.summary() }}
+      <span class="muted">({{ record.mod_check.at | timeago }})</span>
+    {% else %}
+      Not checked yet.
+      {%- if config.mod_update_last_run %} Last scheduled check: {{ config.mod_update_last_run }}.{% endif %}
+    {% endif %}
+  </p>
+</div>

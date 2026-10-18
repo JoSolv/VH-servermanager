@@ -224,6 +224,7 @@ class ModProfile:
         self.cache_dir = cache_dir
         self.index = index
         self._mods: list[InstalledMod] = []
+        self._changed_at: float = 0.0
         self.load()
 
     # ------------------------------------------------------------------ #
@@ -232,12 +233,39 @@ class ModProfile:
     def load(self) -> None:
         payload = read_json(self.layout.mods_manifest, {}) or {}
         self._mods = [InstalledMod.from_dict(m) for m in payload.get("mods", [])]
+        self._changed_at = float(payload.get("changed_at", 0) or 0)
 
     def save(self) -> None:
+        """Write the manifest, moving ``changed_at`` only on a real change.
+
+        What a running server needs a restart for is the mod *set* changing,
+        not the manifest being rewritten, so a save that writes the same list
+        back -- installing a mod that is already installed, pruning nothing --
+        leaves the stamp where it was.
+        """
+        mods = [m.to_dict() for m in self._mods]
+        previous = read_json(self.layout.mods_manifest, {}) or {}
+        if mods != previous.get("mods"):
+            self._changed_at = time.time()
         write_json(
             self.layout.mods_manifest,
-            {"version": MANIFEST_VERSION, "mods": [m.to_dict() for m in self._mods]},
+            {
+                "version": MANIFEST_VERSION,
+                "mods": mods,
+                "changed_at": self._changed_at,
+            },
         )
+
+    @property
+    def changed_at(self) -> float:
+        """When the installed mods last changed, as a unix timestamp.
+
+        Zero when nothing has ever been installed here, or when the manifest
+        predates this field -- in both cases there is nothing to compare a
+        running server against, which is the honest answer rather than a
+        claim that it is out of date.
+        """
+        return self._changed_at
 
     # ------------------------------------------------------------------ #
     # queries
@@ -268,16 +296,25 @@ class ModProfile:
                     break
         return found
 
-    def updates_available(self) -> list[dict[str, str]]:
-        """Installed mods that Thunderstore has a newer version of."""
+    def updates_available(self, *, enabled_only: bool = False) -> list[dict[str, str]]:
+        """Installed mods that Thunderstore has a newer version of.
+
+        *enabled_only* restricts the answer to the mods this server actually
+        loads, which is what the instance page reports and what the scheduled
+        check installs: a disabled mod is not running anywhere, so a release
+        of it is not news about this server.
+        """
         updates = []
         for mod in self._mods:
+            if enabled_only and not mod.enabled:
+                continue
             package = self.index.get(mod.package_full_name)
             latest = package.latest if package else None
             if latest and is_newer(latest.version_number, mod.version):
                 updates.append(
                     {
                         "package_full_name": mod.package_full_name,
+                        "name": mod.name,
                         "current": mod.version,
                         "latest": latest.version_number,
                     }
@@ -436,6 +473,11 @@ class ModProfile:
     ) -> InstalledMod:
         """Install *version* from the cache in place of any installed version of it."""
         existing = self.get(version.package_full_name)
+        # Files are always installed under their active names, so a mod the
+        # operator had disabled would come back enabled just for being
+        # updated -- loading itself into the server on the next boot. Park the
+        # new copy again instead.
+        was_disabled = existing is not None and not existing.enabled
         if existing:
             self._remove_files(existing)
             self._mods.remove(existing)
@@ -453,6 +495,8 @@ class ModProfile:
             config_files=configs,
         )
         self._mods.append(mod)
+        if was_disabled:
+            self.set_enabled(mod.package_full_name, False)
         return mod
 
     async def install_by_name(
@@ -681,4 +725,6 @@ class ModProfile:
             "bepinex_installed": self.get(BEPINEX_PACKAGE) is not None,
             "mods": [m.to_dict() for m in self._mods],
             "updates": self.updates_available(),
+            "updates_active": self.updates_available(enabled_only=True),
+            "changed_at": self._changed_at,
         }
