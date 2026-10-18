@@ -36,23 +36,31 @@
 
     <div class="form-grid">
       <div class="field">
-        <label for="discord_guild_id">Discord server (guild) ID</label>
-        <input type="text" id="discord_guild_id" name="guild_id"
-               value="{{ config.discord.guild_id }}" inputmode="numeric"
+        <label for="discord_channel_id">Channel ID</label>
+        <input type="text" id="discord_channel_id" name="channel_id"
+               value="{{ config.discord.channel_id }}" inputmode="numeric"
                placeholder="e.g. 123456789012345678">
         <div class="hint">
-          This server's own Discord. Commands are only answered there, and this
-          instance cannot be seen or named from any other Discord &mdash; which
-          is what lets each of your servers have its own.
+          <strong>This channel is this server's identity.</strong> Announcements
+          go here, and a command typed here is about this server &mdash; which is
+          why the commands take no server name. Right-click the channel in
+          Discord with Developer Mode on and Copy Channel ID. No two servers
+          may share a channel.
         </div>
       </div>
       <div class="field">
-        <label for="discord_channel_id">Channel ID</label>
-        <input type="text" id="discord_channel_id" name="channel_id"
-               value="{{ config.discord.channel_id }}" inputmode="numeric">
+        <label>Discord server</label>
+        <p style="margin:6px 0 0">
+          {%- if config.discord.guild_id %}
+            <code>{{ config.discord.guild_id }}</code>
+            <span class="muted">found from the channel</span>
+          {%- elif config.discord.channel_id %}
+            <span class="tag upd">not found yet</span>
+          {%- else %}<span class="muted">&mdash;</span>{% endif -%}
+        </p>
         <div class="hint">
-          Where this server's announcements go. Right-click the channel in
-          Discord with Developer Mode on and Copy Channel ID.
+          Looked up from the channel, not typed in. "Not found yet" means the
+          bot has not been invited to that Discord, or cannot see that channel.
         </div>
       </div>
     </div>
@@ -61,9 +69,12 @@
       <input type="checkbox" id="discord_commands" name="commands_enabled" value="1"
              {{ 'checked' if config.discord.commands_enabled }}>
       <label for="discord_commands">
-        Answer slash commands about this server
+        Answer slash commands in this channel
         <span class="hint">
-          Read-only: status, players, mods and player stats.
+          Read-only and about this server only: <code>/vh status</code>,
+          <code>/vh players</code>, <code>/vh mods</code> and
+          <code>/vh player</code>. None of them reports anything about the
+          manager or about your other servers.
         </span>
       </label>
     </div>
@@ -81,20 +92,15 @@
 
     <div class="form-grid">
       <div class="field">
-        <label for="discord_cmd_channels">Command channels</label>
-        <textarea id="discord_cmd_channels" name="command_channel_ids" rows="2"
-                  placeholder="one ID per line; blank means any channel"
-        >{{ config.discord.command_channel_ids | join('\n') }}</textarea>
-        <div class="hint">
-          Commands about this server are only answered in these channels.
-        </div>
-      </div>
-      <div class="field">
         <label for="discord_read_roles">Roles allowed to ask</label>
         <textarea id="discord_read_roles" name="read_role_ids" rows="2"
                   placeholder="one role ID per line; blank means anyone who can see the channel"
         >{{ config.discord.read_role_ids | join('\n') }}</textarea>
-        <div class="hint">Blank leaves it to Discord's own channel permissions.</div>
+        <div class="hint">
+          Blank leaves it to Discord's own channel permissions, which is
+          usually the right answer: whoever can see the channel is who the
+          server is for.
+        </div>
       </div>
     </div>
 

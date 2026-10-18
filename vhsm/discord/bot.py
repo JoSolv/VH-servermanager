@@ -114,6 +114,10 @@ class DiscordBot:
                 "guild_id": settings.guild_id,
                 "channel_id": settings.channel_id,
                 "commands": settings.answers_commands,
+                # Set but unresolved means the bot cannot see that channel,
+                # which is worth saying rather than leaving as a blank column.
+                "unresolved": bool(settings.enabled and settings.channel_id
+                                   and not settings.guild_id),
                 "announcing": sum(
                     1 for kind in settings.announce if settings.announce[kind]
                 ) if settings.enabled else 0,
@@ -141,13 +145,14 @@ class DiscordBot:
         # before anything reads them, so an upgrade does not silently stop a
         # working bot.
         self.migrate_legacy_settings()
+        self.reconcile_channels()
 
         self._rest = RestClient(token, api_base=self.settings.discord_api_base)
         self.announcer = Announcer(self.manager, self._rest)
         if not self.guilds():
             # Not an error: the bot connects anyway, so the Settings page can
             # show the invite link and the operator has somewhere to start.
-            log.info("discord: no instance has a Discord server set yet")
+            log.info("discord: no instance has a Discord channel set yet")
 
         try:
             url = (
@@ -218,12 +223,20 @@ class DiscordBot:
             return
 
         moved = 0
+        taken: set[str] = set()
         for record in self.manager.records:
             settings = record.config.discord
             if settings.guild_id:
                 continue                      # already has its own
             settings.guild_id = guild_id
-            settings.channel_id = settings.channel_id or legacy["channel_id"]
+            # The old default channel can only go to one of them: the channel
+            # is now what identifies a server, so two sharing it would make
+            # every command there ambiguous. First come, first served, and the
+            # rest are switched off below with a line in the log.
+            if not settings.channel_id and legacy["channel_id"] not in taken:
+                settings.channel_id = legacy["channel_id"]
+            if settings.channel_id:
+                taken.add(settings.channel_id)
             if legacy["announce"]:
                 settings.announce = {
                     kind: bool(legacy["announce"].get(kind, settings.announce.get(kind)))
@@ -231,7 +244,6 @@ class DiscordBot:
                 }
             settings.show_address = legacy["show_address"]
             settings.commands_enabled = legacy["commands_enabled"]
-            settings.command_channel_ids = list(legacy["command_channel_ids"])
             settings.read_role_ids = list(legacy["read_role_ids"])
             settings.control_enabled = legacy["control_enabled"]
             settings.control_role_ids = list(legacy["control_role_ids"])
@@ -242,11 +254,12 @@ class DiscordBot:
             # value copied in above -- and if there was none to copy, it can
             # no longer announce, so say so rather than failing validation
             # the next time somebody saves the instance.
-            if settings.enabled and settings.announces_anything and not settings.channel_id:
+            if settings.enabled and not settings.channel_id:
                 settings.enabled = False
                 log.warning(
-                    "discord: %s was announcing with no channel of its own and "
-                    "there is no default any more; switched off",
+                    "discord: %s has no Discord channel of its own -- each "
+                    "server now needs one, since the channel is what tells "
+                    "the bot which server a command is about; switched off",
                     record.config.name,
                 )
             self.manager.save(record.config.id)
@@ -295,6 +308,70 @@ class DiscordBot:
         """Reconnect after the token itself changed."""
         await self.start()
 
+    async def resolve_guilds(self) -> list[str]:
+        """Fill in the guild behind each instance's channel.
+
+        The operator pastes a channel id and nothing else, but registering
+        commands needs a guild id before any interaction has arrived -- so it
+        is looked up once and stored. A lookup fails when the bot has not been
+        invited to that Discord yet, which is the ordinary first-run state and
+        is reported rather than treated as an error.
+
+        Returns the problems, in the operator's terms, for the GUI to show.
+        """
+        rest = self._rest
+        if rest is None:
+            return []
+        problems: list[str] = []
+        for record in self.manager.records:
+            settings = record.config.discord
+            if not settings.enabled or not settings.channel_id or settings.guild_id:
+                continue
+            try:
+                channel = await rest.channel(settings.channel_id)
+            except DiscordAPIError as exc:
+                problems.append(f"{record.config.name}: {exc.explain()}")
+                continue
+            guild_id = str((channel or {}).get("guild_id") or "")
+            if not guild_id:
+                problems.append(
+                    f"{record.config.name}: that channel is not in a Discord "
+                    "server (a DM cannot be used)."
+                )
+                continue
+            settings.guild_id = guild_id
+            self.manager.save(record.config.id)
+            log.info(
+                "discord: %s is in guild %s", record.config.name, guild_id
+            )
+        return problems
+
+    def reconcile_channels(self) -> None:
+        """Switch off any instance sharing a channel with an earlier one.
+
+        Channels are unique by rule, and the manager refuses to save a
+        duplicate -- but a data root written before that rule existed can hold
+        one, and so can one hand-edited. Two instances on a channel make every
+        command there ambiguous, so the later ones lose rather than the whole
+        channel becoming unanswerable.
+        """
+        seen: dict[str, str] = {}
+        for record in self.manager.records:
+            settings = record.config.discord
+            if not settings.enabled or not settings.channel_id:
+                continue
+            owner = seen.get(settings.channel_id)
+            if owner is None:
+                seen[settings.channel_id] = record.config.name
+                continue
+            settings.enabled = False
+            self.manager.save(record.config.id)
+            log.warning(
+                "discord: %s shares a channel with %s, which is no longer "
+                "allowed -- switched off. Give it a channel of its own.",
+                record.config.name, owner,
+            )
+
     async def refresh_commands(self) -> None:
         """Re-register the command sets after an instance's settings changed.
 
@@ -330,8 +407,11 @@ class DiscordBot:
         if gateway is None or rest is None or not gateway.application_id:
             return
 
+        # An instance whose guild is still unknown gets another go now that
+        # there is a connection: on a first run the bot is invited between
+        # being switched on and this point.
+        failures: list[str] = await self.resolve_guilds()
         wanted = cmd.command_guilds(self.manager)
-        failures: list[str] = []
 
         for guild_id in sorted(wanted):
             try:
@@ -390,13 +470,10 @@ class DiscordBot:
         if not interaction_id or not token:
             return
 
-        if kind == cmd.INTERACTION_AUTOCOMPLETE:
-            with contextlib.suppress(DiscordAPIError):
-                await rest.respond_to_interaction(
-                    interaction_id, token, self.router.autocomplete(interaction)
-                )
-            return
-
+        # No command takes a server argument any more, so an autocomplete
+        # interaction can only be a leftover from a stale command set in a
+        # client that has not refreshed. Ignoring it leaves the field blank,
+        # which is the truth.
         if kind != cmd.INTERACTION_COMMAND:
             return
 
