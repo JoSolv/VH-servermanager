@@ -2232,6 +2232,21 @@ with TestClient(app) as c:
     check("the invite link is built from the application id",
           APPLICATION_ID in bot.status()["invite_url"], bot.status()["invite_url"])
 
+    # The first run connects before the bot has been invited anywhere, so the
+    # registration at READY fails and Save has to be the retry.
+    httpx.post(DISCORD_BASE + "/_test/reset", trust_env=False)
+    c.post("/settings/discord", data={
+        "enabled": "1", "guild_id": GUILD, "default_channel_id": CHANNEL,
+        "commands_enabled": "1", "show_address": "1",
+        "announce": ["status", "ready", "crash", "player_join", "player_leave",
+                     "mod_update", "server_update"]})
+    check("saving settings registers the commands again, unchanged or not",
+          discord_wait(lambda: discord_state()["registered"], 10, "re-registration"),
+          discord_state()["registered"])
+    check("...without dropping the connection",
+          bot.status()["connected"] and discord_state()["identifies"] == 1,
+          discord_state()["identifies"])
+
     print("\n[discord: read commands]")
     check("/vh servers lists the server",
           "Midgard" in said(ask("servers")))

@@ -198,6 +198,9 @@ tested end to end, and the structure is meant to be built on.
   else.
 - Starting and stopping servers from Discord is **not implemented yet**, on
   purpose — see *Known gaps*.
+- Setting it up is a ten-minute walk-through in
+  [`docs/discord-setup.md`](docs/discord-setup.md); the design and its
+  reasoning are in [`docs/discord-bot.md`](docs/discord-bot.md).
 
 **Interface**
 - The instance page's sections (backups, transfer world, players,
@@ -401,7 +404,7 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 .venv/bin/python tests/smoke_test.py
 ```
 
-586 checks covering page rendering, instance creation and validation, the
+588 checks covering page rendering, instance creation and validation, the
 start/stop/restart lifecycle, the live-metrics and console websockets, CPU
 normalisation, version reporting, player detail, every moderation path, query
 socket discovery (including a socket bound to a single interface), the

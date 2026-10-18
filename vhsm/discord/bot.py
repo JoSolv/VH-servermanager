@@ -182,10 +182,16 @@ class DiscordBot:
         )
         if needs_restart:
             await self.start()
-        elif config.control_enabled != previous.control_enabled:
-            # The registered command set depends on this, since a command
-            # nobody may run is not offered at all.
-            await self._register_commands()
+            return
+
+        # Commands are registered whenever settings are saved, even when
+        # nothing about them changed. Registering is one idempotent PUT that
+        # replaces the whole set, and the first run needs the retry: the bot
+        # connects before it has been invited anywhere, so the registration
+        # at READY fails with "unknown guild" -- and then the operator clicks
+        # the invite link, comes back, and has nothing to press. Save is that
+        # button.
+        await self._register_commands()
 
     async def reload_token(self) -> None:
         """Reconnect after the token itself changed."""
