@@ -165,16 +165,22 @@ tested end to end, and the structure is meant to be built on.
   server as unreachable, and the UI says so.
 
 **Discord bot (optional)**
-- **Every setting is per instance**, and that includes *which Discord server*.
-  One bot account, and each instance names its own guild, channel,
-  announcements and permissions — so a public server can post to a community
-  Discord while a modded test server lives in a guild of three friends, sharing
-  nothing but the bot. An instance that has not been opted in says nothing and
-  answers nothing.
-- **A Discord only ever sees its own servers.** Commands are answered only in
-  the guild an instance names, and an instance in another guild cannot be
-  listed, autocompleted or addressed from there — not even by its exact name or
-  id. Without that, one leaked invite would expose every server on the host.
+- **One channel is one server.** Each instance names a Discord channel, and that
+  channel *is* its identity: announcements go there, and a command typed there
+  is about that server. So the commands take no server argument — `/vh status`
+  in `#midgard` answers for Midgard — and no two instances may share a channel.
+  A public server can post to a community Discord while a modded test server
+  lives in a guild of three friends, sharing nothing but the bot account.
+- **A channel can reach nothing but its own server.** There is no command that
+  lists the other servers, reports the manager's version or the shared game
+  install's build, or reveals that any of it exists. The people in a server's
+  channel are its players; `/vh status`, `/vh players`, `/vh mods` and
+  `/vh player` are the whole surface, and each is about that one server. A
+  channel with no server behind it gets one sentence saying so.
+- **Everything else is per instance too** — announcements, who may ask, whether
+  the join address is shared, and (later) who may control it. You paste one
+  channel ID per server; the Discord server it belongs to is looked up from it
+  rather than asked for.
 - It announces what the manager already knows: a server starting, up and
   accepting players, stopping or crashing (with the exit code); players joining,
   leaving and dying; a mod with a newer version; mods changed but not loaded
@@ -189,11 +195,10 @@ tested end to end, and the structure is meant to be built on.
 - Announcements are *changes*, not state. A manager restart does not re-announce
   the world it just re-read, a flapping reachability probe is held until three
   samples agree, and the same news is never posted twice.
-- Read-only slash commands: `/vh servers`, `/vh status`, `/vh players`,
-  `/vh mods`, `/vh player <name>` (from the roster, so it works for somebody who
-  left an hour ago) and `/vh version`. The server argument autocompletes from
-  the instances visible in *that* Discord and can be left out when only one is.
-  Each guild gets its own command menu, listing only what is usable there.
+- Read-only slash commands, all of them about the channel's own server and
+  taking no server argument: `/vh status`, `/vh players`, `/vh mods` and
+  `/vh player <name>` (from the roster, so it works for somebody who left an
+  hour ago).
 - **It opens no port.** Commands arrive over a websocket the manager dials out
   on, not over an HTTP endpoint Discord posts to, so there is nothing to forward
   and no certificate to get — which is what makes it work on a box behind NAT
@@ -419,7 +424,7 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 .venv/bin/python tests/smoke_test.py
 ```
 
-614 checks covering page rendering, instance creation and validation, the
+622 checks covering page rendering, instance creation and validation, the
 start/stop/restart lifecycle, the live-metrics and console websockets, CPU
 normalisation, version reporting, player detail, every moderation path, query
 socket discovery (including a socket bound to a single interface), the
@@ -443,12 +448,14 @@ typed validation, per-setting and whole-file resets, and the path guards on
 every file it touches), and the whole Discord integration: the gateway
 handshake, its reconnect and its refusal to retry a rejected token, command
 registration in several guilds at once and its removal when a guild stops being
-used, every read command and its autocomplete, **two instances in two unrelated
-Discords neither of which can see the other's server by name or by id**, the
-per-instance permission gate at each of its gates (guild, channel, read role,
-commands switch, and the control tier that is not shipped yet, including that an
-empty control allowlist means nobody and that switching control on for one
-server does not unlock another), cooldowns, token handling (environment over
+used, every read command and its autocomplete, **two servers in two channels, neither reachable
+from the other's channel, with a stray server argument ignored rather than
+obeyed**, the guild being looked up from the channel rather than typed, the
+refusal of two servers sharing a channel, the per-instance permission gate at
+each of its gates (channel, guild, read role, commands switch, and the control
+tier that is not shipped yet, including that an empty control allowlist means
+nobody and that switching control on for one server does not unlock another),
+cooldowns, token handling (environment over
 file, `0600`, never echoed), event derivation from samples (first sight and
 start-up are silent, reachability must agree three times, each notice and mod
 release announced once), per-instance announcement routing and the fan-out of
@@ -481,14 +488,17 @@ built to be the narrow end of that. It only ever dials out — there is no
 inbound endpoint — and what it will do for somebody in a channel is limited on
 purpose:
 
-- **Each instance answers in one Discord server: its own.** An instance in
-  another guild cannot be listed, autocompleted or addressed from here, by name
-  or by id, and a guild with nothing mapped to it is told only that. A leaked
-  invite therefore exposes at most the servers that deliberately live there,
-  and never the rest of the host.
-- Commands can be restricted to named channels and named roles, **per
-  instance**. Empty means "whatever Discord already allows in that channel",
-  which is the sensible default for read-only questions.
+- **A channel reaches exactly one server: the one that names it.** There is no
+  argument to pass, nothing to autocomplete and no command that enumerates
+  anything, so a leaked invite exposes at most the one server that channel is
+  for. A channel with no server behind it is told only that, which is also what
+  somebody without the right role is told.
+- **Nothing manager-level is reachable from Discord.** No command reports the
+  manager's version, the shared game install's build, or that other servers
+  exist. Players in a channel see their own server and no further.
+- Commands can be restricted to named roles **per instance**. Empty means
+  "whoever can see the channel", which is Discord's own gate and the sensible
+  default for read-only questions.
 - The commands that exist today only *read*. Nothing in Discord can start,
   stop or reconfigure a server.
 - The bot token is kept in its own `0600` file (or `VHSM_DISCORD_TOKEN`), is
@@ -524,6 +534,10 @@ way.
 - The Discord bot holds no outbox: an announcement that happens while the
   gateway is reconnecting, or while Discord is refusing the channel, is dropped
   rather than queued. The Settings page says when posting last failed.
+- Two servers cannot share a Discord channel, since the channel is how a
+  command is matched to a server. The manager refuses to save a duplicate, and
+  switches off the later of any pair it finds in a data root written before
+  that rule existed.
 - Removing the last instance from a Discord server takes its `/vh` commands
   away, but only if the manager is running when you do it: one unmapped while
   the manager was stopped keeps a stale command menu until something is mapped

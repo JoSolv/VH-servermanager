@@ -30,6 +30,8 @@ from fastapi.responses import JSONResponse, Response
 #: rejects a bad token, so that path can be tested too.
 GOOD_TOKEN = "fake-token-for-tests"
 APPLICATION_ID = "111111111111111111"
+#: Guild reported for a channel nothing more specific was said about.
+DEFAULT_GUILD = "222222222222222222"
 BOT_USER = {"id": APPLICATION_ID, "username": "vhsm-test", "discriminator": "0"}
 
 
@@ -55,6 +57,8 @@ class FakeDiscord:
         #: a token revoked under a running bot, which must make it stop rather
         #: than reconnect forever.
         self.gateway_rejects = False
+        #: channel id -> guild id, for the channel lookup.
+        self.channel_guilds: dict[str, str] = {}
 
         self._socket: WebSocket | None = None
         self._sequence = 0
@@ -75,6 +79,11 @@ class FakeDiscord:
     @property
     def connected(self) -> bool:
         return self._socket is not None
+
+    #: Which guild each channel is reported as belonging to. A test sets this
+    #: to put two channels in two different Discords.
+    def guild_for_channel(self, channel_id: str) -> str:
+        return self.channel_guilds.get(channel_id, DEFAULT_GUILD)
 
     def reset(self) -> None:
         """Forget what has been recorded, keeping the connection."""
@@ -104,6 +113,26 @@ class FakeDiscord:
             if not _authorised(request):
                 return JSONResponse({"message": "401: Unauthorized"}, status_code=401)
             return BOT_USER
+
+        @app.get(prefix + "/channels/{channel_id}")
+        async def get_channel(channel_id: str, request: Request):
+            """Which guild a channel is in, which is how the bot finds it.
+
+            A channel id starting with 888 stands in for one the bot cannot
+            see -- not invited to that Discord, or no View Channel -- so that
+            path has a way to happen.
+            """
+            if not _authorised(request):
+                return JSONResponse({"message": "401: Unauthorized"}, status_code=401)
+            if channel_id.startswith("888"):
+                return JSONResponse(
+                    {"message": "Unknown Channel", "code": 10003}, status_code=404
+                )
+            return {
+                "id": channel_id,
+                "type": 0,
+                "guild_id": self.guild_for_channel(channel_id),
+            }
 
         @app.post(prefix + "/channels/{channel_id}/messages")
         async def create_message(channel_id: str, request: Request):
@@ -188,6 +217,15 @@ class FakeDiscord:
         async def reset():
             self.reset()
             return {"ok": True}
+
+        @app.post("/_test/channel-guild")
+        async def channel_guild(request: Request):
+            """Say which guild a channel belongs to."""
+            body = await request.json()
+            self.channel_guilds.update(
+                {str(k): str(v) for k, v in (body or {}).items()}
+            )
+            return {"channel_guilds": self.channel_guilds}
 
         @app.post("/_test/reject-gateway")
         async def reject_gateway(request: Request):

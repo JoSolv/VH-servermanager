@@ -93,13 +93,17 @@ class InstanceDiscord:
     #: Master switch for this instance. Off means it is neither announced nor
     #: answerable, whatever else is set here.
     enabled: bool = False
-    #: Which Discord server this instance lives in. This is the scope of
-    #: everything else: announcements go to a channel in it, and commands are
-    #: only answered -- and this instance only even *named* -- in it. An
-    #: instance in another guild is invisible from here, which is the point.
-    guild_id: str = ""
-    #: Where this instance's announcements go.
+    #: **The channel is this instance's identity in Discord.** Announcements go
+    #: here, and a command typed here can only mean this server -- which is
+    #: why the commands take no server argument and why no two instances may
+    #: share a channel. Required whenever this instance uses Discord at all.
     channel_id: str = ""
+    #: Which Discord server that channel is in. Not typed in by hand: it is
+    #: looked up from the channel and stored, because command registration
+    #: needs a guild id before any interaction has arrived. Blank means the
+    #: lookup has not succeeded yet -- usually the bot has not been invited to
+    #: that Discord.
+    guild_id: str = ""
 
     # -- announcements --------------------------------------------------- #
     #: Per-event-kind switches, keyed by the constants in :mod:`vhsm.events`.
@@ -115,11 +119,8 @@ class InstanceDiscord:
     # -- commands --------------------------------------------------------- #
     #: Whether commands answer about this instance at all.
     commands_enabled: bool = True
-    #: Channels where commands about this instance are answered. Empty means
-    #: any channel the bot can see in this instance's guild.
-    command_channel_ids: list[str] = field(default_factory=list)
     #: Roles allowed to ask about this instance. Empty means anyone who can
-    #: already see an allowed channel, which is Discord's own gate.
+    #: see its channel, which is Discord's own gate and usually the right one.
     read_role_ids: list[str] = field(default_factory=list)
 
     # -- control (start/stop/restart) -------------------------------------- #
@@ -153,15 +154,22 @@ class InstanceDiscord:
 
     @property
     def answers_commands(self) -> bool:
-        return self.enabled and self.commands_enabled and bool(self.guild_id)
+        """Whether a command typed in this instance's channel is answered.
+
+        Needs the channel, since that is how the interaction is matched, and
+        the guild, since that is where the command had to be registered.
+        """
+        return (
+            self.enabled
+            and self.commands_enabled
+            and bool(self.channel_id)
+            and bool(self.guild_id)
+        )
 
     def validate(self) -> None:
         """Reject what Discord would, and what would silently do nothing."""
         self.guild_id = normalise_id(self.guild_id, "Discord server (guild) ID")
         self.channel_id = normalise_id(self.channel_id, "Channel ID")
-        self.command_channel_ids = normalise_ids(
-            self.command_channel_ids, "Command channel ID"
-        )
         self.read_role_ids = normalise_ids(self.read_role_ids, "Read role ID")
         self.control_role_ids = normalise_ids(self.control_role_ids, "Control role ID")
         self.control_user_ids = normalise_ids(self.control_user_ids, "Control user ID")
@@ -171,18 +179,14 @@ class InstanceDiscord:
             kind: bool(self.announce.get(kind, DEFAULT_ANNOUNCE.get(kind, False)))
             for kind in KINDS
         }
-        if self.enabled and not self.guild_id:
+        # The channel is the identity, not just a destination: it is where
+        # announcements go *and* how a command is matched to this server. So
+        # it is required outright rather than only when announcing.
+        if self.enabled and not self.channel_id:
             raise DiscordConfigError(
-                "This server needs the Discord server (guild) ID it belongs to."
-            )
-        # Announcements with nowhere to go used to fall back to a manager-wide
-        # default channel. There is no such thing any more -- the whole point
-        # of per-instance settings is that there is no shared destination --
-        # so this is refused rather than quietly doing nothing.
-        if self.announces_anything and not self.channel_id:
-            raise DiscordConfigError(
-                "Announcements need a channel ID. Pick one, or switch every "
-                "announcement off to use commands only."
+                "This server needs the ID of its Discord channel. That channel "
+                "is what identifies it: announcements go there, and a command "
+                "typed there is about this server."
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -258,7 +262,6 @@ def legacy_settings(data_root: Path) -> dict[str, Any]:
         "announce": payload.get("announce") or {},
         "show_address": bool(payload.get("show_address", True)),
         "commands_enabled": bool(payload.get("commands_enabled", True)),
-        "command_channel_ids": payload.get("command_channel_ids") or [],
         "read_role_ids": payload.get("read_role_ids") or [],
         "control_enabled": bool(payload.get("control_enabled", False)),
         "control_role_ids": payload.get("control_role_ids") or [],

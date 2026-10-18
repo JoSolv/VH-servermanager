@@ -1,11 +1,12 @@
 # Design note: a built-in Discord bot
 
-Status: **announcements and read-only commands implemented, every setting per
-instance.** One bot account; each instance names its own Discord server,
-channel, announcements and permissions, and a Discord only ever sees its own
-servers. Control commands are deliberately not here: the permission tier they
-need is built, enforced and tested, but no command uses it yet. See
-[Phases](#phases) at the end for what landed and what did not.
+Status: **announcements and read-only commands implemented, scoped per
+channel.** One bot account; each instance names a Discord channel, and that
+channel is its identity -- a command typed there is about that server, takes no
+arguments, and can reach nothing else. No command reports anything about the
+manager or the other servers. Control commands are deliberately not here: the
+permission tier they need is built, enforced and tested, but no command uses it
+yet. See [Phases](#phases) at the end for what landed and what did not.
 
 This note is the design, kept as the record of *why* it is shaped this way.
 Where the implementation settled somewhere different from the proposal, the
@@ -59,165 +60,74 @@ The event switches moved for a plainer reason: a busy public server wants to
 say nothing about joins while a server of four friends wants to say everything,
 and that is a per-server fact after all, not a taste.
 
-### What the guild scopes
+### The channel is the identity
 
-An interaction arrives from one guild. The instances in scope are the ones
-whose own settings name that guild *and* whose channel and role allowlists let
-this caller ask. Everything works from that set:
+The first cut scoped by guild and gave every command a `server` argument. That
+was still too wide, and the correction is the one that makes the feature make
+sense: **the channel identifies the server.**
 
-- `/vh servers` lists it, and nothing else
-- `/vh status` with no argument defaults to it when it holds one instance
-- autocomplete offers only its names
-- `/vh player` searches only its rosters
-- an instance outside it is unreachable **by name or by id**, and the refusal
-  is the same one a typo gets
+An interaction arrives in one channel. At most one instance names that channel
+-- the manager refuses to save two that do -- so resolving the target is a
+lookup, not a search, and it happens before any handler runs. From there:
 
-A guild with nothing mapped to it is told only "no servers here are set up to
-answer you" — which covers "none configured", "commands off", "wrong channel"
-and "wrong role" with one sentence that reveals none of them. This is the
-property that makes the feature safe to hand to somebody else's Discord: a
-leaked invite exposes at most what deliberately lives there.
+- no command takes a server argument, so there is nothing to autocomplete and
+  nothing to enumerate for the autocompleter to leak
+- `/vh status` in `#midgard` answers for Midgard, full stop
+- `/vh player` searches that one server's roster
+- a channel with no instance behind it gets "no Valheim server is set up for
+  this channel", which is also what somebody without the right role gets, so
+  the refusal distinguishes nothing
 
-Command registration follows the same scope. Each guild gets its own `PUT
-/applications/{app}/guilds/{guild}/commands` built from the instances mapped to
-it, so two Discords get two menus; and a guild that stops having any instance
-has its commands removed rather than left answering "no servers here" forever.
+The guild is still checked, as a second condition: a channel id reused in
+another Discord, or left stale after a move, must not match. But it is no
+longer something the operator types -- it is looked up from the channel with
+`GET /channels/{id}` and stored, because registering commands needs a guild id
+before any interaction has arrived. One pasted id per server instead of two,
+and a lookup that fails says "the bot cannot see that channel", which is a
+better first-run error than silence.
 
-## Transport: the gateway, outbound only
+**And nothing manager-level is reachable.** `/vh servers` and `/vh version`
+were both removed: the first enumerated the host's servers, the second reported
+the manager's build and the shared game install's. The people in a server's
+channel are its players, and none of that is theirs. What is left --
+`status`, `players`, `mods`, `player` -- is four questions about one server.
 
-Discord offers two ways to receive a slash command:
-
-- **An HTTP interactions endpoint.** Discord POSTs to a public HTTPS URL that
-  you verify with an ed25519 signature.
-- **The gateway.** A websocket the bot opens *outbound*, over which Discord
-  delivers `INTERACTION_CREATE` like any other event.
-
-**The gateway, and it is not close.** This manager binds to `127.0.0.1` by
-default and has no authentication precisely because it can start processes on
-the host; the typical deployment is a TrueNAS or Unraid box behind NAT. An
-interactions endpoint would require publishing an HTTPS URL from that machine,
-which is the one thing the current security posture is built to avoid. The
-gateway needs no inbound port, no certificate and no DNS.
-
-Replies go back over plain REST (`POST /interactions/{id}/{token}/callback`),
-so the socket is only ever read.
-
-### No new dependencies
-
-- `httpx` is already a direct dependency, and that is the whole REST side.
-- `websockets` is already installed, as part of `uvicorn[standard]`. It should
-  be pinned explicitly in `requirements.txt` rather than leaned on as a
-  transitive — nothing new gets downloaded, the dependency just stops being
-  accidental.
-
-That makes `discord.py` a question worth asking rather than an obvious yes. It
-would handle gateway resume, rate-limit buckets and command registration for
-us. Against it: it is a large surface for the six commands we want, it brings
-`aiohttp` alongside the `httpx` already here, and this project hand-rolls the
-A2S binary protocol, nftables counters and BepInEx's config format rather than
-taking a dependency for each. A minimal gateway client is about 300 lines and
-in character. **Recommendation: hand-rolled, with `discord.py` as the fallback
-if the reconnect edge cases turn out worse than they read.**
-
-### Slash commands only, so no privileged intents
-
-Prefix commands (`!status`) require the **Message Content** intent, which is
-privileged and needs justification to Discord once a bot is in more than a
-handful of guilds. Slash commands need **no intents at all** — the identify
-can send `intents: 0`. One less thing that can be switched off underneath a
-working install.
-
-## Where the announcements come from
-
-The manager already produces everything needed; almost none of this is new
-monitoring. A small `vhsm/events.py` — an `EventBus` shaped like the existing
-`Hub`, with typed events instead of snapshot JSON — is fed from the places
-listed below. The Discord bot is one subscriber; a webhook sink or an email
-sink later would be another.
-
-Routing happens at the far end, in the announcer, and every destination belongs
-to an instance. An event about one instance goes to that instance's channel if
-that instance announces that kind of thing. An event about *no* instance — a new
-Valheim build, the manager restarting — has no single home now that there is no
-manager-wide channel, so it fans out to each distinct channel among the
-instances that want it: two servers sharing a channel get one message, two
-servers in two Discords get one each. One channel refusing a message does not
-stop the others, since on a manager-wide event they belong to different
-Discords and one lost permission is no reason for the rest to hear nothing.
-
-| Announcement | Where it comes from today |
-|---|---|
-| starting / running / stopped / crashed | `Supervisor.status` transitions |
-| "ready", as opposed to "the process exists" | `record.listening` **or** `record.query_answered` |
-| crash detail | `supervisor.exit_code`, `supervisor.last_error` |
-| recognised failures (missing libraries, no user account) | `supervisor.notices`, already keyed for change detection |
-| player joined, by character name | `PlayerTracker` `named` event |
-| player left, with time played | `PlayerTracker` `disconnect` event |
-| player died | `PlayerTracker` `died` event (the tracker already spots `ZDOID … 0`) |
-| mods changed since the server started | `record.restart_pending` |
-| a mod has a newer version | `record.mod_notices`, key `mod-updates:<pkg>-<ver>` |
-| scheduled mod check result | `ModUpdateRun.summary()`, already one human sentence |
-| a server build is published | `manager.check_update()` |
-| update installed, instances restarted | `run_update()` |
-| reachable / unreachable from outside | `record.reachable` (tri-state) |
-| automatic snapshot taken | `_auto_snapshot()` |
-| the manager itself started or stopped | app lifespan |
-
-That "or" is a correction to the original proposal, which said `listening`
-alone. `listening` is the stronger fact -- the kernel saying the process holds
-its game port -- but it is only recomputed on the external reachability pass,
-every fifteen sampling ticks, so a "your server is up" gated on it alone lands
-up to half a minute late. Whether the Steam query socket has answered says the
-same thing for a player's purposes and is refreshed every three ticks, so
-either will do and the sooner one usually wins. `query_answered` was added to
-the instance snapshot for this, and is a useful fact in its own right.
-
-Two things are worth getting right rather than shipping naively:
-
-- **Flapping.** `reachable` is a UDP round trip and will fail transiently.
-  Announce only after N consecutive samples agree, not on every change.
-- **A burst at boot.** Nothing should re-announce state that merely became
-  visible again because the manager restarted. Transitions are only announced
-  when both sides were observed *in this run*, with a short quiet period after
-  startup — the same "recognised in this run" rule `IssueWatcher` already uses.
-
-### Sources needing a small change
-
-- `PlayerTracker` takes a single `on_event` callback and the manager has
-  already spent it on `roster.observe`. It needs to fan out to two listeners.
-- `InstanceManager.submit()` should take an optional `actor` (default `"web"`),
-  so an announcement can say *restarted by @someone* and the audit trail has a
-  name in it. This is the same hook the audit log needs, so it pays twice.
+Command registration still happens per guild (`PUT
+/applications/{app}/guilds/{guild}/commands`), since that is the only
+granularity Discord offers, and a guild that stops having any instance has its
+commands removed rather than left answering "no server here" forever.
 
 ## Command surface
 
-Namespaced under one command so it never collides with another bot:
+Namespaced under one command so it never collides with another bot, and every
+one of them is about the server whose channel it was typed in. None takes a
+server argument; none reports anything beyond that server.
 
 **Read**
 
 | Command | Answers with |
 |---|---|
-| `/vh servers` | every instance, one line each: state, players, version |
-| `/vh status [server]` | state, uptime, version, players *n*/*max*, join address, mod count, whether a restart is pending |
-| `/vh players [server]` | who is on, character name, time played, platform |
-| `/vh mods [server]` | active mods and versions, and what has an update |
-| `/vh player <name>` | from the roster: sessions, total time played, last seen — works for someone who left an hour ago, which is the whole point of the roster |
-| `/vh version` | manager build, running server build, installed vs newest Steam build |
+| `/vh status` | state, uptime, version, players *n*/*max*, join address, mod count, whether a restart is pending |
+| `/vh players` | who is on, character name, time played, platform |
+| `/vh mods` | active mods and versions, and what has an update |
+| `/vh player <name>` | from the roster: sessions, total time played, last seen -- works for someone who left an hour ago, which is the whole point of the roster |
 
-**Control** — off until switched on, and separately gated
+**Control** -- off until switched on, and separately gated
 
 | Command | Notes |
 |---|---|
-| `/vh start [server]` | |
-| `/vh restart [server]` | |
-| `/vh stop [server]` | asks for confirmation with a button when anyone is online; a stop disconnects people |
+| `/vh start` | |
+| `/vh restart` | |
+| `/vh stop` | asks for confirmation with a button when anyone is online; a stop disconnects people |
 
-`[server]` is optional when only one instance is visible in that guild, and
-autocompletes from the visible ones otherwise (autocomplete is just another
-interaction type over the same socket).
+**Removed on purpose:** `/vh servers`, which listed every instance the host
+runs, and `/vh version`, which reported the manager's own build and the shared
+game install's. Both answered questions the players in one server's channel
+have no business asking. The server's own version is in `/vh status`, where it
+belongs.
 
-Control commands reply immediately — `submit()` returns as soon as the task is
-owned by the manager — and the *completion* arrives through the announcement
+Control commands reply immediately -- `submit()` returns as soon as the task is
+owned by the manager -- and the *completion* arrives through the announcement
 path, which is already watching the status transition. No polling in the bot.
 
 ### Optional: a sticky status message
@@ -246,21 +156,22 @@ commands themselves are not shipped:
   instance matters: a test server can be restartable by its three users while
   the public one is restartable by nobody, which is not expressible with a
   single switch.
-- **Each instance pinned to its own guild.** *Built.* An interaction can only
-  reach instances whose own settings name the guild it came from, so a token
-  that leaks or an invite into a second Discord reaches at most the servers
-  that deliberately live there — not the host. An instance elsewhere is not
-  merely unlisted: it cannot be named or addressed by id either, and the
-  refusal is the one a typo gets.
-- **Channel allowlist, per instance.** *Built.* Commands about an instance are
-  only honoured in the channels it lists. Discord's own channel permissions are
-  the first gate; this is the second, because the bot's permissions are managed
-  by Discord admins and this list is managed by the operator.
+- **Each instance reachable only from its own channel.** *Built.* An
+  interaction resolves to the single instance that names the channel it came
+  from, so a token that leaks or an invite into a second Discord reaches at
+  most the one server that channel is for — never the host, never the others.
+  There is no argument that could name anything else and no command that
+  enumerates anything, so there is nothing to probe with.
+- **Nothing manager-level in reach.** *Built.* No command reports the manager's
+  version, the shared install's build, or that other servers exist. This is a
+  narrower surface than "the commands are read-only": a read-only command that
+  lists every server on the host still tells a stranger how much there is to
+  attack.
 - **Role and user allowlists, per instance, separately for read and control.**
-  *Built.* By role id and user id, not "whoever can see the channel". An empty
-  read allowlist means anyone in an allowed channel; an empty *control*
-  allowlist means nobody, which is the asymmetry that matters and is tested as
-  such. Two instances in one guild can have different answers.
+  *Built.* By role id and user id. An empty read allowlist means anyone who can
+  see the channel, which is Discord's own gate; an empty *control* allowlist
+  means nobody, which is the asymmetry that matters and is tested as such. Two
+  instances in one Discord can have different answers.
 - **A cooldown per user and per instance**, so `restart` cannot be held down.
   *Built* (`Cooldowns`), unused until there is a control command to limit.
 - **An audit trail.** *Half built.* `submit()` takes an `actor`, so every
@@ -342,8 +253,9 @@ change. `VHSM_DISCORD_API_BASE` points the whole integration at
 `tools/fake_discord.py`, which serves a stub gateway and REST surface on
 loopback -- exactly as `tools/fake_valheim_server.py` stands in for the real
 binary. It records what the bot said and gives the suite a door of its own
-(`/_test/dispatch`, `/_test/drop`, `/_test/reject-gateway`) to put events and
-failures in front of it.
+(`/_test/dispatch`, `/_test/drop`, `/_test/reject-gateway`,
+`/_test/channel-guild`) to put events, failures and channel-to-guild mappings
+in front of it.
 
 What is covered:
 
@@ -351,27 +263,46 @@ What is covered:
   and stopping rather than retrying on `4004` -- including a token revoked
   while the bot is running, which is the failure most likely to happen for
   real
-- every read command, its refusals, and the `server` argument's autocomplete
-- the gate at each of its gates: guild, channel, read role, and the control
-  tier -- including that an empty control allowlist means nobody while an
-  empty *read* allowlist means anyone, which is the asymmetry worth a test
+- every read command, answering with no argument for the channel it was typed
+  in, and a stray `server:` value being ignored rather than obeyed
+- **two servers in two channels, neither reachable from the other's channel**,
+  a channel id from the wrong Discord not matching, and a channel with no
+  server behind it getting one sentence
+- that no command lists the servers or reports a manager or Steam version, that
+  none takes a server argument, and that nothing needs autocompleting
+- the guild being looked up from the channel rather than typed, a channel the
+  bot cannot see being reported and answering no commands until fixed, and two
+  servers sharing a channel being refused
+- the per-instance gate at each of its gates (channel, guild, read role,
+  commands switch, and the control tier that is not shipped yet, including that
+  an empty control allowlist means nobody and that switching control on for one
+  server does not unlock another)
 - cooldowns, per user and per server
 - token handling: environment over file, `0600`, a pasted `Bot "..."` cleaned
   up, and never echoed back
-- event derivation from synthetic samples, which is where the conservatism
-  gets checked: first sight and the start-up window are silent, reachability
-  must agree three times, and each notice, release and restart-pending state
-  is announced once
-- channel routing: the instance's own channel, the fallback to the default,
-  and silence for an instance that never opted in
+- event derivation from synthetic samples, which is where the conservatism gets
+  checked: first sight and the start-up window are silent, reachability must
+  agree three times, and each notice, release and restart-pending state is
+  announced once
+- per-channel announcement routing, the fan-out of manager-wide events to every
+  channel that wants them, and silence for a server that never opted in
 - a channel Discord refuses, reported on the Settings page rather than
   crashing the bot or stopping the manager
+- the one-time move of the old manager-wide settings down onto the instances,
+  including that the old default channel can only go to one of them and the
+  rest are switched off rather than left broken
 
 One seam is deliberately tested by hand rather than in the suite: driving a
 real server start through to a real "ready" announcement. The suite asserts the
 watcher's logic against synthetic snapshots instead, because a real start/stop
 cycle is twenty-odd seconds of test time for one assertion the unit checks
 already make.
+
+A lesson from building this, worth keeping: half the assertions here are of the
+form "the *other* server is not mentioned", and those pass against a reply that
+never arrived. A broken handler once looked like correct scoping across a dozen
+checks. `ask()` now reports a missing reply as its own failure, so that cannot
+happen quietly again.
 
 ## What it will not do, and why
 
@@ -402,10 +333,17 @@ ask for:
    per-kind switches, and the flapping and boot-burst rules above.
 2b. **Everything per instance** -- *done, after the fact.* The guild, the
    channel, the switches, the command toggle, the permissions and the address
-   setting all moved from the manager onto the instance, and the guild became
-   the scope of command visibility. The manager keeps the token and an on/off
-   switch. A one-time migration moves an existing setup down, so an upgrade
-   does not silently stop a working bot.
+   setting all moved from the manager onto the instance. The manager keeps the
+   token and an on/off switch. A one-time migration moves an existing setup
+   down, so an upgrade does not silently stop a working bot.
+2c. **Scoped per channel, and narrowed** -- *done, after that.* The channel
+   became the instance's identity rather than one of its settings: commands
+   lost their `server` argument and their autocomplete, `/vh servers` and
+   `/vh version` were removed as manager-level, and channels became unique
+   across instances. The guild stopped being typed in and is looked up from
+   the channel instead. This is the version worth copying if the design is
+   ever rebuilt: the first two cuts were both wider than the thing people
+   actually want, which is "this channel is my server".
 3. **Control** -- *not done, on purpose.* The `control` tier exists in the
    command table, `check_allowed` enforces it (guild, then channel, then role
    or user, with an empty allowlist meaning nobody), `Cooldowns` is written,
@@ -417,11 +355,18 @@ ask for:
 4. **Extras** -- partly done. `/vh mods`, `/vh player`, autocomplete and death
    announcements landed with phases 1-2. The sticky status message did not.
 
-What phase 2b cost, and is worth saying plainly: there are no shared defaults.
-Every instance's switches are its own, which is the point, but setting up the
-fifth server in the same Discord means ticking the same boxes a fifth time. A
-"copy settings from another server" button, or a set of defaults applied to new
-instances, is the obvious answer and was left out rather than guessed at.
+What this cost, and is worth saying plainly:
+
+- **No shared defaults.** Every instance's switches are its own, which is the
+  point, but setting up the fifth server means ticking the same boxes a fifth
+  time. A "copy settings from another server" button, or defaults applied to
+  new instances, is the obvious answer and was left out rather than guessed at.
+- **One channel per server, strictly.** Two instances cannot post to one
+  channel, because the channel is how a command is matched. An operator who
+  wanted a single `#servers` channel for everything cannot have it: they would
+  have to give up commands, or give one server the channel and the rest none.
+  That is the price of commands that need no arguments, and it seems the right
+  way round -- but it is a real constraint, not an oversight.
 
 ### Adding a control command
 
@@ -429,20 +374,23 @@ The extension point is deliberate. One entry in `COMMANDS`:
 
 ```python
 "restart": Command(
-    name="restart", description="Restart a server", tier="control",
-    handler=_restart, takes_server=True, defer=True,
+    name="restart", description="Restart this server", tier="control",
+    handler=_restart, defer=True,
 ),
 ```
 
-and a handler that resolves the instance and hands it to the manager with the
+and a handler that hands the channel's instance to the manager with the
 caller's name attached:
 
 ```python
 async def _restart(ctx: CommandContext) -> dict[str, Any]:
-    record = _resolve(ctx)
+    record = ctx.record
     ctx.manager.submit(record.config.id, "restart", actor=ctx.actor())
     return _message(f"Restarting **{record.config.name}**...")
 ```
+
+`ctx.record` is the instance that owns the channel, resolved before the handler
+runs -- so there is nothing to look up and no way to address anything else.
 
 The gate, the cooldown and the audit entry all happen before the handler is
 reached, because the command's tier is `"control"`. The completion needs no

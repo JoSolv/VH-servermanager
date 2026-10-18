@@ -8,7 +8,6 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..discord import config as discord_config
-from ..discord.config import InstanceDiscord
 from ..discord.rest import DiscordAPIError
 from ..events import KINDS
 from ..instance import MODIFIER_KEYS, PRESETS, InstanceConfig, ValidationError
@@ -326,15 +325,17 @@ async def save_instance_discord(request: Request, instance_id: str) -> HTMLRespo
     before = record.config.discord.to_dict()
 
     chosen = set(form.getlist("announce"))
+    channel_id = str(form.get("channel_id") or "").strip()
     changes = {
         "discord": {
             **before,
             "enabled": form.get("enabled") is not None,
-            "guild_id": str(form.get("guild_id") or ""),
-            "channel_id": str(form.get("channel_id") or ""),
+            "channel_id": channel_id,
+            # Not asked for: it is looked up from the channel. Cleared when the
+            # channel changes so the lookup happens again for the new one.
+            "guild_id": before["guild_id"] if channel_id == before["channel_id"] else "",
             "show_address": form.get("show_address") is not None,
             "commands_enabled": form.get("commands_enabled") is not None,
-            "command_channel_ids": str(form.get("command_channel_ids") or ""),
             "read_role_ids": str(form.get("read_role_ids") or ""),
             # An unchecked box submits nothing, so the switched-on kinds are
             # exactly the ones present.
@@ -346,25 +347,29 @@ async def save_instance_discord(request: Request, instance_id: str) -> HTMLRespo
     except ValidationError as exc:
         return _instance_discord(request, instance_id, error=str(exc))
 
-    settings = manager.get(instance_id).config.discord
-    # The guild decides which command menus exist and what is in them, so a
-    # change to either has to reach Discord rather than waiting for a restart.
-    if (settings.guild_id != before["guild_id"]
-            or settings.answers_commands != InstanceDiscord.from_dict(before).answers_commands
-            or settings.control_enabled != before["control_enabled"]):
-        await bot.refresh_commands()
+    # Look the guild up from the channel, then re-register: a guild's command
+    # menu is built from the instances mapped to it, so both have to happen
+    # now rather than at the next restart.
+    problems = await bot.resolve_guilds()
+    await bot.refresh_commands()
 
+    settings = manager.get(instance_id).config.discord
     if not settings.enabled:
         return _instance_discord(
             request, instance_id, message="This server will not use Discord."
         )
+    mine = [p for p in problems if p.startswith(record.config.name + ":")]
+    if mine:
+        return _instance_discord(
+            request, instance_id,
+            error=f"Saved, but the bot cannot see that channel. {mine[0].split(': ', 1)[-1]}",
+        )
     announcing = sum(1 for kind in KINDS if settings.announce.get(kind))
-    parts = [f"{announcing} announcement type(s) to channel {settings.channel_id}"
-             if announcing else "no announcements"]
+    parts = [f"{announcing} announcement type(s)" if announcing else "no announcements"]
     parts.append("commands on" if settings.commands_enabled else "commands off")
     return _instance_discord(
         request, instance_id,
-        message=f"Saved: {', '.join(parts)}.",
+        message=f"Saved for channel {settings.channel_id}: {', '.join(parts)}.",
     )
 
 

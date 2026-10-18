@@ -113,21 +113,24 @@
   {# ------------------------------------------------------------------ #}
   <h3>Per-server settings</h3>
   <p class="subtle" style="margin-top:0">
-    Each instance has its own Discord server, channel, announcements and
-    permissions, on its own page. They need share nothing but this bot account.
+    Each instance has its own Discord channel, announcements and permissions, on
+    its own page. <strong>The channel is what identifies a server</strong>: a
+    command typed there is about that server and nothing else, so no two may
+    share one. They need share nothing but this bot account.
   </p>
   {% if discord.instances %}
     <table>
-      <tr><th>Server</th><th>Discord</th><th>Announces</th><th>Commands</th></tr>
+      <tr><th>Server</th><th>Channel</th><th>Announces</th><th>Commands</th></tr>
       {% for row in discord.instances %}
         <tr>
           <td><a href="/instances/{{ row.id }}">{{ row.name }}</a></td>
           <td>
             {%- if not row.enabled %}<span class="muted">not used</span>
-            {%- elif row.guild_id %}
-              <code>{{ row.guild_id }}</code>
-              {%- if row.channel_id %} &rarr; <code>{{ row.channel_id }}</code>{% endif -%}
-            {%- else %}<span class="tag upd">no Discord server set</span>{% endif -%}
+            {%- elif not row.channel_id %}<span class="tag upd">no channel set</span>
+            {%- elif row.unresolved %}
+              <code>{{ row.channel_id }}</code>
+              <span class="tag upd">bot cannot see it</span>
+            {%- else %}<code>{{ row.channel_id }}</code>{% endif -%}
           </td>
           <td>
             {%- if not row.enabled %}<span class="muted">&mdash;</span>

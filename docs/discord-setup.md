@@ -4,11 +4,13 @@ A walk-through from an empty Discord server to a bot that announces what your
 Valheim servers are doing and answers questions about them. About ten minutes,
 most of it clicking around Discord's website.
 
-**Each server is configured separately, including which Discord it belongs to.**
-One bot account serves the whole manager, but a public server can post to a
-community Discord while a modded test server lives in a guild of three friends,
-with different announcements, different channels and different permissions.
-Neither can see the other.
+**One Discord channel is one Valheim server.** That channel is how the bot knows
+which server you mean: announcements go there, and a command typed there is
+about that server, so the commands take no server name. One bot account serves
+the whole manager, but a public server can post to a community Discord while a
+modded test server lives in a guild of three friends, with different
+announcements and different permissions. Neither channel can reach the other's
+server, and none of them can see anything about the manager itself.
 
 What it needs:
 
@@ -82,13 +84,11 @@ If it says something else, the panel prints the reason. Jump to
 
 ## 3. Set up your first server
 
-You need two IDs from Discord first.
+You need one ID from Discord.
 
 1. In Discord (the app, not the portal): **User Settings → Advanced → Developer
-   Mode**, on. This adds *Copy ID* to right-click menus and is how you get
-   every ID below.
-2. Right-click the Discord server in the server list → **Copy Server ID**.
-3. Right-click the channel you want announcements in → **Copy Channel ID**.
+   Mode**, on. This adds *Copy ID* to right-click menus.
+2. Right-click the channel this Valheim server should use → **Copy Channel ID**.
 
 Now open the Valheim server's own page in the manager and expand the **Discord**
 section:
@@ -96,13 +96,22 @@ section:
 | Field | What to put |
 |---|---|
 | **Use Discord for this server** | tick |
-| **Discord server (guild) ID** | the server ID from step 2 |
-| **Channel ID** | the channel ID from step 3 |
-| **Answer slash commands about this server** | tick, unless you only want announcements |
+| **Channel ID** | the channel ID from step 2 |
+| **Answer slash commands in this channel** | tick, unless you only want announcements |
 | **Include this server's join address** | your call — see the note below |
-| **Announce** | tick what you want to hear about; see step 5 |
+| **Announce** | tick what you want to hear about; see step 6 |
 
 **Save Discord settings.**
+
+You are not asked which Discord *server* the channel is in — the manager looks
+that up from the channel. The panel shows what it found. If it says **not found
+yet**, the bot has not been invited to that Discord yet; do step 4 and save
+again.
+
+> **The channel is the server's identity**, so **no two Valheim servers may use
+> the same channel.** The manager refuses to save a duplicate and says which
+> server already has it. Give each one its own channel — that is what makes
+> `/vh status` unambiguous without naming anything.
 
 > **Include this server's join address** controls whether `host:port` appears in
 > this server's announcements and in `/vh status` for it. On a public server it
@@ -110,12 +119,12 @@ section:
 > private one it means anybody who can read the channel can join. The server
 > password is never posted either way.
 
-Repeat this for each Valheim server, with whatever Discord server and channel
-each one should use. Two servers can share a guild and a channel, share a guild
-but use different channels, or live in entirely separate Discords.
+Repeat this for each Valheim server, with its own channel. Those channels can be
+in one Discord or in several — it makes no difference to the manager.
 
-Settings → *Discord bot* has a **Per-server settings** table showing where each
-one posts, so you can see the whole picture without opening them one at a time.
+Settings → *Discord bot* has a **Per-server settings** table showing which
+channel each one uses, so you can see the whole picture without opening them
+one at a time.
 
 ## 4. Invite the bot to each Discord server
 
@@ -132,13 +141,13 @@ the portal's *General Information* page and use:
 `https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&permissions=19456&scope=bot%20applications.commands`)
 
 Then — and this part matters — go back to each Valheim server's **Discord**
-section and click **Save Discord settings** once more. The bot tried to register
-its slash commands when it connected, which was before it was allowed into your
-Discord, so that attempt failed. Saving registers them again now that it is in.
+section and click **Save Discord settings** once more. Two things happen that
+could not happen before the invite: the manager looks up which Discord server
+the channel is in, and it registers the slash commands there. Until the bot is
+in that Discord it can do neither, which is why the panel said *not found yet*.
 
-Each Discord server gets its own `/vh` menu, listing only what is usable there.
-They are registered to that one guild, so they appear immediately rather than
-taking up to an hour the way global commands do. If `/vh` does not show up,
+Commands are registered per Discord server, so they appear immediately rather
+than taking up to an hour the way global ones do. If `/vh` does not show up,
 press **Ctrl+R** (**Cmd+R** on a Mac) to reload the Discord client; it caches
 the list.
 
@@ -150,8 +159,8 @@ Two checks, in order:
    message**. A line naming that server should appear in its channel. If this
    works, the token, that channel's ID and the bot's permissions in that
    Discord are all correct.
-2. In Discord, type `/vh servers`. You should get the servers configured for
-   *that* Discord, and no others. Try `/vh status` too.
+2. In that channel, type `/vh status`. You should get that server's state —
+   with no argument, because the channel already says which server you mean.
 
 If the test message works but commands do nothing, it is almost always the
 command registration — repeat the Save from step 4.
@@ -195,22 +204,25 @@ which are in the public server browser anyway.
 
 To tighten it, on each Valheim server's page:
 
-- **Command channels** — one channel ID per line. Commands about *this* server
-  are only answered in these. Blank means any channel the bot can see in its
-  Discord.
 - **Roles allowed to ask** — one role ID per line (right-click a role in
   **Server Settings → Roles** → Copy Role ID). Blank means anyone who can see
-  an allowed channel.
+  the channel.
 
-Because these are per server, you can have one Valheim server answerable to
-everybody in a Discord and another in the same Discord answerable only to a
-`@staff` role.
+There is no list of command channels: the server's own channel *is* where its
+commands are answered, and nowhere else. Because the roles are per server, you
+can have one Valheim server answerable to everybody and another, in the same
+Discord, answerable only to a `@staff` role.
 
-**A Discord only ever sees its own servers.** A command from one guild cannot
-list, autocomplete or address a server configured for another — not by name, not
-by instance id. A guild with nothing mapped to it is told only "no servers here
-are set up to answer you", which is also what somebody without the right role
-is told, so the refusal reveals nothing either way.
+**A channel reaches exactly one server.** There is no argument to pass and no
+command that enumerates anything, so a channel cannot be used to ask about a
+different server — and a stray `server:` value typed by somebody who remembers
+the old commands is ignored, not obeyed. A channel with no server behind it is
+told only "no Valheim server is set up for this channel", which is also what
+somebody without the right role is told, so the refusal reveals nothing either
+way.
+
+**And nothing about the manager is reachable.** There is no command reporting
+its version, the shared game install's build, or that your other servers exist.
 
 **There is no command that can start, stop or restart a server.** That is not
 an oversight — see [the design note](discord-bot.md) for why it is being done
@@ -220,22 +232,22 @@ separately.
 
 ## The commands
 
+All four are about the server whose channel you typed them in. None takes a
+server argument.
+
 | Command | What it answers |
 |---|---|
-| `/vh servers` | the servers in this Discord, one line each |
-| `/vh status [server]` | status, uptime, version, players, join address, mods |
-| `/vh players [server]` | who is on right now, and for how long |
-| `/vh mods [server]` | which mods it runs, and what has an update |
-| `/vh player <name>` | one player's stats, online or not |
-| `/vh version` | manager, server and Steam build versions |
-
-`[server]` can be left out when only one server is configured for that Discord.
-Otherwise it autocompletes from the ones visible there, and a partial name works
-if it matches only one.
+| `/vh status` | is it up, uptime, version, players, join address, mods |
+| `/vh players` | who is on right now, and for how long |
+| `/vh mods` | which mods it runs, and what has an update |
+| `/vh player <name>` | one player's stats on this server, online or not |
 
 `/vh player` reads the roster, so it answers for somebody who left an hour ago
-— which is the point of keeping a roster. It only searches the servers visible
-in that Discord.
+— which is the point of keeping a roster. It searches only this server's roster.
+
+There is deliberately no command that lists your servers, and none that reports
+the manager's version or the dedicated-server build. The server's own version is
+in `/vh status`.
 
 ---
 
@@ -248,14 +260,17 @@ automatically — the guild, the channel, the switches, the permissions — and
 servers that were announcing carry on announcing. You should not have to set
 anything up again.
 
-Two things to know:
+Three things to know:
 
 - The settings are now on each server's page. Settings → *Discord bot* keeps
   only the token and the on/off switch.
-- A server that was announcing with no channel of its own used to fall back to
-  the manager's default channel. There is no default any more, so if the
-  migration found no channel to copy, that server is switched off rather than
-  left silently broken. Give it a channel ID and tick it back on.
+- **The old default channel can only go to one server**, because the channel now
+  identifies which server a command is about. The first server gets it; any
+  others are switched off with a line in the log saying so. Give each of them
+  its own channel and tick it back on.
+- `/vh servers` and `/vh version` no longer exist, and the other commands no
+  longer take a `server` argument. Your Discord client may cache the old menu —
+  Ctrl+R refreshes it.
 
 ---
 
@@ -284,24 +299,35 @@ A channel or server ID is wrong. They are long strings of digits — if what you
 pasted has a `#` or a `<` in it, you copied the channel *mention* rather than
 its ID. Developer Mode must be on for *Copy ID* to appear.
 
-**"This server needs the Discord server (guild) ID it belongs to."**
-You ticked *Use Discord for this server* without saying which Discord. The
-guild is what scopes everything else, so there is no sensible default for it.
+**"This server needs the ID of its Discord channel."**
+You ticked *Use Discord for this server* without giving a channel. The channel
+is what identifies the server, so there is nothing sensible to default it to.
 
-**"Announcements need a channel ID."**
-Announcement switches are on but there is nowhere to post them. Give it a
-channel, or switch every announcement off to use commands only.
+**"<other server> already uses that Discord channel."**
+Two Valheim servers cannot share one channel — a command typed there would be
+ambiguous. Give this one a channel of its own.
+
+**"Saved, but the bot cannot see that channel."**
+The channel ID is fine but the bot is not in that Discord, or has no *View
+Channel* there. Invite it (step 4) and save again. The panel shows the Discord
+server as *not found yet* until this works, and commands are not answered in
+that channel until it does.
 
 **Connected, but `/vh` does not exist in that Discord.**
 Registration failed, most likely because the bot was not in that Discord when
-it connected. Click **Save Discord settings** on a server in that guild, then
+it connected. Click **Save Discord settings** on a server in that Discord, then
 reload the Discord client with Ctrl+R.
 
-**`/vh servers` says "No servers here are set up to answer you".**
-That one sentence covers four causes, deliberately: no server in this manager
-names this Discord; the ones that do have *Answer slash commands* off; this
-channel is not in their **Command channels**; or you do not have a role in their
-**Roles allowed to ask**. Check them in that order.
+**"No Valheim server is set up for this channel."**
+That one sentence covers four causes, deliberately: no server uses this
+channel; the one that does has *Answer slash commands* off; its Discord server
+has not been found yet (see above); or you do not have a role in its **Roles
+allowed to ask**. Check them in that order. The Settings page's per-server
+table shows which channel each server uses.
+
+**`/vh` still shows a `server` option, or `/vh servers` still appears.**
+Your Discord client is showing a cached menu. Ctrl+R. A `server` value typed
+into a stale field is ignored, not obeyed.
 
 **Connected, commands work, but nothing is ever announced.**
 Two switches have to line up on that server's page: *Use Discord for this
@@ -335,8 +361,8 @@ server:
 ```
 discord bot started
 discord: connected as your-bot-name (application 1234...)
+discord: Midgard is in guild 5678...
 discord: commands registered in guild 5678...
-discord: commands registered in guild 9012...
 ```
 
 A reconnect, which is normal and happens whenever Discord moves you between
@@ -365,7 +391,11 @@ Worth knowing before you go looking for it:
   Settings panel says when posting last failed.
 - **No shared defaults.** Every server's switches are its own, so setting up the
   fifth one means ticking the same boxes a fifth time. Worth revisiting if
-  anybody ends up with a lot of servers in one Discord.
+  anybody ends up with a lot of servers.
+- **One channel per server, strictly.** Two Valheim servers cannot post to one
+  channel, because the channel is how a command is matched to a server. If you
+  want everything in one channel you can have announcements there from one
+  server only.
 
 ## Where things are kept
 

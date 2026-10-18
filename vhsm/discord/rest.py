@@ -215,6 +215,14 @@ class RestClient:
     async def me(self) -> dict[str, Any]:
         return await self.request("GET", "/users/@me") or {}
 
+    async def channel(self, channel_id: str) -> dict[str, Any]:
+        """One channel, which is how the guild behind it is discovered.
+
+        The operator pastes a channel id and nothing else; the guild is needed
+        to register commands, so it is looked up here rather than asked for.
+        """
+        return await self.request("GET", f"/channels/{channel_id}") or {}
+
     async def create_message(self, channel_id: str, payload: dict[str, Any]) -> Any:
         return await self.request(
             "POST", f"/channels/{channel_id}/messages",

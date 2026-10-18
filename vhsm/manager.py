@@ -703,9 +703,31 @@ class InstanceManager:
                     f"(uses {record.config.port}-{record.config.port + 2})."
                 )
 
+    def _assert_channel_free(self, config: InstanceConfig, *, exclude: str = "") -> None:
+        """No two instances may share a Discord channel.
+
+        The channel is how a command is matched to a server, so two instances
+        on one channel would make every command there ambiguous. Refused at
+        save time rather than resolved arbitrarily at command time.
+        """
+        channel = config.discord.channel_id
+        if not channel or not config.discord.enabled:
+            return
+        for record in self._records.values():
+            if record.config.id == exclude:
+                continue
+            other = record.config.discord
+            if other.enabled and other.channel_id == channel:
+                raise ValidationError(
+                    f"{record.config.name!r} already uses that Discord channel. "
+                    "Each server needs its own: the channel is what tells the "
+                    "bot which server a command is about."
+                )
+
     def create(self, config: InstanceConfig) -> InstanceRecord:
         config.validate()
         self._assert_port_free(config.port)
+        self._assert_channel_free(config)
         if any(r.config.name.lower() == config.name.lower() for r in self._records.values()):
             raise ValidationError(f"An instance named {config.name!r} already exists.")
 
@@ -730,6 +752,7 @@ class InstanceManager:
         updated = InstanceConfig.from_dict(merged)
         updated.validate()
         self._assert_port_free(updated.port, exclude=instance_id)
+        self._assert_channel_free(updated, exclude=instance_id)
 
         if record.supervisor.status.is_active and updated.port != record.config.port:
             raise ValidationError("Stop the server before changing its port.")
