@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..discord import config as discord_config
 from ..discord.rest import DiscordAPIError
-from ..events import KINDS
+from ..events import PLAYER_KINDS
 from ..instance import MODIFIER_KEYS, PRESETS, InstanceConfig, ValidationError
 from ..mods.cache import cache_size
 from ..mods.profile import ModError
@@ -39,11 +39,18 @@ def _discord(request: Request):
 #: How each event kind is described on the Settings page. Written as what the
 #: operator would hear in the channel rather than as the constant's name.
 ANNOUNCE_TEXT: dict[str, str] = {
+    # -- what this server's players are told ---------------------------- #
+    "online": "Server is online and joinable",
+    "stopping": "Server is shutting down",
+    "restarting": "Server is restarting",
+    "mods_changed": "Server came back with updated mods",
+    "updated": "Server was updated to a new Valheim build",
+    "player_join": "A player joined",
+    "player_leave": "A player left",
+    # -- kept for the admin channel, not shown yet ---------------------- #
     "status": "Server starting, running or stopped",
     "ready": "Server up and accepting players",
     "crash": "Server stopped unexpectedly",
-    "player_join": "A player joined",
-    "player_leave": "A player left",
     "player_death": "A player died",
     "notice": "A recognised failure in the console",
     "mod_update": "A mod has a newer version",
@@ -59,14 +66,19 @@ ANNOUNCE_TEXT: dict[str, str] = {
 
 
 def announce_labels() -> list[tuple[str, str]]:
-    """Every event kind with its label, in the order events.KINDS lists them.
+    """The switches to show, in the order ``PLAYER_KINDS`` lists them.
 
-    Driven off ``KINDS`` rather than off the dictionary above so that a new
-    event kind appears on the page as soon as it exists -- with its bare name
-    if nobody has written a label yet, which is ugly and visible rather than
-    missing and silent. The test suite checks that none of them is bare.
+    Only the player-facing kinds are on screen. The rest keep their stored
+    values and their plumbing and wait for the admin channel -- which is why
+    the form that submits these has to merge rather than replace: a switch
+    nobody can see must not be turned off by saving the page.
+
+    Driven off the kind list rather than off the dictionary above so that a new
+    kind appears as soon as it exists -- with its bare name if nobody has
+    written a label yet, which is ugly and visible rather than missing and
+    silent. The suite checks that none of them is bare.
     """
-    return [(kind, ANNOUNCE_TEXT.get(kind, kind)) for kind in KINDS]
+    return [(kind, ANNOUNCE_TEXT.get(kind, kind)) for kind in PLAYER_KINDS]
 
 
 def _render(request: Request, template: str, **context: Any) -> HTMLResponse:
@@ -183,6 +195,9 @@ async def instance_detail(request: Request, instance_id: str):
         hostname=manager.hostname,
         discord=_discord(request).status(),
         announce_labels=announce_labels(),
+        discord_announcing=sum(
+            1 for kind in PLAYER_KINDS if record.config.discord.announce.get(kind)
+        ),
     )
 
 
@@ -302,6 +317,9 @@ def _instance_discord(
         config=record.config,
         discord=_discord(request).status(),
         announce_labels=announce_labels(),
+        discord_announcing=sum(
+            1 for kind in PLAYER_KINDS if record.config.discord.announce.get(kind)
+        ),
         message=message,
         error=error,
     )
@@ -338,8 +356,14 @@ async def save_instance_discord(request: Request, instance_id: str) -> HTMLRespo
             "commands_enabled": form.get("commands_enabled") is not None,
             "read_role_ids": str(form.get("read_role_ids") or ""),
             # An unchecked box submits nothing, so the switched-on kinds are
-            # exactly the ones present.
-            "announce": {kind: kind in chosen for kind in KINDS},
+            # exactly the ones present -- but only among the ones on screen.
+            # The admin-channel switches are not rendered, so saving this page
+            # must leave them as they were rather than read their absence as
+            # "off".
+            "announce": {
+                **before["announce"],
+                **{kind: kind in chosen for kind in PLAYER_KINDS},
+            },
         }
     }
     try:
@@ -364,7 +388,7 @@ async def save_instance_discord(request: Request, instance_id: str) -> HTMLRespo
             request, instance_id,
             error=f"Saved, but the bot cannot see that channel. {mine[0].split(': ', 1)[-1]}",
         )
-    announcing = sum(1 for kind in KINDS if settings.announce.get(kind))
+    announcing = sum(1 for kind in PLAYER_KINDS if settings.announce.get(kind))
     parts = [f"{announcing} announcement type(s)" if announcing else "no announcements"]
     parts.append("commands on" if settings.commands_enabled else "commands off")
     return _instance_discord(

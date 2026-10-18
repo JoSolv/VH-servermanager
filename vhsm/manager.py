@@ -278,6 +278,24 @@ class InstanceRecord:
     #: Whether a mod check is in flight. A check installs files into the
     #: profile, so two at once would be two writers to the same mod folder.
     mod_check_busy: bool = False
+    #: Non-empty while the manager itself is taking this instance down and
+    #: back up for maintenance -- a server update, or a mod update that
+    #: installed something. Players are not told about those stops and starts:
+    #: they get one message about what changed once it is back, which is the
+    #: part they care about. A restart somebody asked for by hand is not
+    #: maintenance and is announced.
+    maintenance: str = ""
+    #: The enabled mod set this instance was last seen *running*, as
+    #: ``{package: version}``. None until the first time it is seen running,
+    #: so a manager restart does not report every mod as new.
+    announced_mods: dict[str, str] | None = None
+    #: The ``ModState.changed_at`` that :attr:`announced_mods` was read at, so
+    #: the comparison re-reads the manifest only when it has actually moved
+    #: rather than on every sampling tick.
+    announced_mods_at: float = 0.0
+    #: The dedicated-server build this instance was last seen running on.
+    #: None until first seen, for the same reason.
+    announced_build: str | None = None
 
     @property
     def busy(self) -> bool:
@@ -393,6 +411,7 @@ class InstanceRecord:
             "version": self.version,
             "reachable": self.reachable,
             "listening": self.listening,
+            "maintenance": self.maintenance,
             # Whether the Steam query socket has answered for this process.
             # Like `listening` it is evidence the server is actually up, but
             # it is refreshed every few seconds rather than every half minute,
@@ -1306,6 +1325,9 @@ class InstanceManager:
                     # instance's process; let go of it before taking it down,
                     # or the two take turns starting and stopping it.
                     await self._cancel_operation(record)
+                    # Players are told what changed when it comes back, not
+                    # that it went down for the update.
+                    record.maintenance = "update"
                     await self.stop(record.config.id)
                     stopped.append(record)
 
@@ -1328,6 +1350,13 @@ class InstanceManager:
                         await self.start(record.config.id)
                     except Exception as exc:  # noqa: BLE001
                         job.log(f"[error] could not restart {record.config.name}: {exc}")
+                    if not record.supervisor.status.is_active:
+                        # It did not come back, so there is nothing to wait
+                        # for. Otherwise the flag is cleared by the sampler
+                        # once the server is reachable again, which is the
+                        # moment the players would otherwise have been told
+                        # it was online.
+                        record.maintenance = ""
 
         before = installed_build_id(self.settings)
         ok = await job.run("update", body)
@@ -1474,11 +1503,16 @@ class InstanceManager:
         if run.updated and restart and record.supervisor.status.is_active:
             try:
                 await self._cancel_operation(record)
+                # Players hear "now running these mods" when it is back up,
+                # rather than a stop and a start they did not ask for.
+                record.maintenance = "mod-update"
                 await self.restart(config.id)
                 run.restarted = True
             except Exception as exc:  # noqa: BLE001 - reported on the page
                 run.error = f"{run.error + '; ' if run.error else ''}restart failed: {exc}"
                 log.warning("restart after mod update failed for %s: %s", config.name, exc)
+            if not record.supervisor.status.is_active:
+                record.maintenance = ""
 
         record.mod_check = run
         self._refresh_mod_state(record, force=True)
@@ -1701,6 +1735,11 @@ class InstanceManager:
                 *(self.check_reachable(r) for r in self.records), return_exceptions=True
             )
 
+        # Read from the app manifest at most once per tick, and only if some
+        # instance is actually up to compare it against.
+        build_id: str | None = None
+        snapshots: list[dict[str, Any]] = []
+
         for record in self.records:
             # Cheap: a stat() per instance, and a re-read only when the
             # manifest or the catalogue has actually moved.
@@ -1715,6 +1754,21 @@ class InstanceManager:
                 record.net = NetSample(source=record.net.source)
                 if record.players.count:
                     record.players.reset()
+
+            # Taken before the call below, which ends a maintenance window:
+            # the suppression reads this snapshot, so clearing the flag first
+            # would announce the very start-up it is there to hold back.
+            snapshots.append(record.snapshot())
+
+            # What changed since this server last came up, once it is up and
+            # actually running it. The build id is read once per tick rather
+            # than once per instance: they all share one game install.
+            try:
+                if build_id is None:
+                    build_id = installed_build_id(self.settings)
+                self._announce_what_changed(record, build_id)
+            except Exception:  # noqa: BLE001 - never break the sampling tick
+                log.exception("could not work out what changed for %s", record.config.name)
 
             # Lift kick bans whose time is up.
             try:
@@ -1731,8 +1785,109 @@ class InstanceManager:
                 "available": self.net.per_instance_available,
                 "reason": self.net.per_instance_reason,
             },
-            "instances": [record.snapshot() for record in self.records],
+            "instances": snapshots,
         }
+
+    def _announce_what_changed(self, record: InstanceRecord, build: str) -> None:
+        """Tell this server's players what is different now that it is up.
+
+        Both halves of this answer the same question -- "what changed?" -- by
+        comparing what the server is *running* against what it was running the
+        last time it came up. That is why they are here rather than at the
+        moment the install happened: a mod sitting on disk unloaded, or a build
+        installed while the server was down, is not news to a player yet. It
+        becomes news when they can join and find it there.
+
+        Nothing is said until the server is reachable and has actually loaded
+        what is on disk, and the first sighting only records the baseline, so a
+        manager restart does not report everything as new.
+        """
+        connectable = record.supervisor.status.is_active and (
+            record.listening or record.query_endpoint is not None
+        )
+        # restart_pending means the files moved but this process has not read
+        # them, which is exactly the case where the players are not running it.
+        if not connectable or record.restart_pending:
+            return
+
+        # It is back up, so the maintenance window is over. Cleared here --
+        # after this tick's snapshot has been taken, which is what the
+        # suppression reads -- so the "online" the players would have been
+        # sent is the one that gets held back, and what they get instead is
+        # whatever changed, below.
+        record.maintenance = ""
+
+        # Reading the manifest twice a second per instance would undo the care
+        # _refresh_mod_state takes, so the mod set is only re-read when the
+        # state it was derived from has moved -- or when there is no baseline.
+        changed_at = record.mods.changed_at
+        if record.announced_mods is None or changed_at != record.announced_mods_at:
+            profile = ModProfile(record.layout, self.settings.cache_dir, self.index)
+            running = {
+                mod.package_full_name: mod.version
+                for mod in profile.mods
+                if mod.enabled
+            } if record.config.mods_enabled else {}
+            previous = record.announced_mods
+            record.announced_mods = running
+            record.announced_mods_at = changed_at
+            if previous is not None and running != previous:
+                self._announce_mod_diff(record, previous, running)
+
+        previous_build, record.announced_build = record.announced_build, build
+        if build and previous_build is not None and build != previous_build:
+            self.events.publish(Event(
+                kind=ev.UPDATED,
+                instance_id=record.config.id,
+                instance_name=record.config.name,
+                title=f"{record.config.name} has been updated.",
+                # The Valheim version is what a player has to match to join;
+                # the Steam build id it came from is operator business.
+                detail=(
+                    f"Now running Valheim {record.version}."
+                    if record.version else "The server files were updated."
+                ),
+                level="good",
+                key=f"updated:{record.config.id}:{build}",
+                data={"build": build, "version": record.version},
+            ))
+
+    def _announce_mod_diff(
+        self,
+        record: InstanceRecord,
+        previous: dict[str, str],
+        running: dict[str, str],
+    ) -> None:
+        """One message naming what this server's mod set gained, lost or moved."""
+        def label(package: str) -> str:
+            # "Author-Mod" reads as the mod's name to a player, not the author's.
+            return package.split("-", 1)[-1]
+
+        lines = [
+            f"\u2022 {label(package)} {previous[package]} \u2192 {version}"
+            for package, version in running.items()
+            if package in previous and previous[package] != version
+        ]
+        lines += [
+            f"\u2022 {label(package)} {version} (new)"
+            for package, version in running.items()
+            if package not in previous
+        ]
+        gone = [label(package) for package in previous if package not in running]
+        if gone:
+            lines.append(f"\u2022 removed: {', '.join(gone)}")
+        if not lines:
+            return
+        self.events.publish(Event(
+            kind=ev.MODS_CHANGED,
+            instance_id=record.config.id,
+            instance_name=record.config.name,
+            title=f"{record.config.name} is running updated mods.",
+            detail="\n".join(lines),
+            level="good",
+            key=f"mods-changed:{record.config.id}:{sorted(running.items())}",
+            data={"mods": running},
+        ))
 
     async def _sampler_loop(self) -> None:
         interval = self.settings.sample_interval

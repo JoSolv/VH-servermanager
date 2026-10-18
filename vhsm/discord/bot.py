@@ -14,6 +14,7 @@ import logging
 import time
 from typing import Any
 
+from .. import events as ev
 from ..events import Event
 from . import commands as cmd
 from . import config as config_mod
@@ -118,8 +119,9 @@ class DiscordBot:
                 # which is worth saying rather than leaving as a blank column.
                 "unresolved": bool(settings.enabled and settings.channel_id
                                    and not settings.guild_id),
+                # Only the switches the operator can actually see.
                 "announcing": sum(
-                    1 for kind in settings.announce if settings.announce[kind]
+                    1 for kind in ev.PLAYER_KINDS if settings.announce.get(kind)
                 ) if settings.enabled else 0,
             })
         return rows

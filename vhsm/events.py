@@ -37,9 +37,31 @@ QUEUE_LIMIT = 256
 # event kinds
 #
 # Strings rather than an enum, because they are also the keys of the operator's
-# per-event "announce this" toggles and go to disk in discord.json. An enum
-# would have to be converted at both ends for no gain.
+# per-event "announce this" toggles and go to disk in each instance.json. An
+# enum would have to be converted at both ends for no gain.
+#
+# They come in two audiences. **Player** kinds are the ones a server's players
+# want in their channel: it is up, it is going down, it came back with new mods,
+# somebody joined. **Admin** kinds are everything else -- failures, mod
+# releases, build ids, who asked for a restart -- which is operator business.
+#
+# Only player kinds are announced today, because there is only one channel and
+# it belongs to the players. The admin kinds are kept, switches and all, for the
+# second channel: see AUDIENCE below.
 # --------------------------------------------------------------------------- #
+#: A server is up and joinable. The player-facing counterpart of READY, and
+#: silent during maintenance -- see MODS_CHANGED and UPDATED, which say what
+#: changed instead.
+ONLINE = "online"
+#: A server is being shut down. Silent during maintenance.
+STOPPING = "stopping"
+#: A server is being restarted. Silent during maintenance.
+RESTARTING = "restarting"
+#: A server came up running a different set of mods than last time it did.
+MODS_CHANGED = "mods_changed"
+#: A server came up on a newer Valheim build than last time it did.
+UPDATED = "updated"
+
 #: An instance's process changed state: starting, running, stopped, crashed.
 STATUS = "status"
 #: A started server is actually up -- holding its port, version known.
@@ -74,14 +96,40 @@ MANAGER = "manager"
 #: trail -- the outcome arrives separately as STATUS.
 LIFECYCLE = "lifecycle"
 
-#: Every kind, in the order the settings page lists them.
-KINDS: tuple[str, ...] = (
-    STATUS, READY, CRASH,
-    PLAYER_JOIN, PLAYER_LEAVE, PLAYER_DEATH,
+#: What a server's players are told, in the order their switches are listed.
+PLAYER_KINDS: tuple[str, ...] = (
+    ONLINE, STOPPING, RESTARTING, MODS_CHANGED, UPDATED,
+    PLAYER_JOIN, PLAYER_LEAVE,
+)
+
+#: Operator business, kept for the admin channel. Stored and switchable, but
+#: nothing announces them yet: there is one channel and it is the players'.
+ADMIN_KINDS: tuple[str, ...] = (
+    STATUS, READY, CRASH, PLAYER_DEATH,
     NOTICE, MOD_UPDATE, MOD_RESTART_PENDING, MOD_CHECK,
     SERVER_UPDATE, SERVER_UPDATED, REACHABILITY, SNAPSHOT,
     MANAGER, LIFECYCLE,
 )
+
+#: Every kind. Player ones first, since those are the ones on screen.
+KINDS: tuple[str, ...] = PLAYER_KINDS + ADMIN_KINDS
+
+#: Which audience each kind belongs to. The announcer consults this rather than
+#: a list of exceptions, so adding a kind means deciding whose news it is.
+AUDIENCE: dict[str, str] = {
+    **{kind: "player" for kind in PLAYER_KINDS},
+    **{kind: "admin" for kind in ADMIN_KINDS},
+}
+
+
+def is_player_facing(kind: str) -> bool:
+    """Whether *kind* belongs in a server's player channel.
+
+    Anything else is held back until there is an admin channel to put it in.
+    An unknown kind is treated as admin: a new event is nobody's news until
+    somebody has decided whose it is.
+    """
+    return AUDIENCE.get(kind) == "player"
 
 #: Which kinds are announced unless the operator says otherwise. The noisy
 #: ones are off: a busy server is a join and a leave for every player every
@@ -89,6 +137,13 @@ KINDS: tuple[str, ...] = (
 #: something to guess. Deaths are off for the same reason, and because on a
 #: hardcore server they are somebody's bad evening rather than a status update.
 DEFAULT_ANNOUNCE: dict[str, bool] = {
+    # -- what players are told ---------------------------------------- #
+    ONLINE: True,
+    STOPPING: True,
+    RESTARTING: True,
+    MODS_CHANGED: True,
+    UPDATED: True,
+    # -- kept for the admin channel ----------------------------------- #
     STATUS: True,
     READY: True,
     CRASH: True,
