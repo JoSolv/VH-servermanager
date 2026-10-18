@@ -165,25 +165,35 @@ tested end to end, and the structure is meant to be built on.
   server as unreachable, and the UI says so.
 
 **Discord bot (optional)**
-- One bot for the manager, with **announcements routed per instance**: each
-  instance has its own channel and its own on/off switch, so one server can
-  post to `#midgard`, another to `#modded-test`, and a third stay silent. An
-  instance that has not been opted in says nothing even when a default channel
-  is set.
+- **Every setting is per instance**, and that includes *which Discord server*.
+  One bot account, and each instance names its own guild, channel,
+  announcements and permissions — so a public server can post to a community
+  Discord while a modded test server lives in a guild of three friends, sharing
+  nothing but the bot. An instance that has not been opted in says nothing and
+  answers nothing.
+- **A Discord only ever sees its own servers.** Commands are answered only in
+  the guild an instance names, and an instance in another guild cannot be
+  listed, autocompleted or addressed from there — not even by its exact name or
+  id. Without that, one leaked invite would expose every server on the host.
 - It announces what the manager already knows: a server starting, up and
   accepting players, stopping or crashing (with the exit code); players joining,
   leaving and dying; a mod with a newer version; mods changed but not loaded
   yet; what the scheduled mod check found; a new Valheim build published or
   installed; and a server that has stopped answering from its public address.
-  Each kind is a switch on the Settings page, and the noisy ones — joins,
-  leaves, deaths, snapshots — are off until you turn them on.
+  Each kind is a switch on that instance's own page, so a busy public server can
+  stay quiet about joins while a small one says everything; the noisy ones —
+  joins, leaves, deaths, snapshots — are off until you turn them on.
+- Events that belong to no single instance, like a new Valheim build, go to
+  every channel that asked for them, once each — two servers sharing a channel
+  get one message, two servers in two Discords get one each.
 - Announcements are *changes*, not state. A manager restart does not re-announce
   the world it just re-read, a flapping reachability probe is held until three
   samples agree, and the same news is never posted twice.
 - Read-only slash commands: `/vh servers`, `/vh status`, `/vh players`,
   `/vh mods`, `/vh player <name>` (from the roster, so it works for somebody who
   left an hour ago) and `/vh version`. The server argument autocompletes from
-  your instance names and can be left out when you only run one.
+  the instances visible in *that* Discord and can be left out when only one is.
+  Each guild gets its own command menu, listing only what is usable there.
 - **It opens no port.** Commands arrive over a websocket the manager dials out
   on, not over an HTTP endpoint Discord posts to, so there is nothing to forward
   and no certificate to get — which is what makes it work on a box behind NAT
@@ -193,11 +203,16 @@ tested end to end, and the structure is meant to be built on.
 - The token lives in its own `0600` file, or in `VHSM_DISCORD_TOKEN` so a
   container can keep it in a secret and never write it to the data volume. It is
   never rendered back into the GUI and never travels in an instance export.
+  There is one token however many Discords are involved: a bot account can be
+  invited to any number of them.
 - Settings builds the invite link for you from the application id once the bot
   connects, asking for View Channel, Send Messages and Embed Links and nothing
   else.
 - Starting and stopping servers from Discord is **not implemented yet**, on
   purpose — see *Known gaps*.
+- Upgrading from the earlier manager-wide version needs nothing: the first
+  start moves the old guild, channel, switches and permissions down onto every
+  instance, and a server that was announcing carries on announcing.
 - Setting it up is a ten-minute walk-through in
   [`docs/discord-setup.md`](docs/discord-setup.md); the design and its
   reasoning are in [`docs/discord-bot.md`](docs/discord-bot.md).
@@ -378,13 +393,13 @@ has nobody to do that.
 
 ```
 data/
-  discord.json            Discord bot settings (never the token)
+  discord.json            whether the Discord bot runs (never the token)
   discord_token           the bot token, mode 0600, if not set by environment
   steam/                  steamcmd
   valheim/                shared dedicated-server install (app 896660)
   cache/                  Thunderstore packages + catalogue, shared
   instances/<id>/
-    instance.json         configuration
+    instance.json         configuration, including this server's Discord settings
     mods.json             installed mods, versions, owned files
     saves/                worlds and backups
     logs/console.log
@@ -404,7 +419,7 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 .venv/bin/python tests/smoke_test.py
 ```
 
-588 checks covering page rendering, instance creation and validation, the
+614 checks covering page rendering, instance creation and validation, the
 start/stop/restart lifecycle, the live-metrics and console websockets, CPU
 normalisation, version reporting, player detail, every moderation path, query
 socket discovery (including a socket bound to a single interface), the
@@ -426,14 +441,20 @@ removal of unlisted mods, config unpacking, disabled mods, and refusal of
 traversing, hostile or unreadable archives) and the config editor (parsing,
 typed validation, per-setting and whole-file resets, and the path guards on
 every file it touches), and the whole Discord integration: the gateway
-handshake and its reconnect, command registration, every read command and its
-autocomplete, the permission gate at each of its gates (guild, channel, read
-role, and the control tier that is not shipped yet, including that an empty
-control allowlist means nobody), cooldowns, token handling (environment over
+handshake, its reconnect and its refusal to retry a rejected token, command
+registration in several guilds at once and its removal when a guild stops being
+used, every read command and its autocomplete, **two instances in two unrelated
+Discords neither of which can see the other's server by name or by id**, the
+per-instance permission gate at each of its gates (guild, channel, read role,
+commands switch, and the control tier that is not shipped yet, including that an
+empty control allowlist means nobody and that switching control on for one
+server does not unlock another), cooldowns, token handling (environment over
 file, `0600`, never echoed), event derivation from samples (first sight and
 start-up are silent, reachability must agree three times, each notice and mod
-release announced once), channel routing and its fallback, and a channel
-Discord refuses being reported rather than crashing the bot.
+release announced once), per-instance announcement routing and the fan-out of
+manager-wide events to every channel that wants them exactly once, a channel
+Discord refuses being reported rather than crashing the bot, and the one-time
+move of the old manager-wide settings down onto the instances.
 
 Runs against the simulated server and a local stand-in for Discord
 (`tools/fake_discord.py`, which speaks both the REST API and a gateway
@@ -460,23 +481,27 @@ built to be the narrow end of that. It only ever dials out — there is no
 inbound endpoint — and what it will do for somebody in a channel is limited on
 purpose:
 
-- It answers in **one guild**, the one configured. A token that leaks, or an
-  invite into somebody else's server, is not a way to reach this host.
-- Commands can be restricted to named channels and named roles. Empty means
-  "whatever Discord already allows in that channel", which is the sensible
-  default for read-only questions.
+- **Each instance answers in one Discord server: its own.** An instance in
+  another guild cannot be listed, autocompleted or addressed from here, by name
+  or by id, and a guild with nothing mapped to it is told only that. A leaked
+  invite therefore exposes at most the servers that deliberately live there,
+  and never the rest of the host.
+- Commands can be restricted to named channels and named roles, **per
+  instance**. Empty means "whatever Discord already allows in that channel",
+  which is the sensible default for read-only questions.
 - The commands that exist today only *read*. Nothing in Discord can start,
   stop or reconfigure a server.
 - The bot token is kept in its own `0600` file (or `VHSM_DISCORD_TOKEN`), is
   never rendered back into the GUI, and is not included in an instance export.
-- An instance's channel id is cleared when it is imported from an archive: it
-  names a channel in the exporting operator's Discord, which the importing one
-  can neither see nor be assumed to want posted to.
+- An instance's Discord settings are cleared when it is imported from an
+  archive: they name a Discord belonging to whoever exported it, which the
+  importing operator can neither see nor be assumed to want posted to.
 
-When control commands are added they will be off by default, limited to named
-roles or users, cooled down per user, confirmed when players are online, and
-logged with the Discord account that asked. An empty control allowlist will mean
-*nobody* rather than everybody — the gate is already written and tested that
+When control commands are added they will be off by default **per instance**,
+limited to named roles or users, cooled down per user, confirmed when players
+are online, and logged with the Discord account that asked. An empty control
+allowlist will mean *nobody* rather than everybody, and switching control on for
+one server will not unlock another — the gate is already written and tested that
 way.
 
 ## Known gaps / next steps
@@ -499,6 +524,16 @@ way.
 - The Discord bot holds no outbox: an announcement that happens while the
   gateway is reconnecting, or while Discord is refusing the channel, is dropped
   rather than queued. The Settings page says when posting last failed.
+- Removing the last instance from a Discord server takes its `/vh` commands
+  away, but only if the manager is running when you do it: one unmapped while
+  the manager was stopped keeps a stale command menu until something is mapped
+  there again. It refuses safely — the permission gate is per instance, not per
+  command — so it is untidy rather than a hole.
+- **Discord settings have no shared defaults.** Every instance's switches are
+  its own, which is the point, but it means setting up the fifth server in the
+  same Discord is ticking the same boxes a fifth time. A "copy from another
+  server" button, or a set of defaults for new instances, is the obvious next
+  step if anybody runs enough servers to care.
 - No scheduled *restarts* for their own sake, and no crash auto-restart.
   Restarts happen around a scheduled server update, and around a scheduled mod
   update that installed something, but there is no "restart nightly at 05:00"

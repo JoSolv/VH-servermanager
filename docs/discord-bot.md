@@ -1,8 +1,10 @@
 # Design note: a built-in Discord bot
 
-Status: **phases 1 and 2 implemented** (announcements and read-only commands).
-Phase 3, control commands, is deliberately not: the permission tier it needs is
-built, enforced and tested, but no command uses it yet. See
+Status: **announcements and read-only commands implemented, every setting per
+instance.** One bot account; each instance names its own Discord server,
+channel, announcements and permissions, and a Discord only ever sees its own
+servers. Control commands are deliberately not here: the permission tier they
+need is built, enforced and tested, but no command uses it yet. See
 [Phases](#phases) at the end for what landed and what did not.
 
 This note is the design, kept as the record of *why* it is shaped this way.
@@ -29,23 +31,57 @@ Three jobs, in decreasing order of how safe they are:
 The third one is a different kind of feature from the first two and the design
 treats it that way throughout. See [Permissions](#permissions-the-part-that-matters).
 
-## Shape: one bot, per-instance channels
+## Shape: one bot account, everything else per instance
 
-A Discord bot application is one token and one identity. Running one gateway
-connection per instance would mean one bot account per server, N heartbeat
-loops, and N bots in the member list, for nothing. So:
+A Discord bot application is one token and one identity, but that identity can
+be invited to any number of guilds. So "a separate Discord per server" needs
+separate *guild ids*, not separate bots — and one gateway connection still
+serves all of them. Running a connection per instance would mean one bot
+account per server, N heartbeat loops and N bots in every member list, for
+nothing.
 
-- **The token and the connection are manager-level**, like the Thunderstore
-  index and the scheduled server update. Configured once in Settings.
-- **Announcement routing is per-instance.** Each instance gets its own
-  `Discord` panel on its page: a channel id and an on/off switch. An instance
-  with no channel set announces nothing, which is what "optional" means at the
-  level people actually want it — one server posting to `#midgard`, another to
-  `#modded-test`, a third silent.
-- **Event toggles are global** in the first version (announce joins: yes/no),
-  because which *kinds* of thing you want to hear about is a taste, not a
-  per-server fact. Per-instance overrides can come later as a dict whose
-  missing keys mean "inherit".
+- **The token and the connection are manager-level**, because there is one bot
+  account. That and an on/off switch is the whole of Settings.
+- **Everything else belongs to an instance**: which guild, which channel, which
+  events, whether commands answer about it, who may ask, whether its join
+  address may be posted, and (later) who may control it. Stored in that
+  instance's `instance.json`, so it travels with the instance.
+
+The first version had the guild and the event switches manager-wide, with only
+the channel per instance. That was wrong, and the reason is worth recording:
+**the guild is the scope of everything else.** Once two instances can live in
+two unrelated Discords, "which guild" stops being a deployment detail and
+becomes the thing that decides who can see what. A single global guild also
+quietly assumed every server shares one audience, which is exactly what the
+people running a public server and a modded test server do not have.
+
+The event switches moved for a plainer reason: a busy public server wants to
+say nothing about joins while a server of four friends wants to say everything,
+and that is a per-server fact after all, not a taste.
+
+### What the guild scopes
+
+An interaction arrives from one guild. The instances in scope are the ones
+whose own settings name that guild *and* whose channel and role allowlists let
+this caller ask. Everything works from that set:
+
+- `/vh servers` lists it, and nothing else
+- `/vh status` with no argument defaults to it when it holds one instance
+- autocomplete offers only its names
+- `/vh player` searches only its rosters
+- an instance outside it is unreachable **by name or by id**, and the refusal
+  is the same one a typo gets
+
+A guild with nothing mapped to it is told only "no servers here are set up to
+answer you" — which covers "none configured", "commands off", "wrong channel"
+and "wrong role" with one sentence that reveals none of them. This is the
+property that makes the feature safe to hand to somebody else's Discord: a
+leaked invite exposes at most what deliberately lives there.
+
+Command registration follows the same scope. Each guild gets its own `PUT
+/applications/{app}/guilds/{guild}/commands` built from the instances mapped to
+it, so two Discords get two menus; and a guild that stops having any instance
+has its commands removed rather than left answering "no servers here" forever.
 
 ## Transport: the gateway, outbound only
 
@@ -94,10 +130,20 @@ working install.
 ## Where the announcements come from
 
 The manager already produces everything needed; almost none of this is new
-monitoring. The proposal is a small `vhsm/events.py` — an `EventBus` shaped
-like the existing `Hub`, with typed events instead of snapshot JSON — fed from
-the places listed below. The Discord bot is one subscriber; a webhook sink or
-an email sink later would be another.
+monitoring. A small `vhsm/events.py` — an `EventBus` shaped like the existing
+`Hub`, with typed events instead of snapshot JSON — is fed from the places
+listed below. The Discord bot is one subscriber; a webhook sink or an email
+sink later would be another.
+
+Routing happens at the far end, in the announcer, and every destination belongs
+to an instance. An event about one instance goes to that instance's channel if
+that instance announces that kind of thing. An event about *no* instance — a new
+Valheim build, the manager restarting — has no single home now that there is no
+manager-wide channel, so it fans out to each distinct channel among the
+instances that want it: two servers sharing a channel get one message, two
+servers in two Discords get one each. One channel refusing a message does not
+stop the others, since on a manager-wide event they belong to different
+Discords and one lost permission is no reason for the rest to hear nothing.
 
 | Announcement | Where it comes from today |
 |---|---|
@@ -166,9 +212,9 @@ Namespaced under one command so it never collides with another bot:
 | `/vh restart [server]` | |
 | `/vh stop [server]` | asks for confirmation with a button when anyone is online; a stop disconnects people |
 
-`[server]` is optional when only one instance exists, and autocompletes from
-instance names otherwise (autocomplete is just another interaction type over
-the same socket).
+`[server]` is optional when only one instance is visible in that guild, and
+autocompletes from the visible ones otherwise (autocomplete is just another
+interaction type over the same socket).
 
 Control commands reply immediately — `submit()` returns as soon as the task is
 owned by the manager — and the *completion* arrives through the announcement
@@ -194,20 +240,27 @@ stop the server.
 So, in order. Each item is marked with where it stands, since the control
 commands themselves are not shipped:
 
-- **Control is off by default.** *Built.* Reads and announcements work with
-  control disabled, and that is the configuration most people should run --
-  and today the only one, since no control command exists.
-- **Pinned to one guild.** *Built.* The bot ignores everything outside the
-  configured guild id, so a token that leaks or an install into a second
-  server cannot reach the host.
-- **Channel allowlist.** *Built.* Commands are only honoured in the channels
-  listed. Discord's own channel permissions are the first gate; this is the
-  second, because the bot's permissions are managed by Discord admins and this
-  list is managed by the operator.
-- **Role and user allowlists, separately for read and control.** *Built.* By
-  role id and user id, not "whoever can see the channel". An empty read
-  allowlist means anyone in an allowed channel; an empty *control* allowlist
-  means nobody, which is the asymmetry that matters and is tested as such.
+- **Control is off by default, per instance.** *Built.* Reads and announcements
+  work with control disabled, and that is the configuration most people should
+  run -- and today the only one, since no control command exists. Being per
+  instance matters: a test server can be restartable by its three users while
+  the public one is restartable by nobody, which is not expressible with a
+  single switch.
+- **Each instance pinned to its own guild.** *Built.* An interaction can only
+  reach instances whose own settings name the guild it came from, so a token
+  that leaks or an invite into a second Discord reaches at most the servers
+  that deliberately live there — not the host. An instance elsewhere is not
+  merely unlisted: it cannot be named or addressed by id either, and the
+  refusal is the one a typo gets.
+- **Channel allowlist, per instance.** *Built.* Commands about an instance are
+  only honoured in the channels it lists. Discord's own channel permissions are
+  the first gate; this is the second, because the bot's permissions are managed
+  by Discord admins and this list is managed by the operator.
+- **Role and user allowlists, per instance, separately for read and control.**
+  *Built.* By role id and user id, not "whoever can see the channel". An empty
+  read allowlist means anyone in an allowed channel; an empty *control*
+  allowlist means nobody, which is the asymmetry that matters and is tested as
+  such. Two instances in one guild can have different answers.
 - **A cooldown per user and per instance**, so `restart` cannot be held down.
   *Built* (`Cooldowns`), unused until there is a control command to limit.
 - **An audit trail.** *Half built.* `submit()` takes an `actor`, so every
@@ -236,10 +289,11 @@ commands themselves are not shipped:
 - Excluded from the `.vhsm.zip` instance archive by construction, since it is
   manager-level and the archive is per-instance.
 
-One related trap: `discord_channel_id` *does* live in `instance.json`, so an
-exported instance carries it to another host, where it would start announcing
-into a channel that host's operator cannot see. It should be cleared on import,
-the way identity and port already are. Clone keeps it — same host, same people.
+One related trap, now larger: the whole `discord` block lives in
+`instance.json`, so an exported instance carries a guild *and* a channel to
+another host, where it would start announcing into a Discord that host's
+operator cannot see. It is cleared on import, the way identity and port already
+are. Clone keeps it — same host, same people.
 
 ### Inviting the bot
 
@@ -251,8 +305,9 @@ message is enabled). "Here is the link, click it, pick the channel" is a much
 better answer than a paragraph telling someone to go build an application.
 
 Commands register guild-scoped (`PUT /applications/{app}/guilds/{guild}/commands`),
-which takes effect immediately; global registration can take an hour and is
-wrong for a bot that lives in exactly one guild.
+once per guild that has an instance mapped to it. That takes effect immediately,
+where global registration can take an hour — and it is what lets two Discords
+get two different menus.
 
 ## Module layout
 
@@ -344,8 +399,13 @@ ask for:
    codes are about 350 lines, and `tools/fake_discord.py` exercises all of it
    offline.
 2. **Announcements** -- *done.* The event bus, the snapshot watcher, the
-   per-instance channel with a default-channel fallback, the per-kind
-   switches, and the flapping and boot-burst rules above.
+   per-kind switches, and the flapping and boot-burst rules above.
+2b. **Everything per instance** -- *done, after the fact.* The guild, the
+   channel, the switches, the command toggle, the permissions and the address
+   setting all moved from the manager onto the instance, and the guild became
+   the scope of command visibility. The manager keeps the token and an on/off
+   switch. A one-time migration moves an existing setup down, so an upgrade
+   does not silently stop a working bot.
 3. **Control** -- *not done, on purpose.* The `control` tier exists in the
    command table, `check_allowed` enforces it (guild, then channel, then role
    or user, with an empty allowlist meaning nobody), `Cooldowns` is written,
@@ -355,8 +415,13 @@ ask for:
    actually be used. All of that is covered by tests. What is missing is the
    handlers and the confirmation button.
 4. **Extras** -- partly done. `/vh mods`, `/vh player`, autocomplete and death
-   announcements landed with phases 1-2. The sticky status message and
-   per-instance event overrides did not.
+   announcements landed with phases 1-2. The sticky status message did not.
+
+What phase 2b cost, and is worth saying plainly: there are no shared defaults.
+Every instance's switches are its own, which is the point, but setting up the
+fifth server in the same Discord means ticking the same boxes a fifth time. A
+"copy settings from another server" button, or a set of defaults applied to new
+instances, is the obvious answer and was left out rather than guessed at.
 
 ### Adding a control command
 

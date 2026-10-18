@@ -1,6 +1,13 @@
 """Slash commands: what they are, who may run them, and what they answer.
 
-Two tiers, and the difference between them is the whole security design:
+Everything here is scoped by **guild**. An interaction arrives from one
+Discord server, and the instances in scope are the ones whose own settings
+name that guild -- so a server in somebody else's Discord is not merely
+unlisted, it cannot be named, autocompleted or addressed from here at all.
+That is what makes "a separate Discord per instance" mean anything: without
+it, one leaked invite would expose every server this manager runs.
+
+Two tiers, and the difference between them is the rest of the security design:
 
 * **read** commands answer questions. The worst a stranger can do with one is
   learn how many people are on a server they can already see in the browser.
@@ -22,7 +29,6 @@ from typing import Any, Awaitable, Callable
 
 from ..events import LIFECYCLE, Event
 from . import render
-from .config import DiscordConfig
 
 log = logging.getLogger("vhsm.discord.commands")
 
@@ -57,7 +63,8 @@ class Denied(RuntimeError):
     """The command was refused, with a reason that is safe to show.
 
     Every refusal is phrased so it tells the user what to do about it without
-    telling them anything about the host they could not already see.
+    telling them anything about the host -- or about the other Discords this
+    manager answers in -- that they could not already see.
     """
 
 
@@ -71,9 +78,9 @@ class Command:
     tier: str
     handler: Callable[["CommandContext"], Awaitable[dict[str, Any]]]
     #: Whether it takes the optional ``server`` argument, which autocompletes
-    #: from instance names and may be left out when there is only one.
+    #: from the instances visible in this guild and may be left out when only
+    #: one is.
     takes_server: bool = False
-    #: Whether it needs a named server rather than defaulting to the only one.
     extra_options: list[dict[str, Any]] = field(default_factory=list)
     #: Answer with "thinking..." first and fill it in after. For anything that
     #: may touch the network or take a moment: Discord allows three seconds
@@ -87,7 +94,7 @@ class Command:
                 {
                     "type": OPTION_STRING,
                     "name": "server",
-                    "description": "Which server (optional when you only run one)",
+                    "description": "Which server (optional when only one is here)",
                     "required": False,
                     "autocomplete": True,
                 }
@@ -105,15 +112,22 @@ class Command:
 
 @dataclass(slots=True)
 class CommandContext:
-    """Everything a handler needs: the manager, the config and the call."""
+    """Everything a handler needs, already narrowed to this caller.
+
+    *visible* is the whole of the caller's world: the instances in this guild
+    whose settings let this person ask about them. Every handler works from it
+    rather than from ``manager.records``, so there is one place that decides
+    what an interaction can reach.
+    """
 
     manager: Any
-    config: DiscordConfig
     command: Command
     options: dict[str, Any]
     user_id: str
     user_name: str
+    guild_id: str
     channel_id: str
+    visible: list[Any] = field(default_factory=list)
 
     def actor(self) -> str:
         """How this caller is recorded in logs and announcements."""
@@ -121,19 +135,74 @@ class CommandContext:
 
 
 # --------------------------------------------------------------------------- #
+# scope: which instances an interaction can reach
+# --------------------------------------------------------------------------- #
+def interaction_user(interaction: dict[str, Any]) -> dict[str, Any]:
+    """The calling user. A guild interaction carries ``member``, a DM ``user``."""
+    member = interaction.get("member") or {}
+    return member.get("user") or interaction.get("user") or {}
+
+
+def _roles(interaction: dict[str, Any]) -> set[str]:
+    member = interaction.get("member") or {}
+    return {str(role) for role in member.get("roles") or ()}
+
+
+def may_read(record: Any, interaction: dict[str, Any]) -> bool:
+    """Whether this caller may ask about *record*, by its own settings."""
+    settings = record.config.discord
+    if not settings.answers_commands:
+        return False
+    if settings.guild_id != str(interaction.get("guild_id") or ""):
+        return False
+    channel_id = str(interaction.get("channel_id") or "")
+    if settings.command_channel_ids and channel_id not in settings.command_channel_ids:
+        return False
+    if settings.read_role_ids and not _roles(interaction) & set(settings.read_role_ids):
+        return False
+    return True
+
+
+def visible_instances(manager: Any, interaction: dict[str, Any]) -> list[Any]:
+    """Every instance this interaction may reach, in display order."""
+    if not interaction.get("guild_id"):
+        return []
+    return [record for record in manager.records if may_read(record, interaction)]
+
+
+def check_control(record: Any, interaction: dict[str, Any]) -> None:
+    """Raise :class:`Denied` unless this caller may control *record*.
+
+    Read access is a prerequisite -- a caller who cannot see a server cannot
+    restart it -- and then the instance's own control settings decide.
+    """
+    settings = record.config.discord
+    if not settings.control_enabled:
+        raise Denied(
+            f"Controlling **{record.config.name}** is switched off in the "
+            "server manager."
+        )
+    # No "empty means anyone" here, unlike the read tier: an unconfigured
+    # control allowlist means nobody, because the alternative is that
+    # switching control on quietly hands the host to the whole channel.
+    user_id = str(interaction_user(interaction).get("id") or "")
+    allowed_user = user_id and user_id in settings.control_user_ids
+    allowed_role = bool(_roles(interaction) & set(settings.control_role_ids))
+    if not (allowed_user or allowed_role):
+        raise Denied(f"You are not allowed to control **{record.config.name}**.")
+
+
+# --------------------------------------------------------------------------- #
 # handlers
 # --------------------------------------------------------------------------- #
 async def _servers(ctx: CommandContext) -> dict[str, Any]:
-    records = ctx.manager.records
-    if not records:
-        return _message("No servers are configured in the manager yet.")
-    lines = [render.status_line(record.snapshot()) for record in records]
+    lines = [render.status_line(record.snapshot()) for record in ctx.visible]
     return _embed_message(
         render.embed(
             "Servers",
             description="\n".join(lines),
             level="info",
-            footer=f"{len(records)} server(s)",
+            footer=f"{len(ctx.visible)} server(s)",
         )
     )
 
@@ -166,7 +235,7 @@ async def _status(ctx: CommandContext) -> dict[str, Any]:
             fields.append({"name": "Uptime", "value": render.duration(snapshot["uptime"])})
     if snapshot.get("version"):
         fields.append({"name": "Version", "value": snapshot["version"]})
-    if ctx.config.show_address:
+    if record.config.discord.show_address:
         fields.append(
             {"name": "Address", "value": f"`{ctx.manager.address_for(record)}`", "inline": False}
         )
@@ -281,10 +350,12 @@ async def _mods(ctx: CommandContext) -> dict[str, Any]:
 
 
 async def _player(ctx: CommandContext) -> dict[str, Any]:
-    """Roster stats for one player, across every instance.
+    """Roster stats for one player, across the servers visible here.
 
     Deliberately not restricted to who is online: the roster exists precisely
-    so that somebody who left an hour ago can still be looked up.
+    so that somebody who left an hour ago can still be looked up. It *is*
+    restricted to this guild's servers, so asking in one Discord cannot
+    enumerate the players of a server that belongs to another.
     """
     wanted = str(ctx.options.get("name") or "").strip().lower()
     if not wanted:
@@ -292,7 +363,7 @@ async def _player(ctx: CommandContext) -> dict[str, Any]:
 
     online_now: set[str] = set()
     found: list[tuple[Any, Any]] = []
-    for record in ctx.manager.records:
+    for record in ctx.visible:
         for player in record.players.players:
             if player.name and player.name.lower() == wanted:
                 online_now.add(record.config.id)
@@ -302,7 +373,8 @@ async def _player(ctx: CommandContext) -> dict[str, Any]:
 
     if not found:
         return _message(
-            f"Nobody called **{ctx.options.get('name')}** has joined any of these servers."
+            f"Nobody called **{ctx.options.get('name')}** has joined "
+            "any of these servers."
         )
 
     fields = []
@@ -328,7 +400,7 @@ async def _player(ctx: CommandContext) -> dict[str, Any]:
 
 
 async def _version(ctx: CommandContext) -> dict[str, Any]:
-    """Versions: the manager's own, each server's, and Steam's newest."""
+    """Versions: the manager's own, Steam's newest, and this guild's servers."""
     from ..config import build_info
 
     build = await ctx.manager.check_update()
@@ -358,7 +430,7 @@ async def _version(ctx: CommandContext) -> dict[str, Any]:
     ]
     running = [
         f"{record.config.name}: {record.version}"
-        for record in ctx.manager.records
+        for record in ctx.visible
         if record.supervisor.status.is_active and record.version
     ]
     if running:
@@ -380,10 +452,10 @@ async def _version(ctx: CommandContext) -> dict[str, Any]:
 #:
 #: Adding a control command is one entry here plus its handler. The gate, the
 #: cooldown and the audit trail already understand ``tier="control"``, and
-#: :func:`definitions` leaves control commands unregistered while the operator
-#: has them switched off -- so they do not even appear in Discord's menu until
-#: they can actually be used. A lifecycle handler wants ``defer=True``, and
-#: should call :meth:`CommandContext.manager.submit` with
+#: :func:`definitions_for_guild` leaves control commands unregistered in a
+#: guild where no instance has them switched on -- so they do not even appear
+#: in Discord's menu until they can actually be used. A lifecycle handler
+#: wants ``defer=True``, and should call ``ctx.manager.submit`` with
 #: :meth:`CommandContext.actor` so the audit trail carries a name:
 #:
 #:     "restart": Command(
@@ -393,7 +465,7 @@ async def _version(ctx: CommandContext) -> dict[str, Any]:
 COMMANDS: dict[str, Command] = {
     "servers": Command(
         name="servers",
-        description="List every server and what it is doing",
+        description="List the servers in this Discord and what they are doing",
         tier="read",
         handler=_servers,
     ),
@@ -443,17 +515,34 @@ COMMANDS: dict[str, Command] = {
 }
 
 
-def definitions(config: DiscordConfig) -> list[dict[str, Any]]:
-    """The command set to register, given what the operator has switched on.
+def command_guilds(manager: Any) -> set[str]:
+    """Every guild that has at least one instance answering commands."""
+    return {
+        record.config.discord.guild_id
+        for record in manager.records
+        if record.config.discord.answers_commands
+    }
 
-    Commands the caller could never run are not registered at all: a greyed
-    out or silently refusing command in the menu is a worse answer than one
-    that is not offered.
+
+def definitions_for_guild(manager: Any, guild_id: str) -> list[dict[str, Any]]:
+    """The command set to register in *guild_id*.
+
+    Commands nobody in that guild could run are not registered there: a
+    greyed-out or silently refusing command in the menu is a worse answer than
+    one that is not offered. Control commands therefore appear only in a guild
+    where some instance has control switched on -- which today is never, since
+    no control command exists.
     """
+    controllable = any(
+        record.config.discord.control_enabled
+        for record in manager.records
+        if record.config.discord.answers_commands
+        and record.config.discord.guild_id == guild_id
+    )
     options = [
         command.to_option()
         for command in COMMANDS.values()
-        if command.tier != "control" or config.control_enabled
+        if command.tier != "control" or controllable
     ]
     return [
         {
@@ -465,59 +554,8 @@ def definitions(config: DiscordConfig) -> list[dict[str, Any]]:
     ]
 
 
-# --------------------------------------------------------------------------- #
-# the gate
-# --------------------------------------------------------------------------- #
-def check_allowed(
-    config: DiscordConfig, command: Command, interaction: dict[str, Any]
-) -> None:
-    """Raise :class:`Denied` unless this caller may run this command.
-
-    The order matters: where, then whether, then who. A refusal says which
-    gate it was, because "nothing happened" is the least useful answer an
-    operator can get when they are setting this up.
-    """
-    guild_id = str(interaction.get("guild_id") or "")
-    if not guild_id:
-        raise Denied("These commands only work in a server channel, not in a DM.")
-    if config.guild_id and guild_id != config.guild_id:
-        # Pinned to one guild, so a leaked token or a stray invite elsewhere
-        # cannot become a way to reach this host.
-        raise Denied("This bot is not configured for this Discord server.")
-    if not config.commands_enabled:
-        raise Denied("Commands are switched off in the server manager.")
-
-    channel_id = str(interaction.get("channel_id") or "")
-    if config.command_channel_ids and channel_id not in config.command_channel_ids:
-        raise Denied("Commands are not answered in this channel.")
-
-    member = interaction.get("member") or {}
-    roles = {str(role) for role in member.get("roles") or ()}
-    # A guild interaction carries "member"; the "user" fallback is what a DM
-    # would carry, and is only reached if the guild check above is relaxed.
-    user = member.get("user") or interaction.get("user") or {}
-    user_id = str(user.get("id") or "")
-
-    if command.tier == "control":
-        if not config.control_enabled:
-            raise Denied(
-                "Control commands are switched off in the server manager."
-            )
-        # No "empty means anyone" here, unlike the read tier: an unconfigured
-        # control allowlist means nobody, because the alternative is that
-        # switching control on quietly hands the host to the whole channel.
-        allowed_user = user_id and user_id in config.control_user_ids
-        allowed_role = bool(roles & set(config.control_role_ids))
-        if not (allowed_user or allowed_role):
-            raise Denied("You are not allowed to control servers from here.")
-        return
-
-    if config.read_role_ids and not roles & set(config.read_role_ids):
-        raise Denied("You are not allowed to use these commands.")
-
-
 class Cooldowns:
-    """Per-user, per-command rate limiting for control commands.
+    """Per-user, per-instance rate limiting for control commands.
 
     A read is cheap and is not limited. A restart is not: without this, one
     person holding down a button is every player on the server disconnected
@@ -551,23 +589,18 @@ class CommandRouter:
     without a socket.
     """
 
-    def __init__(self, manager: Any, config: Callable[[], DiscordConfig]) -> None:
+    def __init__(self, manager: Any) -> None:
         self.manager = manager
-        self._config = config
         self.cooldowns = Cooldowns()
-
-    @property
-    def config(self) -> DiscordConfig:
-        return self._config()
 
     # ------------------------------------------------------------------ #
     def autocomplete(self, interaction: dict[str, Any]) -> dict[str, Any]:
-        """Offer instance names for the ``server`` argument."""
+        """Offer the names of servers visible in this guild, and no others."""
         _, options, focused = parse_command(interaction)
         typed = str(options.get(focused) or "").lower()
         choices = [
             {"name": record.config.name[:100], "value": record.config.name[:100]}
-            for record in self.manager.records
+            for record in visible_instances(self.manager, interaction)
             if typed in record.config.name.lower()
         ]
         return {
@@ -587,60 +620,67 @@ class CommandRouter:
         if command is None:
             return _reply(_message("I do not know that command.", ephemeral=True))
 
-        config = self.config
-        try:
-            check_allowed(config, command, interaction)
-        except Denied as exc:
-            return _reply(_message(str(exc), ephemeral=True))
+        if not interaction.get("guild_id"):
+            return _reply(_message(
+                "These commands only work in a server channel, not in a DM.",
+                ephemeral=True,
+            ))
 
-        member = interaction.get("member") or {}
-        user = member.get("user") or interaction.get("user") or {}
+        visible = visible_instances(self.manager, interaction)
+        if not visible:
+            # Covers every reason at once -- no instance belongs to this
+            # guild, none has commands on, this channel is not allowed, or
+            # this caller has no permitted role -- and gives away nothing
+            # about servers that answer elsewhere.
+            return _reply(_message(
+                "No servers here are set up to answer you.", ephemeral=True
+            ))
+
+        user = interaction_user(interaction)
         ctx = CommandContext(
             manager=self.manager,
-            config=config,
             command=command,
             options=options,
             user_id=str(user.get("id") or ""),
             user_name=str(user.get("username") or ""),
+            guild_id=str(interaction.get("guild_id") or ""),
             channel_id=str(interaction.get("channel_id") or ""),
+            visible=visible,
         )
 
-        if command.tier == "control":
-            try:
-                self.cooldowns.check(
-                    ctx.user_id, command.name,
-                    str(options.get("server") or ""), config.cooldown_seconds,
-                )
-            except Denied as exc:
-                return _reply(_message(str(exc), ephemeral=True))
-            # Recorded before the work is attempted, so a command that takes
-            # the server down is in the log even if it then fails.
-            self._audit(ctx)
-
         try:
+            if command.tier == "control":
+                record = _resolve(ctx)
+                check_control(record, interaction)
+                self.cooldowns.check(
+                    ctx.user_id, command.name, record.config.id,
+                    record.config.discord.cooldown_seconds,
+                )
+                # Recorded before the work is attempted, so a command that
+                # takes the server down is in the log even if it then fails.
+                self._audit(ctx, record)
             return _reply(await command.handler(ctx))
         except Denied as exc:
             return _reply(_message(str(exc), ephemeral=True))
         except Exception as exc:  # noqa: BLE001 - reported, never swallowed
             log.exception("discord command /%s %s failed", ROOT, name)
-            return _reply(
-                _message(f"That failed: {exc}", ephemeral=True)
-            )
+            return _reply(_message(f"That failed: {exc}", ephemeral=True))
 
-    def _audit(self, ctx: CommandContext) -> None:
+    def _audit(self, ctx: CommandContext, record: Any) -> None:
         """Record who asked for a control command, in the log and on the bus."""
-        target = str(ctx.options.get("server") or "")
         log.info(
-            "discord: %s ran /%s %s%s",
-            ctx.actor(), ROOT, ctx.command.name, f" {target}" if target else "",
+            "discord: %s ran /%s %s on %s",
+            ctx.actor(), ROOT, ctx.command.name, record.config.name,
         )
         events = getattr(ctx.manager, "events", None)
         if events is not None:
             events.publish(
                 Event(
                     kind=LIFECYCLE,
-                    instance_name=target,
-                    title=f"{ctx.actor()} ran /{ROOT} {ctx.command.name}".strip(),
+                    instance_id=record.config.id,
+                    instance_name=record.config.name,
+                    title=f"{ctx.actor()} ran /{ROOT} {ctx.command.name} "
+                          f"on {record.config.name}.",
                     level="info",
                     data={"actor": ctx.actor(), "command": ctx.command.name},
                 )
@@ -671,15 +711,15 @@ def parse_command(interaction: dict[str, Any]) -> tuple[str, dict[str, Any], str
 
 
 def _resolve(ctx: CommandContext) -> Any:
-    """Which instance the command is about.
+    """Which instance the command is about, out of those visible here.
 
-    The argument may be left out when only one server exists, which is the
-    common case and saves typing a name the bot already knows.
+    The argument may be left out when only one server is visible, which is the
+    common case and saves typing a name the bot already knows. A server that
+    exists but belongs to another guild is not findable: as far as this
+    interaction is concerned it does not exist, and the refusal says the same
+    thing it would say for a typo.
     """
-    records = ctx.manager.records
-    if not records:
-        raise Denied("No servers are configured in the manager yet.")
-
+    records = ctx.visible
     wanted = str(ctx.options.get("server") or "").strip()
     if not wanted:
         if len(records) == 1:
@@ -701,7 +741,7 @@ def _resolve(ctx: CommandContext) -> Any:
             + ", ".join(f"**{r.config.name}**" for r in partial[:10])
         )
     raise Denied(
-        f"No server called {wanted!r}. "
+        f"No server called {wanted!r} here. "
         + ", ".join(f"**{r.config.name}**" for r in records[:10])
     )
 

@@ -1,8 +1,22 @@
 """What the operator configured, and where the token lives.
 
-Kept apart from :class:`~vhsm.config.Settings` because this is state an
-operator edits in the GUI, like ``manager.json``, rather than deployment
-configuration. The token is kept apart from *both*: see :func:`read_token`.
+The split here is the whole shape of the integration:
+
+:class:`InstanceDiscord`
+    One instance's settings -- which Discord server and channel, what it
+    announces, who may ask about it. Persisted inside that instance's
+    ``instance.json``, so it travels with the instance and so two servers can
+    live in two entirely different Discords with nothing in common.
+
+:class:`DiscordConfig`
+    What is left over once everything that can be per-instance is: whether the
+    bot runs at all. Persisted as ``discord.json``.
+
+The token is in neither: see :func:`read_token`.
+
+This module deliberately imports nothing from the rest of this package, so
+:mod:`vhsm.instance` can read :class:`InstanceDiscord` without pulling in
+``httpx`` or ``websockets``.
 """
 
 from __future__ import annotations
@@ -62,73 +76,89 @@ def normalise_ids(values: Any, label: str = "id") -> list[str]:
     return seen
 
 
+# --------------------------------------------------------------------------- #
+# per-instance
+# --------------------------------------------------------------------------- #
 @dataclass(slots=True)
-class DiscordConfig:
-    """Everything the operator chose, persisted as ``discord.json``.
+class InstanceDiscord:
+    """One instance's Discord settings, stored in its ``instance.json``.
 
-    The token is not here, on purpose.
+    Everything that could sensibly differ between two servers is here rather
+    than on the manager, because the thing people actually have is one Discord
+    per group of players: a public server posting to a community guild, and a
+    modded test server in a guild of three friends, sharing nothing but the
+    bot account.
     """
 
+    #: Master switch for this instance. Off means it is neither announced nor
+    #: answerable, whatever else is set here.
     enabled: bool = False
-    #: The one guild this bot answers in. Commands from anywhere else are
-    #: ignored: a token that leaks, or an invite into a second guild, must not
-    #: become a way to reach this host.
+    #: Which Discord server this instance lives in. This is the scope of
+    #: everything else: announcements go to a channel in it, and commands are
+    #: only answered -- and this instance only even *named* -- in it. An
+    #: instance in another guild is invisible from here, which is the point.
     guild_id: str = ""
-    #: Where events that belong to no single instance go -- server updates,
-    #: and the manager starting. Also the fallback for an instance that has
-    #: announcements on but no channel of its own.
-    default_channel_id: str = ""
+    #: Where this instance's announcements go.
+    channel_id: str = ""
 
     # -- announcements --------------------------------------------------- #
     #: Per-event-kind switches, keyed by the constants in :mod:`vhsm.events`.
     announce: dict[str, bool] = field(
         default_factory=lambda: dict(DEFAULT_ANNOUNCE)
     )
-    #: Whether a status announcement may carry the join address. On a public
-    #: server it is already in the server browser; on a private one, posting
-    #: it to a channel is a decision rather than a detail.
+    #: Whether this instance's announcements and status replies may carry its
+    #: join address. On a public server it is already in the server browser;
+    #: on a private one, posting it to a channel is a decision rather than a
+    #: detail -- and the answer can differ per server, which is why it is here.
     show_address: bool = True
 
     # -- commands --------------------------------------------------------- #
+    #: Whether commands answer about this instance at all.
     commands_enabled: bool = True
-    #: Channels where commands are answered. Empty means every channel the
-    #: bot can see in the configured guild.
+    #: Channels where commands about this instance are answered. Empty means
+    #: any channel the bot can see in this instance's guild.
     command_channel_ids: list[str] = field(default_factory=list)
-    #: Roles allowed to run read-only commands. Empty means anyone who can
+    #: Roles allowed to ask about this instance. Empty means anyone who can
     #: already see an allowed channel, which is Discord's own gate.
     read_role_ids: list[str] = field(default_factory=list)
 
     # -- control (start/stop/restart) -------------------------------------- #
     #: Off, and worth leaving off. A control command lets anyone who can get
     #: into the channel start and stop processes on this host, which is the
-    #: thing the manager binding to localhost exists to prevent.
+    #: thing the manager binding to localhost exists to prevent. Per instance,
+    #: so a test server can be restartable by its three users while the public
+    #: one is not restartable by anybody.
     control_enabled: bool = False
-    #: Roles allowed to run control commands. There is no "empty means
+    #: Roles allowed to control this instance. There is no "empty means
     #: anyone" here: empty means nobody, and the gate says so.
     control_role_ids: list[str] = field(default_factory=list)
     #: Individual users allowed to, for an operator who wants no role for it.
     control_user_ids: list[str] = field(default_factory=list)
-    #: Per-user, per-instance cooldown, so a control command cannot be held
-    #: down. Applies to control commands only; a read is cheap.
+    #: Per-user cooldown on control commands for this instance, so one cannot
+    #: be held down. Reads are cheap and are not limited.
     cooldown_seconds: int = 15
 
     # ------------------------------------------------------------------ #
     def announces(self, kind: str) -> bool:
-        """Whether *kind* is announced. Unknown kinds fall back to the default."""
+        """Whether *kind* is announced for this instance."""
+        if not self.enabled:
+            return False
         if kind in self.announce:
             return bool(self.announce[kind])
         return bool(DEFAULT_ANNOUNCE.get(kind, False))
 
     @property
-    def configured(self) -> bool:
-        """Whether there is enough here to connect and say anything."""
-        return bool(self.guild_id)
+    def announces_anything(self) -> bool:
+        return self.enabled and any(self.announce.get(kind) for kind in KINDS)
+
+    @property
+    def answers_commands(self) -> bool:
+        return self.enabled and self.commands_enabled and bool(self.guild_id)
 
     def validate(self) -> None:
-        self.guild_id = normalise_id(self.guild_id, "Server (guild) ID")
-        self.default_channel_id = normalise_id(
-            self.default_channel_id, "Default channel ID"
-        )
+        """Reject what Discord would, and what would silently do nothing."""
+        self.guild_id = normalise_id(self.guild_id, "Discord server (guild) ID")
+        self.channel_id = normalise_id(self.channel_id, "Channel ID")
         self.command_channel_ids = normalise_ids(
             self.command_channel_ids, "Command channel ID"
         )
@@ -137,16 +167,60 @@ class DiscordConfig:
         self.control_user_ids = normalise_ids(self.control_user_ids, "Control user ID")
         if not 0 <= self.cooldown_seconds <= 3600:
             raise DiscordConfigError("Cooldown must be between 0 seconds and an hour.")
-        if self.enabled and not self.guild_id:
-            raise DiscordConfigError(
-                "The bot needs the Discord server (guild) ID it should answer in."
-            )
-        # Keep only known kinds, so a renamed event cannot leave a dead switch
-        # on disk that silently matches nothing.
         self.announce = {
             kind: bool(self.announce.get(kind, DEFAULT_ANNOUNCE.get(kind, False)))
             for kind in KINDS
         }
+        if self.enabled and not self.guild_id:
+            raise DiscordConfigError(
+                "This server needs the Discord server (guild) ID it belongs to."
+            )
+        # Announcements with nowhere to go used to fall back to a manager-wide
+        # default channel. There is no such thing any more -- the whole point
+        # of per-instance settings is that there is no shared destination --
+        # so this is refused rather than quietly doing nothing.
+        if self.announces_anything and not self.channel_id:
+            raise DiscordConfigError(
+                "Announcements need a channel ID. Pick one, or switch every "
+                "announcement off to use commands only."
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> "InstanceDiscord":
+        if isinstance(payload, cls):
+            return payload
+        known = {f for f in cls.__dataclass_fields__}
+        config = cls(**{
+            k: v for k, v in (payload or {}).items() if k in known
+        }) if isinstance(payload, dict) else cls()
+        config.announce = {
+            kind: bool(config.announce.get(kind, DEFAULT_ANNOUNCE.get(kind, False)))
+            for kind in KINDS
+        }
+        return config
+
+
+# --------------------------------------------------------------------------- #
+# manager-wide
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class DiscordConfig:
+    """What is left once everything per-instance has moved out.
+
+    Only the master switch. Everything else about *what* is said, *where*, and
+    *by whom* belongs to an instance, and the token belongs to neither.
+    """
+
+    enabled: bool = False
+    #: Whether the one-time move of the old manager-wide settings down onto
+    #: the instances has happened. See :func:`legacy_settings`.
+    migrated: bool = False
+
+    def validate(self) -> None:
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -154,14 +228,7 @@ class DiscordConfig:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "DiscordConfig":
         known = {f for f in cls.__dataclass_fields__}
-        config = cls(**{k: v for k, v in (payload or {}).items() if k in known})
-        # A config file written by a newer version, or edited by hand, is not
-        # a reason to refuse to start: normalise what we can and drop the rest.
-        config.announce = {
-            kind: bool(config.announce.get(kind, DEFAULT_ANNOUNCE.get(kind, False)))
-            for kind in KINDS
-        }
-        return config
+        return cls(**{k: v for k, v in (payload or {}).items() if k in known})
 
 
 def config_path(data_root: Path) -> Path:
@@ -174,6 +241,30 @@ def load(data_root: Path) -> DiscordConfig:
 
 def save(data_root: Path, config: DiscordConfig) -> None:
     write_json(config_path(data_root), config.to_dict())
+
+
+def legacy_settings(data_root: Path) -> dict[str, Any]:
+    """The pre-per-instance settings still sitting in ``discord.json``.
+
+    Read from the raw file rather than from :class:`DiscordConfig`, which no
+    longer has fields for them. Returned so the bot can push them down onto
+    the instances once, on first start after the upgrade: an operator who had
+    the bot working should not have to set it all up again.
+    """
+    payload = read_json(config_path(data_root), {}) or {}
+    return {
+        "guild_id": str(payload.get("guild_id") or ""),
+        "channel_id": str(payload.get("default_channel_id") or ""),
+        "announce": payload.get("announce") or {},
+        "show_address": bool(payload.get("show_address", True)),
+        "commands_enabled": bool(payload.get("commands_enabled", True)),
+        "command_channel_ids": payload.get("command_channel_ids") or [],
+        "read_role_ids": payload.get("read_role_ids") or [],
+        "control_enabled": bool(payload.get("control_enabled", False)),
+        "control_role_ids": payload.get("control_role_ids") or [],
+        "control_user_ids": payload.get("control_user_ids") or [],
+        "cooldown_seconds": int(payload.get("cooldown_seconds") or 15),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -196,6 +287,11 @@ def read_token(data_root: Path) -> str:
     Unlike the server passwords -- which are in ``instance.json`` because the
     server needs them on its command line -- a bot token is an identity, and
     it is never rendered back into the GUI.
+
+    There is one token however many Discord servers are involved. A bot
+    account can be invited to any number of guilds, so "a separate Discord per
+    instance" needs separate *guild ids*, which are per-instance, not separate
+    bots.
     """
     from_env = os.environ.get("VHSM_DISCORD_TOKEN", "").strip()
     if from_env:
@@ -242,7 +338,11 @@ def clear_token(data_root: Path) -> None:
 
 
 def invite_url(application_id: str) -> str:
-    """Where the operator clicks to put the bot in their server."""
+    """Where the operator clicks to put the bot in a server.
+
+    The same link is used for every Discord server the bot should join: one
+    bot account, invited as many times as there are guilds.
+    """
     return (
         "https://discord.com/oauth2/authorize"
         f"?client_id={application_id}"

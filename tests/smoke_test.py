@@ -19,7 +19,7 @@ os.environ["VHSM_DATA_ROOT"] = str(ROOT)
 # Discord, stood in for locally. Started before Settings() exists because the
 # API base is read from the environment, the same way the fake Valheim server
 # is selected -- so the whole integration is exercised with no network.
-from fake_discord import APPLICATION_ID, GOOD_TOKEN, FakeDiscord
+from fake_discord import GOOD_TOKEN, FakeDiscord
 FAKE_DISCORD = FakeDiscord().start()
 os.environ["VHSM_DISCORD_API_BASE"] = FAKE_DISCORD.api_base
 # Belt and braces on a machine whose proxy settings would otherwise capture a
@@ -102,9 +102,13 @@ def wait_status(c, iid, want, timeout=25):
 
 
 DISCORD_BASE = f"http://127.0.0.1:{FAKE_DISCORD.port}"
-GUILD, CHANNEL, OTHER_CHANNEL = "222222222222222222", "333333333333333333", "344444444444444444"
+# Two unrelated Discord servers, because that is the case the settings are
+# per-instance for: one server in a community guild, another in a guild of
+# three friends, sharing nothing but the bot account.
+GUILD_A, GUILD_B = "222222222222222222", "888888888888888888"
+CHANNEL_A, CHANNEL_B = "333333333333333333", "344444444444444444"
 READ_ROLE, CONTROL_ROLE = "555555555555555555", "666666666666666666"
-USER = "444444444444444444"
+USER, OTHER_USER = "444444444444444444", "777777777777777777"
 
 
 def discord_state():
@@ -130,7 +134,7 @@ def discord_wait(predicate, timeout=15, label=""):
     return False
 
 
-def interaction(sub, options=None, *, guild=GUILD, channel=CHANNEL,
+def interaction(sub, options=None, *, guild=GUILD_A, channel=CHANNEL_A,
                 roles=(), user=USER, itype=2, focused=""):
     """One slash-command interaction, shaped the way Discord sends them."""
     opts = [
@@ -1992,10 +1996,14 @@ with TestClient(app) as c:
     c.post(f"/instances/{vid}/delete", data={"remove_files": "on"})
 
     # ===================================================================== #
-    print("\n[discord: configuration and the token]")
+    print("\n[discord: per-instance settings and the token]")
     from vhsm.discord import config as dconfig
-    from vhsm.discord.commands import COMMANDS, Cooldowns, Denied, check_allowed, definitions
+    from vhsm.discord.commands import (
+        COMMANDS, Cooldowns, Denied, check_control, definitions_for_guild,
+        visible_instances,
+    )
     from vhsm.discord.announce import StateWatcher
+    from vhsm.discord.config import InstanceDiscord
     from vhsm.events import DEFAULT_ANNOUNCE, KINDS, Event, EventBus
     from vhsm.web.routes import announce_labels
 
@@ -2016,14 +2024,23 @@ with TestClient(app) as c:
           dconfig.normalise_ids("111111111111111111, 222222222222222222\n111111111111111111")
           == ["111111111111111111", "222222222222222222"])
 
-    cfg = dconfig.DiscordConfig(enabled=True, guild_id="")
+    # The two rules that replaced the old manager-wide default channel.
+    d = InstanceDiscord(enabled=True)
     try:
-        cfg.validate(); check("enabled without a guild is refused", False)
-    except dconfig.DiscordConfigError:
-        check("enabled without a guild is refused", True)
-    cfg = dconfig.DiscordConfig.from_dict({"announce": {"made_up_kind": True}, "guild_id": GUILD})
-    check("an unknown announce switch is dropped", "made_up_kind" not in cfg.announce)
-    check("...and the known ones keep their defaults", cfg.announces("crash"))
+        d.validate(); check("an instance using Discord needs a guild", False)
+    except dconfig.DiscordConfigError as exc:
+        check("an instance using Discord needs a guild", "guild" in str(exc).lower())
+    d = InstanceDiscord(enabled=True, guild_id=GUILD_A)
+    try:
+        d.validate(); check("announcing with nowhere to announce is refused", False)
+    except dconfig.DiscordConfigError as exc:
+        check("announcing with nowhere to announce is refused",
+              "channel" in str(exc).lower())
+    d = InstanceDiscord(enabled=True, guild_id=GUILD_A)
+    d.announce = {kind: False for kind in KINDS}
+    d.validate()
+    check("...but commands-only needs no channel", not d.announces_anything
+          and d.answers_commands)
 
     dconfig.write_token(ROOT, f'  "bot {GOOD_TOKEN}"  ')
     check("a token pasted with quotes and a prefix is cleaned",
@@ -2043,64 +2060,344 @@ with TestClient(app) as c:
     check("the invite link asks for three permissions and the commands scope",
           "permissions=19456" in dconfig.invite_url("1")
           and "applications.commands" in dconfig.invite_url("1"))
+    check("one token serves every Discord server",
+          "token" not in InstanceDiscord.__dataclass_fields__)
 
-    print("\n[discord: who may run what]")
-    gate = dconfig.DiscordConfig(enabled=True, guild_id=GUILD, commands_enabled=True)
-    read_cmd, ctrl_cmd = COMMANDS["status"], COMMANDS["status"].__class__(
-        name="restart", description="x", tier="control", handler=COMMANDS["status"].handler)
+    print("\n[discord: settings survive a round trip]")
+    rt = app.state.manager.get(iid).config.__class__
+    sample_cfg = rt.from_dict({
+        "name": "RT", "world": "W",
+        "discord": {"enabled": True, "guild_id": GUILD_A, "channel_id": CHANNEL_A,
+                    "read_role_ids": [READ_ROLE], "announce": {"status": True}},
+    })
+    check("nested Discord settings read back as a dataclass",
+          isinstance(sample_cfg.discord, InstanceDiscord)
+          and sample_cfg.discord.guild_id == GUILD_A)
+    again = rt.from_dict(sample_cfg.to_dict())
+    check("...and survive to_dict and back",
+          again.discord.read_role_ids == [READ_ROLE] and again.discord.announce["status"])
+    older = rt.from_dict({"name": "Old", "world": "W", "discord_enabled": True,
+                          "discord_channel_id": CHANNEL_A})
+    check("an instance.json from before the move still loads",
+          older.discord.enabled and older.discord.channel_id == CHANNEL_A)
 
-    def denied(config, command, **kwargs):
+    print("\n[discord: two servers, two Discords]")
+    free_port = max(rec.config.port for rec in manager.records) + 3
+    r = c.post("/instances", data={"name": "Helheim", "world": "Helheim",
+               "password": "garmhound", "port": str(free_port), "save_interval": "1800",
+               "backups": "4", "backup_short": "7200", "backup_long": "43200"},
+               follow_redirects=False)
+    check("a second server to put in another Discord", r.status_code == 303, r.text[:160])
+    hid = r.headers["location"].rsplit("/", 1)[-1]
+
+    bot = app.state.discord
+    r = c.post("/settings/discord/token", data={"token": GOOD_TOKEN})
+    check("the token is accepted", "Token saved" in r.text, r.text[:300])
+    check("...and never rendered back", GOOD_TOKEN not in r.text)
+    r = c.post("/settings/discord", data={"enabled": "1"})
+    check("the bot runs with nothing else set at the manager level",
+          "Bot running" in r.text or "Discord bot running" in r.text, r.text[:300])
+    check("it connects", discord_wait(lambda: bot.status()["connected"], 20, "connect"),
+          bot.status())
+    r = c.get("/settings")
+    check("settings no longer carries the announcement switches",
+          'name="announce"' not in r.text)
+    check("...and points at the per-server settings instead",
+          "Per-server settings" in r.text, r.text[:200])
+
+    def set_discord(instance_id, **fields):
+        """Save one instance's Discord settings the way the form does.
+
+        A list value is sent as a repeated field, which is how a set of
+        checkboxes arrives; None drops the field entirely, which is how an
+        unchecked box arrives.
+        """
+        data = {"enabled": "1", "commands_enabled": "1", "show_address": "1"}
+        data.update(fields)
+        data.setdefault("announce", ["status", "ready", "crash"])
+        return c.post(
+            f"/instances/{instance_id}/discord",
+            data={k: v for k, v in data.items() if v is not None},
+        )
+
+    r = set_discord(iid, guild_id=GUILD_A, channel_id=CHANNEL_A)
+    check("Midgard goes in the first Discord", "Saved:" in r.text, r.text[:300])
+    r = set_discord(hid, guild_id=GUILD_B, channel_id=CHANNEL_B)
+    check("Helheim goes in a different one", "Saved:" in r.text, r.text[:300])
+    check("the instance page shows its own settings",
+          GUILD_A in c.get(f"/instances/{iid}").text)
+
+    check("commands are registered in both Discords",
+          discord_wait(lambda: {g for g, _ in
+                                [(r_["guild_id"], r_) for r_ in discord_state()["registered"]]}
+                       >= {GUILD_A, GUILD_B}, 15, "two registrations"),
+          [r_["guild_id"] for r_ in discord_state()["registered"]])
+
+    print("\n[discord: one Discord cannot see another's server]")
+    reply = ask("servers", guild=GUILD_A, channel=CHANNEL_A)
+    check("the first Discord lists only its own server",
+          "Midgard" in said(reply) and "Helheim" not in said(reply), said(reply)[:300])
+    reply = ask("servers", guild=GUILD_B, channel=CHANNEL_B)
+    check("the second lists only its own",
+          "Helheim" in said(reply) and "Midgard" not in said(reply), said(reply)[:300])
+    reply = ask("status", {"server": "Helheim"}, guild=GUILD_A, channel=CHANNEL_A)
+    check("naming another Discord's server by name does not reach it",
+          "No server called" in said(reply), said(reply)[:300])
+    check("...and the refusal does not confirm it exists",
+          "Helheim" not in said(reply).replace("'Helheim'", ""), said(reply)[:300])
+    reply = ask("status", {"server": manager.get(hid).config.id},
+                guild=GUILD_A, channel=CHANNEL_A)
+    check("nor does naming it by its instance id",
+          "No server called" in said(reply), said(reply)[:200])
+
+    discord_reset()
+    discord_dispatch("INTERACTION_CREATE",
+                     interaction("status", {"server": ""}, itype=4, focused="server",
+                                 guild=GUILD_B, channel=CHANNEL_B))
+    check("autocomplete offers only this Discord's servers",
+          discord_wait(lambda: discord_state()["responses"], 10, "autocomplete"),
+          discord_state()["responses"][-1:])
+    offered = [ch["value"] for ch in
+               discord_state()["responses"][-1]["payload"]["data"]["choices"]]
+    check("...which is just the one", offered == ["Helheim"], offered)
+
+    reply = ask("servers", guild="999999999999999999")
+    check("a Discord with no servers configured is told so, and nothing else",
+          "No servers here" in said(reply), said(reply)[:200])
+    check("...ephemerally", reply["data"].get("flags") == 64)
+
+    print("\n[discord: per-server permissions]")
+    set_discord(iid, guild_id=GUILD_A, channel_id=CHANNEL_A,
+                command_channel_ids=CHANNEL_A)
+    reply = ask("servers", guild=GUILD_A, channel=CHANNEL_B)
+    check("a channel outside this server's list cannot ask about it",
+          "No servers here" in said(reply), said(reply)[:200])
+    reply = ask("servers", guild=GUILD_A, channel=CHANNEL_A)
+    check("...and the allowed channel still can", "Midgard" in said(reply))
+
+    set_discord(iid, guild_id=GUILD_A, channel_id=CHANNEL_A, read_role_ids=READ_ROLE)
+    reply = ask("servers", guild=GUILD_A, channel=CHANNEL_A)
+    check("without this server's read role, it is invisible",
+          "No servers here" in said(reply), said(reply)[:200])
+    reply = ask("servers", guild=GUILD_A, channel=CHANNEL_A, roles=[READ_ROLE])
+    check("...and visible with it", "Midgard" in said(reply))
+    check("the other Discord's server is unaffected by that role",
+          "Helheim" in said(ask("servers", guild=GUILD_B, channel=CHANNEL_B)))
+
+    set_discord(iid, guild_id=GUILD_A, channel_id=CHANNEL_A, commands_enabled=None)
+    reply = ask("servers", guild=GUILD_A, channel=CHANNEL_A)
+    check("a server with commands switched off answers nothing",
+          "No servers here" in said(reply), said(reply)[:200])
+    set_discord(iid, guild_id=GUILD_A, channel_id=CHANNEL_A)
+    check("...and comes back when they are switched on",
+          "Midgard" in said(ask("servers", guild=GUILD_A, channel=CHANNEL_A)))
+
+    # The control tier: per instance, enforced now, used by nothing yet.
+    mid, hel = manager.get(iid), manager.get(hid)
+    ctrl = COMMANDS["status"].__class__(
+        name="restart", description="x", tier="control",
+        handler=COMMANDS["status"].handler)
+
+    def control_denied(record, **kwargs):
         try:
-            check_allowed(config, command, interaction("status", **kwargs))
+            check_control(record, interaction("restart", **kwargs))
             return ""
         except Denied as exc:
             return str(exc)
 
-    check("a read command is allowed by default", not denied(gate, read_cmd))
-    check("a DM is refused", "not in a DM" in denied(gate, read_cmd, guild=None))
-    check("another guild is refused",
-          "not configured for this Discord server" in denied(gate, read_cmd, guild="999999999999999999"))
-    off = dconfig.DiscordConfig.from_dict({**gate.to_dict(), "commands_enabled": False})
-    check("commands switched off are refused", "switched off" in denied(off, read_cmd))
-    scoped = dconfig.DiscordConfig.from_dict({**gate.to_dict(), "command_channel_ids": [CHANNEL]})
-    check("a channel outside the list is refused",
-          "not answered in this channel" in denied(scoped, read_cmd, channel=OTHER_CHANNEL))
-    check("...and one inside it is allowed", not denied(scoped, read_cmd, channel=CHANNEL))
-    gated = dconfig.DiscordConfig.from_dict({**gate.to_dict(), "read_role_ids": [READ_ROLE]})
-    check("without the read role, refused", "not allowed to use" in denied(gated, read_cmd))
-    check("with the read role, allowed", not denied(gated, read_cmd, roles=[READ_ROLE]))
-
-    # The tier that is not shipped yet, but is enforced now.
-    check("control is refused while it is switched off",
-          "Control commands are switched off" in denied(gate, ctrl_cmd, roles=[CONTROL_ROLE]))
-    armed = dconfig.DiscordConfig.from_dict({**gate.to_dict(), "control_enabled": True})
+    check("control is refused while it is switched off for that server",
+          "switched off" in control_denied(mid, roles=[CONTROL_ROLE]))
+    manager.update(iid, {"discord": {**mid.config.discord.to_dict(),
+                                     "control_enabled": True}})
     check("control with an empty allowlist means nobody, not everybody",
-          "not allowed to control" in denied(armed, ctrl_cmd))
-    by_role = dconfig.DiscordConfig.from_dict(
-        {**armed.to_dict(), "control_role_ids": [CONTROL_ROLE]})
-    check("control allows a named role", not denied(by_role, ctrl_cmd, roles=[CONTROL_ROLE]))
+          "not allowed to control" in control_denied(mid))
+    manager.update(iid, {"discord": {**manager.get(iid).config.discord.to_dict(),
+                                     "control_role_ids": [CONTROL_ROLE]}})
+    check("control allows a named role", not control_denied(mid, roles=[CONTROL_ROLE]))
     check("...and still refuses another role",
-          "not allowed to control" in denied(by_role, ctrl_cmd, roles=[READ_ROLE]))
-    by_user = dconfig.DiscordConfig.from_dict(
-        {**armed.to_dict(), "control_user_ids": [USER]})
-    check("control allows a named user", not denied(by_user, ctrl_cmd, user=USER))
-    check("...and refuses anybody else",
-          "not allowed to control" in denied(by_user, ctrl_cmd, user="777777777777777777"))
+          "not allowed to control" in control_denied(mid, roles=[READ_ROLE]))
+    check("...and names the server it refused",
+          "Midgard" in control_denied(mid, roles=[READ_ROLE]))
+    check("control on one server does not unlock the other",
+          "switched off" in control_denied(hel, roles=[CONTROL_ROLE]))
+    manager.update(iid, {"discord": {**manager.get(iid).config.discord.to_dict(),
+                                     "control_user_ids": [OTHER_USER],
+                                     "control_role_ids": []}})
+    check("control allows a named user", not control_denied(mid, user=OTHER_USER))
+    check("...and refuses anybody else", control_denied(mid, user=USER))
+
+    check("a guild with control on offers the control commands",
+          "restart" not in [o["name"] for o in
+                            definitions_for_guild(manager, GUILD_B)[0]["options"]])
+    manager.update(iid, {"discord": {**manager.get(iid).config.discord.to_dict(),
+                                     "control_enabled": False}})
+    check("no guild offers a control command while none exists",
+          all("restart" not in [o["name"] for o in
+                                definitions_for_guild(manager, g)[0]["options"]]
+              for g in (GUILD_A, GUILD_B)))
 
     cool = Cooldowns()
-    cool.check(USER, "restart", "Midgard", 60)
+    cool.check(USER, "restart", iid, 60)
     try:
-        cool.check(USER, "restart", "Midgard", 60)
+        cool.check(USER, "restart", iid, 60)
         check("a cooldown holds the second attempt", False)
     except Denied as exc:
         check("a cooldown holds the second attempt", "Give that another" in str(exc))
-    check("...per server", (cool.check(USER, "restart", "Asgard", 60), True)[1])
-    check("...and not at all when it is zero",
-          (cool.check(USER, "restart", "Midgard", 0), True)[1])
+    check("...per server", (cool.check(USER, "restart", hid, 60), True)[1])
 
-    check("control commands are not registered while they are off",
-          [o["name"] for o in definitions(gate)[0]["options"]]
-          == ["servers", "status", "players", "mods", "player", "version"])
+    check("visible_instances is the one place scope is decided",
+          [r_.config.id for r_ in
+           visible_instances(manager, interaction("servers", guild=GUILD_B,
+                                                  channel=CHANNEL_B))] == [hid])
+
+    print("\n[discord: announcements go to each server's own channel]")
+    bus_events = manager.events
+    set_discord(iid, guild_id=GUILD_A, channel_id=CHANNEL_A,
+                announce=["status", "server_update"])
+    set_discord(hid, guild_id=GUILD_B, channel_id=CHANNEL_B,
+                announce=["status"])
+
+    discord_reset()
+    bus_events.publish(Event(kind="status", instance_id=iid, instance_name="Midgard",
+                             title="Midgard has stopped.", key="pi1"))
+    check("one server's event goes to its own channel",
+          discord_wait(lambda: discord_state()["messages"], 10, "channel A")
+          and [m["channel_id"] for m in discord_state()["messages"]] == [CHANNEL_A],
+          discord_state()["messages"])
+
+    discord_reset()
+    bus_events.publish(Event(kind="status", instance_id=hid, instance_name="Helheim",
+                             title="Helheim has stopped.", key="pi2"))
+    check("the other's goes to the other channel",
+          discord_wait(lambda: discord_state()["messages"], 10, "channel B")
+          and [m["channel_id"] for m in discord_state()["messages"]] == [CHANNEL_B],
+          discord_state()["messages"])
+
+    discord_reset()
+    bus_events.publish(Event(kind="server_update", title="A new build is out.", key="pi3"))
+    check("a manager-wide event reaches every channel that wants it",
+          discord_wait(lambda: discord_state()["messages"], 10, "fan-out")
+          and [m["channel_id"] for m in discord_state()["messages"]] == [CHANNEL_A],
+          discord_state()["messages"])
+    check("...and not the one that switched it off",
+          CHANNEL_B not in [m["channel_id"] for m in discord_state()["messages"]])
+
+    set_discord(hid, guild_id=GUILD_B, channel_id=CHANNEL_B,
+                announce=["status", "server_update"])
+    discord_reset()
+    bus_events.publish(Event(kind="server_update", title="Another build.", key="pi4"))
+    check("once both want it, both get it",
+          discord_wait(lambda: len(discord_state()["messages"]) == 2, 10, "both")
+          and sorted(m["channel_id"] for m in discord_state()["messages"])
+          == sorted([CHANNEL_A, CHANNEL_B]),
+          discord_state()["messages"])
+
+    set_discord(hid, guild_id=GUILD_B, channel_id=CHANNEL_A,
+                announce=["status", "server_update"])
+    discord_reset()
+    bus_events.publish(Event(kind="server_update", title="Shared channel.", key="pi5"))
+    check("two servers sharing a channel get one message, not two",
+          discord_wait(lambda: discord_state()["messages"], 10, "dedup")
+          and len(discord_state()["messages"]) == 1,
+          discord_state()["messages"])
+    set_discord(hid, guild_id=GUILD_B, channel_id=CHANNEL_B,
+                announce=["status", "server_update"])
+
+    discord_reset()
+    bus_events.publish(Event(kind="snapshot", instance_id=iid, instance_name="Midgard",
+                             title="Snapshot taken.", key="pi6"))
+    check("a kind switched off for that server is not announced",
+          not discord_wait(lambda: discord_state()["messages"], 2, ""))
+
+    r = c.post(f"/instances/{iid}/discord", data={"guild_id": GUILD_A})
+    check("switching a server off is accepted", "will not use Discord" in r.text,
+          r.text[:200])
+    discord_reset()
+    bus_events.publish(Event(kind="status", instance_id=iid, instance_name="Midgard",
+                             title="Midgard is starting.", key="pi7"))
+    check("...and it then says nothing at all",
+          not discord_wait(lambda: discord_state()["messages"], 2, ""))
+    set_discord(iid, guild_id=GUILD_A, channel_id=CHANNEL_A,
+                announce=["status", "server_update", "player_join", "player_leave"])
+
+    print("\n[discord: the address is per server too]")
+    reply = ask("status", {"server": "Midgard"}, guild=GUILD_A, channel=CHANNEL_A)
+    check("a server that shares its address shows it", "2456" in said(reply),
+          said(reply)[:300])
+    set_discord(iid, guild_id=GUILD_A, channel_id=CHANNEL_A, show_address=None,
+                announce=["status", "server_update", "player_join", "player_leave"])
+    reply = ask("status", {"server": "Midgard"}, guild=GUILD_A, channel=CHANNEL_A)
+    check("...and one that does not, does not", "2456" not in said(reply),
+          said(reply)[:300])
+    set_discord(iid, guild_id=GUILD_A, channel_id=CHANNEL_A,
+                announce=["status", "server_update", "player_join", "player_leave"])
+
+    print("\n[discord: a bad id is refused on the instance page]")
+    r = c.post(f"/instances/{iid}/discord",
+               data={"enabled": "1", "guild_id": "not-a-guild"})
+    check("a bad guild id is refused", "must be a Discord id" in r.text, r.text[:300])
+    check("...and the saved settings are untouched",
+          manager.get(iid).config.discord.guild_id == GUILD_A)
+    r = c.post(f"/instances/{iid}/discord",
+               data={"enabled": "1", "guild_id": GUILD_A, "channel_id": "nope"})
+    check("a bad channel id is refused too", "must be a Discord id" in r.text,
+          r.text[:300])
+
+    print("\n[discord: read commands]")
+    reply = ask("status", {"server": "Midgard"}, roles=[READ_ROLE])
+    check("/vh status answers for one server", "Midgard" in said(reply), said(reply)[:300])
+    reply = ask("players", {"server": "Midgard"})
+    check("/vh players answers", "Midgard" in said(reply), said(reply)[:200])
+    reply = ask("version")
+    check("/vh version defers and then answers", "vhsm" in said(reply), said(reply)[:300])
+    reply = ask("player", {"name": "Nobody At All"})
+    check("an unknown player is said plainly", "has joined" in said(reply))
+    reply = ask("mods", {"server": "Midgard"})
+    if manager.get(iid).config.mods_enabled:
+        check("/vh mods lists what a modded server runs", "mods" in said(reply).lower(),
+              said(reply)[:200])
+    else:
+        check("/vh mods says so when a server runs none",
+              "does not run mods" in said(reply), said(reply)[:200])
+    check("an unknown subcommand does not go unanswered",
+          "do not know that command" in said(ask("nonsense")))
+    check("a DM is refused", "not in a DM" in said(ask("servers", guild=None)))
+
+    print("\n[discord: player traffic]")
+    record = manager.get(iid)
+    NAMED, UNNAMED = "76561198000000042", "76561198000000043"
+
+    def announced(fragment):
+        for message in discord_state()["messages"]:
+            if fragment in json.dumps(message["payload"]):
+                return message["payload"]
+        return None
+
+    discord_reset()
+    record.players.observe_log(f"Got connection SteamID {NAMED}")
+    record.players.observe_log("Got character ZDOID from Freyja : 12345:1")
+    check("a player joining is announced once they have a name",
+          discord_wait(lambda: announced("Freyja"), 10, "join"),
+          discord_state()["messages"])
+    joined = announced("Freyja") or {}
+    check("...as a line rather than an embed", "content" in joined, joined)
+    check("...to that server's channel only",
+          [m["channel_id"] for m in discord_state()["messages"]
+           if "Freyja" in json.dumps(m["payload"])] == [CHANNEL_A])
+    check("...and the roster recorded it too", record.roster.get(NAMED) is not None)
+
+    discord_reset()
+    record.players.observe_log(f"Closing socket {NAMED}")
+    check("a player leaving is announced",
+          discord_wait(lambda: announced("Freyja"), 10, "leave"))
+    check("...saying they left", "left" in said(announced("Freyja") or {}))
+
+    discord_reset()
+    record.players.observe_log(f"Got connection SteamID {UNNAMED}")
+    record.players.observe_log(f"Closing socket {UNNAMED}")
+    check("a connection that never named anybody is not a player leaving",
+          not discord_wait(lambda: announced(UNNAMED), 3, ""),
+          announced(UNNAMED))
 
     print("\n[discord: deriving events from samples]")
     bus = EventBus()
@@ -2127,7 +2424,7 @@ with TestClient(app) as c:
     check("nothing is announced on first sight", not drain())
     sample(status="running")
     check("...nor while still settling after start-up", not drain())
-    watcher._started_at -= 120                    # out of the quiet period
+    watcher._started_at -= 120
     sample(status="stopped")
     events = drain()
     check("a status change is one event",
@@ -2147,7 +2444,6 @@ with TestClient(app) as c:
           len(events) == 1 and events[0].kind == "crash" and events[0].level == "bad"
           and "139" in events[0].detail, [e.to_dict() for e in events])
 
-    # Reachability must not flap: one lost packet is not an outage.
     sample(status="running", listening=True, reachable=True)
     sample(status="running", listening=True, reachable=True)
     sample(status="running", listening=True, reachable=True)
@@ -2163,33 +2459,28 @@ with TestClient(app) as c:
           and "not answering" in events[0].title, [e.title for e in events])
 
     updates = [{"package_full_name": "A-B", "name": "B", "current": "1.0.0", "latest": "1.1.0"}]
-    sample(status="running", listening=True, reachable=False,
-           mods={"installed": 1, "enabled": 1, "updates_active": updates,
-                 "restart_pending": False})
+    mods_with = {"installed": 1, "enabled": 1, "updates_active": updates,
+                 "restart_pending": False}
+    sample(status="running", listening=True, reachable=False, mods=mods_with)
     events = drain()
     check("a mod release is announced with the versions",
           len(events) == 1 and events[0].kind == "mod_update"
           and "1.0.0 → 1.1.0" in events[0].detail, [e.to_dict() for e in events])
-    sample(status="running", listening=True, reachable=False,
-           mods={"installed": 1, "enabled": 1, "updates_active": updates,
-                 "restart_pending": False})
+    sample(status="running", listening=True, reachable=False, mods=mods_with)
     check("...and not again for the same release", not drain())
     sample(status="running", listening=True, reachable=False,
-           mods={"installed": 1, "enabled": 1, "updates_active": updates,
-                 "restart_pending": True})
+           mods={**mods_with, "restart_pending": True})
     events = drain()
     check("mods changed but not loaded is its own notice",
           len(events) == 1 and events[0].kind == "mod_restart_pending", [e.kind for e in events])
 
-    sample(status="running", listening=True, reachable=False,
-           notices=[{"key": "no-user-account", "level": "error",
-                     "title": "The server has no user account.", "detail": "..."}])
+    notice = [{"key": "no-user-account", "level": "error",
+               "title": "The server has no user account.", "detail": "..."}]
+    sample(status="running", listening=True, reachable=False, notices=notice)
     events = drain()
     check("a console failure is announced once",
           len(events) == 1 and events[0].kind == "notice", [e.kind for e in events])
-    sample(status="running", listening=True, reachable=False,
-           notices=[{"key": "no-user-account", "level": "error",
-                     "title": "The server has no user account.", "detail": "..."}])
+    sample(status="running", listening=True, reachable=False, notices=notice)
     check("...and not repeated every tick", not drain())
 
     watcher.observe_build({"available": True, "installed": "100", "latest": "200"})
@@ -2199,223 +2490,43 @@ with TestClient(app) as c:
     watcher.observe_build({"available": True, "installed": "100", "latest": "200"})
     check("...once per build", not drain())
 
-    print("\n[discord: connecting]")
-    bot = app.state.discord
-    check("the bot is off until it is configured",
-          not bot.status()["enabled"] and not bot.status()["connected"])
-    r = c.get("/settings")
-    check("settings has the Discord panel", "Discord bot" in r.text and "Bot token" in r.text)
-    check("...and offers the announcement switches", 'name="announce"' in r.text)
-
-    r = c.post("/settings/discord", data={"enabled": "1", "guild_id": "nonsense"})
-    check("a bad guild id is refused in the form",
-          "must be a Discord id" in r.text and not bot.status()["enabled"], r.text[:300])
-
-    r = c.post("/settings/discord/token", data={"token": GOOD_TOKEN})
-    check("the token is accepted", "Token saved" in r.text, r.text[:300])
-    check("...and never rendered back", GOOD_TOKEN not in r.text)
-
-    r = c.post("/settings/discord", data={
-        "enabled": "1", "guild_id": GUILD, "default_channel_id": CHANNEL,
-        "commands_enabled": "1", "show_address": "1",
-        "announce": ["status", "ready", "crash", "player_join", "player_leave",
-                     "mod_update", "server_update"]})
-    check("the bot is configured", "Discord settings saved" in r.text, r.text[:400])
-    check("it connects", discord_wait(lambda: bot.status()["connected"], 20, "connect"),
-          bot.status())
-    check("it identified once", discord_state()["identifies"] == 1)
-    check("it registered its commands",
-          discord_wait(lambda: discord_state()["registered"], 10, "registration"))
-    offered = [o["name"] for o in discord_state()["registered"][-1]["commands"][0]["options"]]
-    check("only read commands are offered",
-          offered == ["servers", "status", "players", "mods", "player", "version"], offered)
-    check("the invite link is built from the application id",
-          APPLICATION_ID in bot.status()["invite_url"], bot.status()["invite_url"])
-
-    # The first run connects before the bot has been invited anywhere, so the
-    # registration at READY fails and Save has to be the retry.
-    httpx.post(DISCORD_BASE + "/_test/reset", trust_env=False)
-    c.post("/settings/discord", data={
-        "enabled": "1", "guild_id": GUILD, "default_channel_id": CHANNEL,
-        "commands_enabled": "1", "show_address": "1",
-        "announce": ["status", "ready", "crash", "player_join", "player_leave",
-                     "mod_update", "server_update"]})
-    check("saving settings registers the commands again, unchanged or not",
-          discord_wait(lambda: discord_state()["registered"], 10, "re-registration"),
-          discord_state()["registered"])
-    check("...without dropping the connection",
-          bot.status()["connected"] and discord_state()["identifies"] == 1,
-          discord_state()["identifies"])
-
-    print("\n[discord: read commands]")
-    check("/vh servers lists the server",
-          "Midgard" in said(ask("servers")))
-    reply = ask("status", {"server": "Midgard"})
-    check("/vh status answers for one server", "Midgard" in said(reply), said(reply)[:300])
-    check("...with the join address", "2456" in said(reply))
-    check("/vh status names the servers when it is ambiguous",
-          "Which server" in said(ask("status")) or len(app.state.manager.records) == 1)
-    # A name no instance in this suite uses: "Asgard" is one of them.
-    check("an unknown server is refused by name",
-          "No server called" in said(ask("status", {"server": "Jotunheim"})))
-    # Derived from what is actually configured at this point, rather than a
-    # name an earlier section may have created and deleted.
-    whole = app.state.manager.records[0].config.name
-    check("a partial name that matches one server is accepted",
-          whole in said(ask("status", {"server": whole[:4].lower()})), whole)
-    reply = ask("players", {"server": "Midgard"})
-    check("/vh players answers", "Midgard" in said(reply), said(reply)[:200])
-    reply = ask("version")
-    check("/vh version defers and then answers", "vhsm" in said(reply), said(reply)[:300])
-    reply = ask("player", {"name": "Nobody At All"})
-    check("an unknown player is said plainly", "has joined any of these servers" in said(reply))
-    reply = ask("mods", {"server": "Midgard"})
-    # Whether this server has the mod loader switched on depends on what the
-    # sections above left behind, so the check follows the configuration
-    # rather than assuming one of the two answers.
-    if app.state.manager.get(iid).config.mods_enabled:
-        check("/vh mods lists what a modded server runs",
-              "mods" in said(reply).lower(), said(reply)[:200])
-    else:
-        check("/vh mods says so when a server runs none",
-              "does not run mods" in said(reply), said(reply)[:200])
-
+    print("\n[discord: the test button is per server]")
     discord_reset()
-    discord_dispatch("INTERACTION_CREATE",
-                     interaction("status", {"server": "Mid"}, itype=4, focused="server"))
-    check("the server argument autocompletes",
-          discord_wait(lambda: discord_state()["responses"], 10, "autocomplete")
-          and discord_state()["responses"][-1]["payload"]["data"]["choices"][0]["value"] == "Midgard",
-          discord_state()["responses"][-1:])
+    r = c.post(f"/instances/{iid}/discord/test")
+    check("it posts to that server's channel",
+          "Test message sent" in r.text
+          and discord_wait(lambda: discord_state()["messages"], 10, "test message")
+          and discord_state()["messages"][0]["channel_id"] == CHANNEL_A,
+          r.text[:300])
+    check("...naming the server it is for",
+          "Midgard" in said(discord_state()["messages"][0]["payload"]))
 
-    reply = ask("servers", guild="999999999999999999")
-    check("a command from another guild is refused",
-          "not configured for this Discord server" in said(reply))
-    check("...only to the person who ran it", reply["data"].get("flags") == 64)
-    check("an unknown subcommand does not go unanswered",
-          "do not know that command" in said(ask("nonsense")))
-
-    print("\n[discord: announcements]")
+    print("\n[discord: when Discord refuses a channel]")
+    set_discord(iid, guild_id=GUILD_A, channel_id="999000000000000000",
+                announce=["server_update"])
     discord_reset()
-    bus_events = app.state.manager.events
-    bus_events.publish(Event(kind="server_update", title="A new build is out.",
-                             detail="123 -> 456", key="t1"))
-    check("a manager-wide event goes to the default channel",
-          discord_wait(lambda: discord_state()["messages"], 10, "default channel")
-          and discord_state()["messages"][0]["channel_id"] == CHANNEL,
-          discord_state()["messages"])
-    check("...rendered as an embed",
-          "A new build is out." in said(discord_state()["messages"][0]["payload"]))
-
-    discord_reset()
-    bus_events.publish(Event(kind="server_update", title="A new build is out.",
-                             detail="123 -> 456", key="t1"))
-    check("the same news is not announced twice",
-          not discord_wait(lambda: discord_state()["messages"], 2, ""))
-
-    discord_reset()
-    bus_events.publish(Event(kind="snapshot", title="Snapshot taken.", key="t2"))
-    check("an event whose switch is off is not announced",
-          not discord_wait(lambda: discord_state()["messages"], 2, ""))
-
-    discord_reset()
-    bus_events.publish(Event(kind="status", instance_id=iid, instance_name="Midgard",
-                             title="Midgard has stopped.", key="t3"))
-    check("an instance that has not opted in stays silent",
-          not discord_wait(lambda: discord_state()["messages"], 2, ""))
-
-    r = c.post(f"/instances/{iid}/discord", data={"enabled": "1", "channel_id": OTHER_CHANNEL})
-    check("an instance can choose its own channel",
-          "Announcing to channel" in r.text, r.text[:300])
-    discord_reset()
-    bus_events.publish(Event(kind="status", instance_id=iid, instance_name="Midgard",
-                             title="Midgard has stopped.", key="t4"))
-    check("...and its events go there, not to the default",
-          discord_wait(lambda: discord_state()["messages"], 10, "instance channel")
-          and discord_state()["messages"][0]["channel_id"] == OTHER_CHANNEL,
-          discord_state()["messages"])
-
-    r = c.post(f"/instances/{iid}/discord", data={"enabled": "1", "channel_id": ""})
-    discord_reset()
-    bus_events.publish(Event(kind="status", instance_id=iid, instance_name="Midgard",
-                             title="Midgard is starting.", key="t5"))
-    check("a blank channel falls back to the default",
-          discord_wait(lambda: discord_state()["messages"], 10, "fallback")
-          and discord_state()["messages"][0]["channel_id"] == CHANNEL)
-
-    r = c.post(f"/instances/{iid}/discord", data={"enabled": "1", "channel_id": "not-a-channel"})
-    check("a bad channel id is refused on the instance page",
-          "digits only" in r.text, r.text[:300])
-
-    print("\n[discord: player traffic]")
-    # The simulated server has a player-churn thread of its own, so these
-    # assertions name our own test player rather than looking at whatever
-    # happens to have been announced last.
-    record = app.state.manager.get(iid)
-    NAMED, UNNAMED = "76561198000000042", "76561198000000043"
-
-    def announced(fragment):
-        """Any announcement mentioning *fragment*, and the payload if so."""
-        for message in discord_state()["messages"]:
-            if fragment in json.dumps(message["payload"]):
-                return message["payload"]
-        return None
-
-    discord_reset()
-    record.players.observe_log(f"Got connection SteamID {NAMED}")
-    record.players.observe_log("Got character ZDOID from Freyja : 12345:1")
-    check("a player joining is announced once they have a name",
-          discord_wait(lambda: announced("Freyja"), 10, "join"),
-          discord_state()["messages"])
-    joined = announced("Freyja") or {}
-    check("...as a line rather than an embed", "content" in joined, joined)
-    check("...and the roster recorded it too", record.roster.get(NAMED) is not None)
-
-    discord_reset()
-    record.players.observe_log(f"Closing socket {NAMED}")
-    check("a player leaving is announced",
-          discord_wait(lambda: announced("Freyja"), 10, "leave"))
-    check("...saying they left", "left" in said(announced("Freyja") or {}))
-
-    discord_reset()
-    record.players.observe_log(f"Got connection SteamID {UNNAMED}")
-    record.players.observe_log(f"Closing socket {UNNAMED}")
-    check("a connection that never named anybody is not a player leaving",
-          not discord_wait(lambda: announced(UNNAMED), 3, ""),
-          announced(UNNAMED))
-
-    print("\n[discord: when Discord says no]")
-    c.post("/settings/discord", data={
-        "enabled": "1", "guild_id": GUILD, "default_channel_id": "999000000000000000",
-        "commands_enabled": "1", "announce": ["server_update"]})
-    discord_reset()
-    bus_events.publish(Event(kind="server_update", title="Another build.", key="t6"))
+    bus_events.publish(Event(kind="server_update", title="Refused build.", key="pi8"))
     check("a channel it cannot post to is reported, not crashed out",
           discord_wait(lambda: "not allowed to do that" in (bot.status()["last_error"] or ""),
                        10, "forbidden"),
           bot.status()["last_error"])
     check("...and the bot stays connected", bot.status()["connected"])
+    set_discord(iid, guild_id=GUILD_A, channel_id=CHANNEL_A, announce=["server_update"])
 
-    print("\n[discord: the test button and switching off]")
-    c.post("/settings/discord", data={
-        "enabled": "1", "guild_id": GUILD, "default_channel_id": CHANNEL,
-        "commands_enabled": "1", "announce": ["status"]})
-    discord_reset()
-    r = c.post("/settings/discord/test")
-    check("the test button posts a message",
-          "Test message sent" in r.text
-          and discord_wait(lambda: discord_state()["messages"], 10, "test message"),
-          r.text[:300])
-
-    before = discord_state()["identifies"] + discord_state()["resumes"]
-    httpx.post(DISCORD_BASE + "/_test/drop", trust_env=False)
-    check("a dropped socket reconnects by itself",
-          discord_wait(lambda: discord_state()["identifies"] + discord_state()["resumes"] > before,
-                       40, "reconnect"))
+    print("\n[discord: unmapping a server takes its commands away]")
+    r = c.post(f"/instances/{hid}/discord", data={"guild_id": GUILD_B})
+    check("the second server stops using Discord", "will not use Discord" in r.text,
+          r.text[:200])
+    check("...and its Discord's commands are removed",
+          discord_wait(lambda: any(
+              reg["guild_id"] == GUILD_B and reg["commands"] == []
+              for reg in discord_state()["registered"]), 15, "removal"),
+          [(r_["guild_id"], len(r_["commands"])) for r_ in discord_state()["registered"]])
+    check("...while the first Discord keeps working",
+          "Midgard" in said(ask("servers", guild=GUILD_A, channel=CHANNEL_A)))
+    c.post(f"/instances/{hid}/delete", data={"remove_files": "on"})
 
     print("\n[discord: a token revoked under a running bot]")
-    # The failure that matters most: Discord closes the gateway with 4004 and
-    # the answer is to stop and say so, not to reconnect forever.
     httpx.post(DISCORD_BASE + "/_test/reject-gateway", json={"reject": True}, trust_env=False)
     httpx.post(DISCORD_BASE + "/_test/drop", trust_env=False)
     check("a rejected token stops the gateway",
@@ -2424,7 +2535,6 @@ with TestClient(app) as c:
     check("...saying the token was rejected",
           "rejected the bot token" in (bot.status()["last_error"] or ""),
           bot.status()["last_error"])
-    check("...and it is not reported as connected", not bot.status()["connected"])
     attempts = discord_state()["rejected"]
     check("...and it does not keep hammering Discord",
           not discord_wait(lambda: discord_state()["rejected"] > attempts, 5, ""),
@@ -2435,9 +2545,80 @@ with TestClient(app) as c:
     r = c.post("/settings/discord/token", data={"clear": "1"})
     check("the token can be removed", "Bot token removed" in r.text, r.text[:200])
     check("...and the bot stays down", not bot.status()["connected"])
-    r = c.post("/settings/discord", data={"guild_id": GUILD})
+    r = c.post("/settings/discord", data={})
     check("the bot can be switched off", "Discord bot off" in r.text, r.text[:200])
     check("...and the manager carries on", c.get("/").status_code == 200)
+
+    print("\n[discord: upgrading from the manager-wide setup]")
+    # A data root as an earlier version left it: one guild, one default
+    # channel and one set of switches in discord.json, and the two flat
+    # fields in each instance.json. Somebody who had this working must not
+    # have to set it all up again, so the first start moves it down.
+    from vhsm.config import Settings as LegacySettings
+    legacy_root = Path(tempfile.mkdtemp(prefix="vhsm-legacy-"))
+    (legacy_root / "discord.json").write_text(json.dumps({
+        "enabled": True,
+        "guild_id": GUILD_A,
+        "default_channel_id": CHANNEL_A,
+        "announce": {"status": True, "crash": True, "player_join": True,
+                     "snapshot": False},
+        "show_address": False,
+        "commands_enabled": True,
+        "read_role_ids": [READ_ROLE],
+        "command_channel_ids": [CHANNEL_A],
+    }))
+    (legacy_root / "discord_token").write_text(GOOD_TOKEN + "\n")
+    for folder, label, port, was_on in (("oldtown", "Oldtown", 2600, True),
+                                        ("quietly", "Quietly", 2603, False)):
+        where = legacy_root / "instances" / folder
+        where.mkdir(parents=True)
+        (where / "instance.json").write_text(json.dumps({
+            "id": folder, "name": label, "world": label,
+            "password": "longenough", "port": port, "public": False,
+            "discord_enabled": was_on, "discord_channel_id": "",
+        }))
+
+    legacy_settings = LegacySettings(data_root=legacy_root)
+    legacy_settings.ensure_dirs()
+    legacy_settings.game_dir.mkdir(parents=True, exist_ok=True)
+    legacy_app = create_app(legacy_settings)
+    with TestClient(legacy_app) as lc:
+        moved = {r_.config.name: r_.config.discord
+                 for r_ in legacy_app.state.manager.records}
+        check("an old instance.json loads at all", set(moved) == {"Oldtown", "Quietly"},
+              sorted(moved))
+        check("the one guild is copied onto every server",
+              all(d.guild_id == GUILD_A for d in moved.values()),
+              {k: v.guild_id for k, v in moved.items()})
+        check("...and the old default channel becomes each server's own",
+              all(d.channel_id == CHANNEL_A for d in moved.values()))
+        check("...and the old announcement switches come across",
+              moved["Oldtown"].announce["player_join"]
+              and moved["Oldtown"].announce["crash"]
+              and not moved["Oldtown"].announce["snapshot"],
+              [k for k, v in moved["Oldtown"].announce.items() if v])
+        check("...and the old permissions",
+              moved["Oldtown"].read_role_ids == [READ_ROLE]
+              and moved["Oldtown"].command_channel_ids == [CHANNEL_A])
+        check("...and the old address setting", not moved["Oldtown"].show_address)
+        check("a server that was announcing still is", moved["Oldtown"].enabled)
+        check("one that was not stays off", not moved["Quietly"].enabled)
+        check("the move is written to disk, not just held in memory",
+              json.loads((legacy_root / "instances" / "oldtown" / "instance.json")
+                         .read_text())["discord"]["guild_id"] == GUILD_A)
+        check("...and recorded, so it cannot happen twice",
+              legacy_app.state.discord.config.migrated
+              and json.loads((legacy_root / "discord.json").read_text())["migrated"])
+        check("the migrated server answers commands in the old guild",
+              [r_.config.name for r_ in visible_instances(
+                  legacy_app.state.manager,
+                  interaction("servers", guild=GUILD_A, channel=CHANNEL_A,
+                              roles=[READ_ROLE]))] == ["Oldtown"])
+        check("the settings page no longer offers the manager-wide switches",
+              'name="announce"' not in lc.get("/settings").text)
+        check("the instance page offers them instead",
+              'name="announce"' in lc.get("/instances/oldtown").text)
+    shutil.rmtree(legacy_root, ignore_errors=True)
 
     print("\n[teardown]")
     c.post(f"/instances/{iid}/stop")

@@ -20,6 +20,7 @@ from . import backups as backups_mod
 from . import worlds as worlds_mod
 from .config import Settings, settings as default_settings
 from .diagnostics import check_libraries
+from .discord.config import InstanceDiscord
 from .events import EventBus, Event
 from . import events as ev
 from .instance import InstanceConfig, InstanceLayout, ValidationError
@@ -1033,11 +1034,11 @@ class InstanceManager:
         config.name = self._unique_name((name or info.name).strip() or "Imported server")
         config.port = self._free_port(config.port)
         config.created_at = time.time()
-        # The archive names a channel in the exporting operator's Discord,
-        # which this one can neither see nor be assumed to want posted to.
-        # Identity and port are already reassigned for the same reason.
-        config.discord_channel_id = ""
-        config.discord_enabled = False
+        # The archive names a Discord server and channel belonging to whoever
+        # exported it, which this operator can neither see nor be assumed to
+        # want posted to. Identity and port are already reassigned for the
+        # same reason, so the whole Discord section starts blank.
+        config.discord = InstanceDiscord()
         config.validate()
 
         layout = InstanceLayout.for_instance(self.settings, config.id)
