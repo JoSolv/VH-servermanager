@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .util import slugify
+from .util import normalise_time_of_day, slugify
 
 #: Valheim world modifiers accepted by ``-modifier <key> <value>``.
 MODIFIER_KEYS: dict[str, list[str]] = {
@@ -59,6 +59,20 @@ class InstanceConfig:
     snapshot_interval: int = 0
     #: How many automatic snapshots to keep before the oldest is pruned.
     snapshot_keep: int = 12
+    #: Check this instance's mods against Thunderstore once a day. Off by
+    #: default: which mods a server runs is the operator's decision, so the
+    #: manager reports a release and does nothing else until told to.
+    mod_update_check: bool = False
+    #: Local time of day for that check, ``HH:MM``.
+    mod_update_at: str = "05:00"
+    #: Install what the check finds, rather than only reporting it.
+    mod_update_install: bool = False
+    #: Restart the server once an update has actually been installed, since a
+    #: running server keeps loading the mods it started with.
+    mod_update_restart: bool = False
+    #: ``YYYY-MM-DD`` of the last scheduled check, so restarting the manager
+    #: cannot make the day's check run twice.
+    mod_update_last_run: str = ""
     created_at: float = field(default_factory=time.time)
 
     # ------------------------------------------------------------------ #
@@ -110,6 +124,12 @@ class InstanceConfig:
             )
         if not 1 <= self.snapshot_keep <= 200:
             raise ValidationError("Keep between 1 and 200 automatic snapshots.")
+        try:
+            normalise_time_of_day(self.mod_update_at)
+        except ValueError:
+            raise ValidationError(
+                "The mod update check needs a time of day like 05:00."
+            ) from None
         for key, value in self.modifiers.items():
             if key not in MODIFIER_KEYS:
                 raise ValidationError(f"Unknown modifier {key!r}.")

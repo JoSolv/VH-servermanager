@@ -52,6 +52,10 @@ def _mods_partial(request: Request, instance_id: str, message: str = "", error: 
     manager = _manager(request)
     record = manager.get(instance_id)
     profile = manager.profile(instance_id)
+    # Every mutation lands here, and each one can be the one that leaves the
+    # running server behind the mods on disk, so the state the notices are
+    # drawn from is re-read now rather than at the next sampling tick.
+    manager.refresh_mod_state(instance_id)
     return TEMPLATES.TemplateResponse(
         request,
         "partials/installed_mods.html",
@@ -165,7 +169,10 @@ async def api_instance(request: Request, instance_id: str) -> JSONResponse:
     record = manager.get(instance_id)
     payload = record.snapshot()
     payload["config"] = record.config.to_dict()
-    payload["mods"] = manager.profile(instance_id).summary()
+    # The live snapshot carries what the notices are drawn from; the profile
+    # adds the full list on top. Merged rather than replaced, or asking about
+    # one instance would answer with less than asking about all of them.
+    payload["mods"] = {**payload["mods"], **manager.profile(instance_id).summary()}
     return JSONResponse(payload)
 
 

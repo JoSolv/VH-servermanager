@@ -26,6 +26,12 @@
   {% if not mods.bepinex_installed and mods.count %}
     <div class="alert info">BepInEx is not installed, so these mods will not load. Installing any mod pulls it in automatically.</div>
   {% endif %}
+  {% if record.restart_pending %}
+    <div class="alert important">
+      This server is still running the mods it started with. Restart it to load
+      what has changed here.
+    </div>
+  {% endif %}
   {% if mods.count and not record.config.mods_enabled %}
     <div class="alert info">This instance is set to launch <strong>without</strong> BepInEx. Enable “Launch with BepInEx” in its configuration.</div>
   {% endif %}

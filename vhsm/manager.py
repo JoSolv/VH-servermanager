@@ -21,8 +21,8 @@ from . import worlds as worlds_mod
 from .config import Settings, settings as default_settings
 from .diagnostics import check_libraries
 from .instance import InstanceConfig, InstanceLayout, ValidationError
-from .mods.profile import ModProfile
-from .mods.thunderstore import ThunderstoreIndex
+from .mods.profile import ModError, ModProfile
+from .mods.thunderstore import ThunderstoreError, ThunderstoreIndex
 from .monitor.a2s import A2SError, query as a2s_query
 from .monitor.metrics import ProcMetrics, ProcessSampler, host_metrics
 from .monitor.net import NetworkMonitor, NetSample
@@ -39,7 +39,7 @@ from .steam import (
     write_steam_appid,
 )
 from .supervisor import Supervisor
-from .util import read_json, slugify, write_json
+from .util import daily_due, read_json, slugify, write_json
 
 log = logging.getLogger("vhsm.manager")
 
@@ -136,11 +136,102 @@ class AutoUpdate:
         return cls(**{k: v for k, v in (payload or {}).items() if k in known})
 
     def due(self, now: datetime) -> bool:
-        return (
-            self.enabled
-            and now.strftime("%H:%M") == self.at
-            and self.last_run_date != now.strftime("%Y-%m-%d")
-        )
+        """Whether the daily update should run now.
+
+        Not an exact match on the minute: the loop that asks this also takes
+        snapshots and can be inside a long update, so a schedule that only
+        came due during one particular minute was a schedule that quietly
+        skipped the day whenever that minute was busy.
+        """
+        return self.enabled and daily_due(self.at, self.last_run_date, now)
+
+
+@dataclass(slots=True)
+class ModState:
+    """What this instance's mod set says the operator should know.
+
+    Recomputed from ``mods.json`` and the catalogue only when one of them has
+    moved, so the sampling loop can consult it on every tick without reading
+    the manifest of every instance twice a second.
+    """
+
+    installed: int = 0
+    enabled: int = 0
+    #: Enabled mods with a newer version on Thunderstore, from
+    #: :meth:`ModProfile.updates_available`.
+    updates: list[dict[str, str]] = field(default_factory=list)
+    #: When the installed mods last changed on disk.
+    changed_at: float = 0.0
+    #: The (manifest mtime, catalogue fetch time) the rest was computed from.
+    key: tuple[float, float] = (0.0, 0.0)
+
+
+@dataclass(slots=True)
+class ModUpdateRun:
+    """The outcome of one mod version check, scheduled or asked for."""
+
+    at: float = 0.0
+    #: Whether this run was allowed to install what it found.
+    install: bool = False
+    #: Enabled mods checked.
+    checked: int = 0
+    #: Updates found, as ``updates_available`` reports them.
+    available: list[dict[str, str]] = field(default_factory=list)
+    #: What was installed, as ``Name 1.2.3 -> 1.3.0``.
+    updated: list[str] = field(default_factory=list)
+    restarted: bool = False
+    error: str = ""
+    #: Why the catalogue could not be refreshed, when the check went ahead
+    #: against the copy already on disk anyway.
+    stale: str = ""
+    #: Set when nothing was actually checked -- there was no catalogue to
+    #: check against -- so a scheduled run can come due again instead of
+    #: counting as the day's check.
+    retry: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return not self.error
+
+    def summary(self) -> str:
+        """One line for the UI, in the operator's terms."""
+        if self.error:
+            return f"Last check failed: {self.error}"
+        if self.updated:
+            text = f"Updated {len(self.updated)} mod(s): {', '.join(self.updated)}"
+            text += ". The server was restarted." if self.restarted else "."
+        elif self.available:
+            text = (
+                f"{len(self.available)} update(s) available: "
+                + ", ".join(
+                    f"{entry['name']} {entry['current']} \u2192 {entry['latest']}"
+                    for entry in self.available
+                )
+                + "."
+            )
+            if not self.install:
+                text += " This check only reports, so nothing was installed."
+        else:
+            text = f"Checked {self.checked} mod(s); everything is up to date."
+        if self.stale:
+            text += (
+                " Thunderstore could not be reached, so this used the "
+                f"catalogue already here ({self.stale})."
+            )
+        return text
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "at": self.at,
+            "install": self.install,
+            "checked": self.checked,
+            "available": self.available,
+            "updated": self.updated,
+            "restarted": self.restarted,
+            "error": self.error,
+            "stale": self.stale,
+            "summary": self.summary() if self.at else "",
+        }
 
 
 @dataclass(slots=True)
@@ -177,6 +268,13 @@ class InstanceRecord:
     reachable_detail: str = ""
     #: When the last automatic snapshot was taken.
     last_auto_snapshot: float = 0.0
+    #: Mod updates and the state of the mods on disk, refreshed by the manager.
+    mods: ModState = field(default_factory=ModState)
+    #: The last mod version check, scheduled or asked for by hand.
+    mod_check: ModUpdateRun = field(default_factory=ModUpdateRun)
+    #: Whether a mod check is in flight. A check installs files into the
+    #: profile, so two at once would be two writers to the same mod folder.
+    mod_check_busy: bool = False
 
     @property
     def busy(self) -> bool:
@@ -185,6 +283,87 @@ class InstanceRecord:
     @property
     def version(self) -> str:
         return self.supervisor.server_version or self.query_version
+
+    @property
+    def restart_pending(self) -> bool:
+        """Whether this server is running an older mod set than is on disk.
+
+        A server reads its plugins once, at start-up, so mods installed,
+        updated, or switched on or off since then are sitting in the profile
+        unused -- and nothing in the console says so, because from the
+        server's side nothing happened.
+        """
+        started = self.supervisor.started_at
+        return bool(
+            started
+            and self.config.mods_enabled
+            and self.mods.changed_at
+            and self.mods.changed_at > started
+        )
+
+    @property
+    def mod_notices(self) -> list[dict[str, Any]]:
+        """What the mods on this instance have to say, as notices.
+
+        Shaped like the supervisor's own notices so the instance page and the
+        live patcher render both the same way, and carried on every snapshot:
+        a release lands, or a mod is installed from another tab, while the
+        page someone is looking at just sits there.
+        """
+        notices: list[dict[str, Any]] = []
+        updates = self.mods.updates
+        if updates:
+            listed = ", ".join(
+                f"{entry['name']} {entry['current']} \u2192 {entry['latest']}"
+                for entry in updates
+            )
+            notices.append(
+                {
+                    # The versions ride in the key so that the client, which
+                    # compares keys to decide whether anything changed, sees
+                    # news about a different release as a different notice.
+                    "key": "mod-updates:"
+                    + ",".join(
+                        f"{entry['package_full_name']}-{entry['latest']}"
+                        for entry in updates
+                    ),
+                    "level": "info",
+                    "title": (
+                        f"{len(updates)} of this server's mods have a newer "
+                        "version on Thunderstore."
+                        if len(updates) > 1
+                        else "One of this server's mods has a newer version on "
+                        "Thunderstore."
+                    ),
+                    "detail": listed,
+                    "link": {
+                        "href": f"/instances/{self.config.id}/mods",
+                        "label": "Manage mods",
+                    },
+                }
+            )
+        if self.restart_pending:
+            notices.append(
+                {
+                    "key": "mods-need-restart",
+                    "level": "important",
+                    "title": (
+                        "Mods have changed since this server started, so it is "
+                        "not running them yet."
+                    ),
+                    "detail": (
+                        "A server loads its plugins once, when it starts. "
+                        "Restart it to pick up what has been installed, "
+                        "updated, enabled or disabled since."
+                    ),
+                }
+            )
+        return notices
+
+    @property
+    def notices(self) -> list[dict[str, Any]]:
+        """Everything worth telling the operator about this instance."""
+        return self.supervisor.notices + self.mod_notices
 
     def snapshot(self) -> dict[str, Any]:
         config, supervisor = self.config, self.supervisor
@@ -203,10 +382,11 @@ class InstanceRecord:
             "uptime": round(supervisor.uptime),
             "exit_code": supervisor.exit_code,
             "last_error": supervisor.last_error,
-            # Known failures recognised in this run. Carried on every tick so
-            # an open page learns about one without being reloaded -- which
-            # matters, because these are raised while a server is running.
-            "notices": supervisor.notices,
+            # Known failures recognised in this run, plus what the mods on
+            # disk have to say. Carried on every tick so an open page learns
+            # about one without being reloaded -- which matters, because these
+            # are raised while a server is running.
+            "notices": self.notices,
             "version": self.version,
             "reachable": self.reachable,
             "listening": self.listening,
@@ -215,6 +395,17 @@ class InstanceRecord:
             "players": self.players.to_dict(self.lists),
             "metrics": self.metrics.to_dict(),
             "net": self.net.to_dict(),
+            "mods": {
+                "installed": self.mods.installed,
+                "enabled": self.mods.enabled,
+                # Named as ModProfile.summary() names it, because the instance
+                # endpoint merges that over this and the two must agree.
+                "updates_active": self.mods.updates,
+                "changed_at": self.mods.changed_at,
+                "restart_pending": self.restart_pending,
+                "scheduled": config.mod_update_check,
+                "last_check": self.mod_check.to_dict(),
+            },
         }
 
 
@@ -278,6 +469,7 @@ class InstanceManager:
         self._records: dict[str, InstanceRecord] = {}
         self._sampler_task: asyncio.Task[None] | None = None
         self._scheduler_task: asyncio.Task[None] | None = None
+        self._index_task: asyncio.Task[None] | None = None
         self._tick = 0
 
         self._state_file = self.settings.data_root / "manager.json"
@@ -364,6 +556,73 @@ class InstanceManager:
     def profile(self, instance_id: str) -> ModProfile:
         record = self.get(instance_id)
         return ModProfile(record.layout, self.settings.cache_dir, self.index)
+
+    # ------------------------------------------------------------------ #
+    # mod state: updates available, and whether a restart is owed
+    # ------------------------------------------------------------------ #
+    def refresh_mod_state(self, instance_id: str) -> ModState:
+        """Re-read one instance's mod set now, whatever the cache says.
+
+        Called after anything that changes mods, so the page that made the
+        change does not have to wait for the next sampling tick to be told
+        about it.
+        """
+        return self._refresh_mod_state(self.get(instance_id), force=True)
+
+    def _refresh_mod_state(self, record: InstanceRecord, *, force: bool = False) -> ModState:
+        state = record.mods
+        manifest = record.layout.mods_manifest
+        try:
+            mtime = manifest.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        key = (mtime, self.index.fetched_at)
+        if not force and state.key == key:
+            return state
+
+        if not mtime:
+            # No manifest at all: nothing has ever been installed here.
+            state.installed = state.enabled = 0
+            state.updates = []
+            state.changed_at = 0.0
+            state.key = key
+            return state
+
+        profile = ModProfile(record.layout, self.settings.cache_dir, self.index)
+        mods = profile.mods
+        state.installed = len(mods)
+        state.enabled = sum(1 for mod in mods if mod.enabled)
+        state.updates = profile.updates_available(enabled_only=True)
+        state.changed_at = profile.changed_at
+        state.key = key
+        return state
+
+    def ensure_index_background(self) -> None:
+        """Start loading the Thunderstore catalogue, without waiting for it.
+
+        The update notices need the catalogue, and rendering a page is the
+        wrong place to fetch it: it is the whole community index in one
+        response, so on a cold start somebody would sit in front of a blank
+        page for it. The notices ride the metrics socket, so they arrive a
+        tick after the load finishes instead.
+        """
+        if self._index_task is not None and not self._index_task.done():
+            return
+        if self.index.loaded and self.index.age < self.settings.index_ttl:
+            return
+
+        async def load() -> None:
+            try:
+                await self.index.ensure()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - nobody awaits this task
+                # Including a disk that cannot hold the cache: an unretrieved
+                # exception here would surface as a bare asyncio complaint at
+                # shutdown rather than as a line anyone can act on.
+                log.warning("catalogue load failed: %s", exc)
+
+        self._index_task = asyncio.create_task(load())
 
     # ------------------------------------------------------------------ #
     # CRUD
@@ -928,6 +1187,10 @@ class InstanceManager:
             try:
                 for record in running:
                     job.log(f"[manager] stopping {record.config.name}")
+                    # A restart the operator started a moment ago owns this
+                    # instance's process; let go of it before taking it down,
+                    # or the two take turns starting and stopping it.
+                    await self._cancel_operation(record)
                     await self.stop(record.config.id)
                     stopped.append(record)
 
@@ -952,6 +1215,163 @@ class InstanceManager:
                         job.log(f"[error] could not restart {record.config.name}: {exc}")
 
         await job.run("update", body)
+
+    async def maybe_run_scheduled_update(self, now: datetime | None = None) -> bool:
+        """Run the daily server update if it is due. Says whether it ran.
+
+        Separate from the loop so the schedule can be exercised directly
+        rather than by waiting for a particular minute to come round.
+        """
+        now = now or datetime.now()
+        if not self.auto_update.due(now) or self.job.running:
+            return False
+        log.info("scheduled update starting (%s)", self.auto_update.at)
+        # Recorded before the work, not after: the update stops and starts
+        # servers and takes as long as a multi-GB download takes, and a
+        # second pass starting in the middle of that would be a second
+        # update.
+        self.auto_update.last_run_date = now.strftime("%Y-%m-%d")
+        self.save_state()
+        await self.run_update(
+            validate=self.auto_update.validate,
+            restart=self.auto_update.restart_instances,
+        )
+        return True
+
+    # ------------------------------------------------------------------ #
+    # mod updates, per instance
+    # ------------------------------------------------------------------ #
+    async def run_mod_update(
+        self,
+        instance_id: str,
+        *,
+        install: bool | None = None,
+        restart: bool | None = None,
+    ) -> ModUpdateRun:
+        """Check one instance's mods against Thunderstore and act on it.
+
+        *install* and *restart* default to the instance's own settings, so a
+        check asked for by hand does exactly what the schedule would do.
+        Only the mods the server actually loads are considered: a disabled
+        mod is not running, and updating it behind the operator's back is a
+        change to a server nobody asked to change.
+        """
+        record = self.get(instance_id)
+        config = record.config
+        install = config.mod_update_install if install is None else install
+        restart = config.mod_update_restart if restart is None else restart
+
+        if record.mod_check_busy:
+            raise ManagerError(f"A mod check for {config.name} is already running.")
+
+        run = ModUpdateRun(at=time.time(), install=install)
+        profile = ModProfile(record.layout, self.settings.cache_dir, self.index)
+        run.checked = sum(1 for mod in profile.mods if mod.enabled)
+        record.mod_check_busy = True
+        try:
+            return await self._run_mod_update(record, profile, run, install, restart)
+        finally:
+            record.mod_check_busy = False
+
+    async def _run_mod_update(
+        self,
+        record: InstanceRecord,
+        profile: ModProfile,
+        run: ModUpdateRun,
+        install: bool,
+        restart: bool,
+    ) -> ModUpdateRun:
+        config = record.config
+        try:
+            # Forced: a scheduled check is precisely the moment the cached
+            # catalogue is too old to answer from, and reading a day-old copy
+            # would report yesterday's releases as today's news.
+            await self.index.ensure(force=True)
+        except ThunderstoreError as exc:
+            if not self.index.loaded:
+                # No catalogue at all, so there is nothing to compare against
+                # and nothing to report: leave the day's check undone.
+                run.error = str(exc)
+                run.retry = True
+                record.mod_check = run
+                log.warning(
+                    "mod check for %s has no catalogue to check against: %s",
+                    config.name, exc,
+                )
+                return run
+            # A catalogue that could not be refreshed is still a catalogue.
+            # Checking the copy on disk and saying it is not fresh beats
+            # reporting nothing because Thunderstore was briefly away.
+            run.stale = str(exc)
+            log.warning("mod check for %s is using a stale catalogue: %s", config.name, exc)
+
+        run.available = [dict(entry) for entry in profile.updates_available(enabled_only=True)]
+        if install:
+            for entry in run.available:
+                try:
+                    installed = await profile.install_by_name(
+                        entry["package_full_name"], entry["latest"]
+                    )
+                except (ModError, ThunderstoreError, OSError) as exc:
+                    # Report the one that failed and stop: the rest can wait
+                    # for the next pass rather than be attempted while
+                    # something about this profile is clearly wrong.
+                    run.error = f"{entry['package_full_name']}: {exc}"
+                    break
+                run.updated.append(
+                    f"{entry['name']} {entry['current']} \u2192 {entry['latest']}"
+                )
+                # A new release can need a dependency the old one did not.
+                # Report that too: changing two mods and naming one is how a
+                # report stops being worth reading.
+                run.updated.extend(
+                    f"{mod.name} {mod.version} (new dependency)"
+                    for mod in installed
+                    if mod.package_full_name.lower() != entry["package_full_name"].lower()
+                )
+
+        if run.updated and restart and record.supervisor.status.is_active:
+            try:
+                await self._cancel_operation(record)
+                await self.restart(config.id)
+                run.restarted = True
+            except Exception as exc:  # noqa: BLE001 - reported on the page
+                run.error = f"{run.error + '; ' if run.error else ''}restart failed: {exc}"
+                log.warning("restart after mod update failed for %s: %s", config.name, exc)
+
+        record.mod_check = run
+        self._refresh_mod_state(record, force=True)
+        log.info("mod check for %s: %s", config.name, run.summary())
+        return run
+
+    async def _auto_mod_updates(self) -> None:
+        """Run the per-instance mod checks that have come due."""
+        now = datetime.now()
+        for record in self.records:
+            config = record.config
+            if not config.mod_update_check:
+                continue
+            if not daily_due(config.mod_update_at, config.mod_update_last_run, now):
+                continue
+            previous = config.mod_update_last_run
+            # Marked before the check for the same reason as the server
+            # update above, and put back below if nothing was checked.
+            config.mod_update_last_run = now.strftime("%Y-%m-%d")
+            self.save(config.id)
+            log.info(
+                "scheduled mod check for %s (%s)", config.name, config.mod_update_at
+            )
+            try:
+                run = await self.run_mod_update(config.id)
+            except ManagerError as exc:
+                log.warning("scheduled mod check skipped for %s: %s", config.name, exc)
+                continue
+            if run.retry:
+                # Nothing was checked, so the day's check has not happened:
+                # leave it due, and the rest of the catch-up window is spent
+                # retrying rather than waiting for tomorrow.
+                config.mod_update_last_run = previous
+                self.save(config.id)
 
     async def _auto_snapshot(self) -> None:
         """Take scheduled rollback snapshots for instances that want them."""
@@ -987,26 +1407,20 @@ class InstanceManager:
                 log.warning("auto snapshot failed for %s: %s", record.config.name, exc)
 
     async def _scheduler_loop(self) -> None:
-        """Scheduled updates, automatic snapshots and roster flushes."""
+        """Scheduled updates and mod checks, snapshots and roster flushes."""
         while True:
             try:
                 await self._auto_snapshot()
                 for record in self.records:
                     await asyncio.to_thread(record.roster.save)
-                now = datetime.now()
-                if self.auto_update.due(now) and not self.job.running:
-                    log.info("scheduled update starting (%s)", self.auto_update.at)
-                    self.auto_update.last_run_date = now.strftime("%Y-%m-%d")
-                    self.save_state()
-                    await self.run_update(
-                        validate=self.auto_update.validate,
-                        restart=self.auto_update.restart_instances,
-                    )
+                await self._auto_mod_updates()
+                await self.maybe_run_scheduled_update()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("scheduled update failed")
-            # Re-check well inside the one-minute window the schedule matches.
+                log.exception("scheduled work failed")
+            # Both schedules have an hour of slack, so this interval decides
+            # how promptly they start rather than whether they run at all.
             await asyncio.sleep(20)
 
     # ------------------------------------------------------------------ #
@@ -1121,6 +1535,9 @@ class InstanceManager:
             )
 
         for record in self.records:
+            # Cheap: a stat() per instance, and a re-read only when the
+            # manifest or the catalogue has actually moved.
+            self._refresh_mod_state(record)
             if record.supervisor.status.is_active:
                 record.metrics = self._proc_sampler.sample(
                     record.supervisor.pid, record.supervisor.started_at
@@ -1169,7 +1586,7 @@ class InstanceManager:
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
 
     async def stop_background(self) -> None:
-        for attr in ("_sampler_task", "_scheduler_task"):
+        for attr in ("_sampler_task", "_scheduler_task", "_index_task"):
             task = getattr(self, attr)
             if task is not None:
                 task.cancel()

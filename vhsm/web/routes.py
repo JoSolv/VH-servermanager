@@ -9,9 +9,11 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..instance import MODIFIER_KEYS, PRESETS, InstanceConfig, ValidationError
 from ..mods.cache import cache_size
+from ..mods.profile import ModError
 from ..manager import ManagerError
 from ..diagnostics import check_libraries, package_for
 from ..steam import server_status
+from ..util import normalise_time_of_day
 from .api import config_context, config_index
 from .templating import TEMPLATES
 
@@ -123,6 +125,12 @@ async def instance_detail(request: Request, instance_id: str):
     manager = _manager(request)
     record = manager.get(instance_id)
     profile = manager.profile(instance_id)
+    # The mod notices need the catalogue, which is loaded in the background:
+    # it is the whole Valheim community index in one response, and nobody
+    # should wait for it to see this page. The notices ride the metrics
+    # socket, so they turn up a tick after the load finishes.
+    manager.ensure_index_background()
+    manager.refresh_mod_state(instance_id)
     return _render(
         request,
         "instance.html",
@@ -146,6 +154,93 @@ async def edit_instance(request: Request, instance_id: str):
     changes.pop("id", None)
     manager.update(instance_id, changes)
     return RedirectResponse(f"/instances/{instance_id}", status_code=303)
+
+
+# --------------------------------------------------------------------------- #
+# per-instance mod update schedule
+#
+# Registered above the lifecycle catch-all below, which would otherwise read
+# "mod-updates" as the name of an action.
+# --------------------------------------------------------------------------- #
+def _mod_schedule(
+    request: Request,
+    instance_id: str,
+    message: str = "",
+    error: str = "",
+    ran: bool = False,
+) -> HTMLResponse:
+    """Re-render the schedule panel.
+
+    *ran* says the message above is a check's own report, which the panel
+    then leaves out of its standing "last check" line rather than printing
+    the same sentence twice.
+    """
+    manager = _manager(request)
+    record = manager.get(instance_id)
+    return _render(
+        request,
+        "partials/mod_schedule.html",
+        record=record,
+        config=record.config,
+        message=message,
+        error=error,
+        ran=ran,
+    )
+
+
+@router.post("/instances/{instance_id}/mod-updates", response_class=HTMLResponse)
+async def save_mod_schedule(
+    request: Request,
+    instance_id: str,
+    enabled: str = Form(default=""),
+    at: str = Form(default="05:00"),
+    install: str = Form(default=""),
+    restart: str = Form(default=""),
+) -> HTMLResponse:
+    """Save when this instance checks its mods, and what it does about it."""
+    manager = _manager(request)
+    try:
+        normalised = normalise_time_of_day(at)
+    except ValueError:
+        return _mod_schedule(request, instance_id, error="Use a time like 05:00.")
+
+    manager.update(
+        instance_id,
+        {
+            "mod_update_check": bool(enabled),
+            "mod_update_at": normalised,
+            "mod_update_install": bool(install),
+            "mod_update_restart": bool(restart),
+        },
+    )
+    if not enabled:
+        return _mod_schedule(request, instance_id, message="Mod update check off.")
+    does = "installs them" if install else "reports them"
+    if install and restart:
+        does += " and restarts the server"
+    return _mod_schedule(
+        request,
+        instance_id,
+        message=f"Mod update check on, daily at {normalised}; it {does}.",
+    )
+
+
+@router.post("/instances/{instance_id}/mod-updates/run", response_class=HTMLResponse)
+async def run_mod_check(request: Request, instance_id: str) -> HTMLResponse:
+    """Run the scheduled check now, doing exactly what the schedule would do.
+
+    Shielded, so the work is not abandoned half-way through installing a mod
+    or restarting a server because the browser went away -- the same reason
+    lifecycle actions are owned by the manager rather than by a request.
+    """
+    manager = _manager(request)
+    try:
+        run = await asyncio.shield(manager.run_mod_update(instance_id))
+    except (ManagerError, ModError) as exc:
+        return _mod_schedule(request, instance_id, error=str(exc))
+    if run.error:
+        return _mod_schedule(request, instance_id, error=run.summary(), ran=True)
+    return _mod_schedule(request, instance_id, message=run.summary(), ran=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -260,7 +355,10 @@ async def settings_page(request: Request):
 @router.post("/settings/install", response_class=HTMLResponse)
 async def install_server(
     request: Request,
-    restart_instances: str = Form(default="1"),
+    # Empty, not "1": a cleared checkbox is submitted by leaving the field
+    # out, so a default of "1" made it impossible to turn off -- unchecking
+    # "Restart running servers" restarted them anyway.
+    restart_instances: str = Form(default=""),
 ):
     manager = _manager(request)
     # Background task: a full install is a multi-GB download, far longer than
@@ -286,12 +384,11 @@ async def save_auto_update(
 ):
     manager = _manager(request)
     try:
-        hour, _, minute = at.partition(":")
-        if not (0 <= int(hour) <= 23 and 0 <= int(minute) <= 59):
-            raise ValueError
-        normalised = f"{int(hour):02d}:{int(minute):02d}"
+        normalised = normalise_time_of_day(at)
     except ValueError:
-        return HTMLResponse('<div class="alert error">Use a time like 04:00.</div>', 400)
+        # 200, not 400: htmx swaps successful responses only, so a refusal
+        # sent as an error status is a form that silently does nothing.
+        return HTMLResponse('<div class="alert error">Use a time like 04:00.</div>')
 
     manager.auto_update.enabled = bool(enabled)
     manager.auto_update.at = normalised

@@ -34,6 +34,11 @@
       <div class="v" data-f="host-net">--</div>
     </div>
     <div class="stat">
+      <div class="k">Load average</div>
+      <div class="v" data-f="host-load">--</div>
+      <div class="sub">1, 5 and 15 minutes</div>
+    </div>
+    <div class="stat">
       <div class="k">Instances</div>
       <div class="v">{{ records | length }}</div>
       <div class="sub">{{ status.install_size | human_bytes }} of server files</div>

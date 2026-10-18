@@ -148,9 +148,12 @@
   }
 
   // A notice can be raised while a server runs -- some failures only show in
-  // its console -- so it has to arrive without a reload. The key list decides
+  // its console, and a mod release or a mod install happens entirely off to
+  // the side -- so it has to arrive without a reload. The key list decides
   // whether anything changed, because re-rendering on every tick would fight
-  // with the user trying to select the text.
+  // with the user trying to select the text. The mod notices carry the
+  // versions they are about in their key for that reason: different news is
+  // a different key.
   function renderNotices(scope, notices) {
     var host = scope.querySelector('[data-f="notices"]');
     if (!host) return;
@@ -160,7 +163,7 @@
     host.textContent = "";
     notices.forEach(function (notice) {
       var box = document.createElement("div");
-      box.className = "alert important";
+      box.className = "alert " + (notice.level || "important");
       box.setAttribute("data-notice", notice.key);
       var title = document.createElement("strong");
       title.textContent = notice.title;   // textContent, as everywhere here
@@ -172,6 +175,19 @@
         p.textContent = paragraph;
         box.appendChild(p);
       });
+      // Where a notice is about something with a page of its own, say so with
+      // the same button the server renders rather than leaving the reader to
+      // work out where to go.
+      if (notice.link && notice.link.href) {
+        var wrap = document.createElement("p");
+        wrap.style.margin = "8px 0 0";
+        var link = document.createElement("a");
+        link.className = "btn small";
+        link.setAttribute("href", notice.link.href);
+        link.textContent = notice.link.label || "Open";
+        wrap.appendChild(link);
+        box.appendChild(wrap);
+      }
       host.appendChild(box);
     });
   }

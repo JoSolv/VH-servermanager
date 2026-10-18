@@ -1,6 +1,6 @@
 <div id="build-status" hx-target="this" hx-swap="outerHTML">
   <table>
-    <tr><th>Server build</th><td><code>{{ build.installed or 'unknown' }}</code>
+    <tr><th>Installed build</th><td><code>{{ build.installed or 'unknown' }}</code>
     {% if build.available %}
           <span class="tag upd">update available</span>
         {% elif build.installed and build.latest %}
