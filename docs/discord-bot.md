@@ -9,6 +9,9 @@ This note is the design, kept as the record of *why* it is shaped this way.
 Where the implementation settled somewhere different from the proposal, the
 text says so rather than being quietly corrected.
 
+**To actually set the bot up**, see [`discord-setup.md`](discord-setup.md).
+This file is about the reasoning, not the clicking.
+
 ## What it is for
 
 Three jobs, in decreasing order of how safe they are:
