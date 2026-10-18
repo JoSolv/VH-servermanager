@@ -43,6 +43,11 @@ services:
       # PUID: "568"
       # PGID: "568"
 
+      # Optional: the Discord bot's token. Setting it here means it is never
+      # written to the data volume -- the manager reads this in preference to
+      # its own stored copy. The rest of the bot is configured in Settings.
+      # VHSM_DISCORD_TOKEN: "your-bot-token"
+
     network_mode: host
 
     # Lets the manager install nftables counters so each instance gets its

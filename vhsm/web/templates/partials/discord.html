@@ -1,0 +1,185 @@
+{# The Discord bot's settings and its connection state.
+
+   Every endpoint below re-renders this whole block, so saving, connecting and
+   the test message all report in the same place -- and the connection state
+   underneath is then the answer to "did that work", which is the only thing
+   anybody wants to know after pasting a token. #}
+<div id="discord-panel" hx-target="this" hx-swap="outerHTML">
+  {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <table>
+    <tr>
+      <th>Connection</th>
+      <td>
+        {%- if not discord.enabled %}<span class="muted">switched off</span>
+        {%- elif discord.connected %}
+          <span class="tag ok-tag">connected</span>
+          {% if discord.username %}as <strong>{{ discord.username }}</strong>{% endif %}
+        {%- elif discord.state in ('connecting', 'reconnecting') %}
+          <span class="tag upd">{{ discord.state }}</span>
+        {%- else %}<span class="muted">not connected</span>{% endif -%}
+      </td>
+    </tr>
+    <tr>
+      <th>Bot token</th>
+      <td>
+        {%- if discord.token_source == 'env' %}
+          <span class="tag ok-tag">set</span>
+          <span class="muted">from <code>VHSM_DISCORD_TOKEN</code></span>
+        {%- elif discord.token_source == 'file' %}
+          <span class="tag ok-tag">set</span>
+          <span class="muted">stored in the data root, readable only by this user</span>
+        {%- else %}<span class="muted">not set</span>{% endif -%}
+      </td>
+    </tr>
+    <tr><th>Commands</th><td>
+      {%- if discord.commands_registered %}<span class="tag ok-tag">registered</span>
+      {%- else %}<span class="muted">not registered</span>{% endif -%}
+    </td></tr>
+    <tr><th>Announcements sent</th><td>{{ discord.announcements_sent }}</td></tr>
+  </table>
+
+  {% if discord.last_error %}
+    <div class="alert error">{{ discord.last_error }}</div>
+  {% endif %}
+
+  {% if discord.invite_url %}
+    <p class="subtle">
+      <a class="btn small" href="{{ discord.invite_url }}" target="_blank" rel="noreferrer">
+        Invite this bot to a server
+      </a>
+      It asks for View Channel, Send Messages and Embed Links, and nothing else.
+    </p>
+  {% endif %}
+
+  {# ------------------------------------------------------------------ #}
+  <h3>Token</h3>
+  {% if discord.token_source == 'env' %}
+    <p class="subtle">
+      The token comes from the <code>VHSM_DISCORD_TOKEN</code> environment variable,
+      which wins over anything stored here. Change it where you set it.
+    </p>
+  {% else %}
+    <form hx-post="/settings/discord/token">
+      <div class="form-grid">
+        <div class="field">
+          <label for="discord_token">Bot token</label>
+          {# Never rendered back: unlike a server password, which has to go on
+             the server's command line, this is an identity. The field is
+             always empty and submitting it empty changes nothing. #}
+          <input type="password" id="discord_token" name="token" value=""
+                 autocomplete="off" placeholder="paste a token to replace it">
+          <div class="hint">
+            From the Discord Developer Portal, under Bot. It is never shown again
+            here once saved.
+          </div>
+        </div>
+      </div>
+      <button class="primary" type="submit">Save token</button>
+      {% if discord.token_source %}
+        <button class="danger small" type="submit" name="clear" value="1"
+                hx-confirm="Remove the stored bot token?">Clear token</button>
+      {% endif %}
+    </form>
+  {% endif %}
+
+  {# ------------------------------------------------------------------ #}
+  <h3>Bot</h3>
+  <form hx-post="/settings/discord">
+    <div class="check">
+      <input type="checkbox" id="discord_enabled" name="enabled" value="1"
+             {{ 'checked' if config.enabled }}>
+      <label for="discord_enabled">Run the Discord bot</label>
+    </div>
+    <div class="form-grid">
+      <div class="field">
+        <label for="discord_guild">Discord server (guild) ID</label>
+        <input type="text" id="discord_guild" name="guild_id" value="{{ config.guild_id }}"
+               inputmode="numeric" placeholder="e.g. 123456789012345678">
+        <div class="hint">
+          The bot answers only here. Turn on Developer Mode in Discord, then
+          right-click the server and Copy Server ID.
+        </div>
+      </div>
+      <div class="field">
+        <label for="discord_channel">Default channel ID</label>
+        <input type="text" id="discord_channel" name="default_channel_id"
+               value="{{ config.default_channel_id }}" inputmode="numeric">
+        <div class="hint">
+          Where manager-wide news goes, and the fallback for an instance with
+          announcements on but no channel of its own.
+        </div>
+      </div>
+    </div>
+
+    <div class="check stacked">
+      <input type="checkbox" id="discord_commands" name="commands_enabled" value="1"
+             {{ 'checked' if config.commands_enabled }}>
+      <label for="discord_commands">
+        Answer slash commands
+        <span class="hint">
+          Read-only: status, players, mods, versions and player stats.
+        </span>
+      </label>
+    </div>
+    <div class="check stacked">
+      <input type="checkbox" id="discord_address" name="show_address" value="1"
+             {{ 'checked' if config.show_address }}>
+      <label for="discord_address">
+        Include the join address
+        <span class="hint">
+          On a public server it is already in the server browser; on a private
+          one, posting it to a channel is a decision rather than a detail.
+        </span>
+      </label>
+    </div>
+
+    <div class="form-grid">
+      <div class="field">
+        <label for="discord_cmd_channels">Command channels</label>
+        <textarea id="discord_cmd_channels" name="command_channel_ids" rows="2"
+                  placeholder="one ID per line; blank means any channel"
+        >{{ config.command_channel_ids | join('\n') }}</textarea>
+        <div class="hint">Commands are only answered in these channels.</div>
+      </div>
+      <div class="field">
+        <label for="discord_read_roles">Roles allowed to ask</label>
+        <textarea id="discord_read_roles" name="read_role_ids" rows="2"
+                  placeholder="one role ID per line; blank means anyone who can see the channel"
+        >{{ config.read_role_ids | join('\n') }}</textarea>
+        <div class="hint">Blank leaves it to Discord's own channel permissions.</div>
+      </div>
+    </div>
+
+    <h4>Announce</h4>
+    <p class="hint" style="margin-top:0">
+      Which events are posted. An instance says <em>where</em> its own events
+      go, on its page; this says <em>what</em> is worth saying.
+    </p>
+    <div class="form-grid">
+      {% for kind, label in announce_labels %}
+        <div class="check stacked">
+          <input type="checkbox" id="ann_{{ kind }}" name="announce" value="{{ kind }}"
+                 {{ 'checked' if config.announces(kind) }}>
+          <label for="ann_{{ kind }}">{{ label }}</label>
+        </div>
+      {% endfor %}
+    </div>
+
+    <button class="primary" type="submit">Save Discord settings</button>
+  </form>
+
+  {% if discord.connected and config.default_channel_id %}
+    <div class="row" style="margin-top:10px">
+      <button class="small" hx-post="/settings/discord/test">Send a test message</button>
+    </div>
+  {% endif %}
+
+  <p class="hint" style="margin-bottom:0">
+    Starting and stopping servers from Discord is not available yet. When it is,
+    it will be off by default and limited to named roles — a command that can
+    stop a server is a way into this host, and the manager binds to localhost
+    precisely to avoid having one.
+  </p>
+</div>

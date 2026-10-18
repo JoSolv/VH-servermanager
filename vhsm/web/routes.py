@@ -7,6 +7,9 @@ from typing import Any
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from ..discord import config as discord_config
+from ..discord.rest import DiscordAPIError
+from ..events import KINDS
 from ..instance import MODIFIER_KEYS, PRESETS, InstanceConfig, ValidationError
 from ..mods.cache import cache_size
 from ..mods.profile import ModError
@@ -27,6 +30,43 @@ def _manager(request: Request):
 
 def _settings(request: Request):
     return request.app.state.settings
+
+
+def _discord(request: Request):
+    return request.app.state.discord
+
+
+#: How each event kind is described on the Settings page. Written as what the
+#: operator would hear in the channel rather than as the constant's name.
+ANNOUNCE_TEXT: dict[str, str] = {
+    "status": "Server starting, running or stopped",
+    "ready": "Server up and accepting players",
+    "crash": "Server stopped unexpectedly",
+    "player_join": "A player joined",
+    "player_leave": "A player left",
+    "player_death": "A player died",
+    "notice": "A recognised failure in the console",
+    "mod_update": "A mod has a newer version",
+    "mod_restart_pending": "Mods changed, so a restart is needed",
+    "mod_check": "What the scheduled mod check found",
+    "server_update": "A newer Valheim build was published",
+    "server_updated": "The server files were updated",
+    "reachability": "Reachable or unreachable from outside",
+    "snapshot": "An automatic world snapshot was taken",
+    "manager": "The manager started or stopped",
+    "lifecycle": "Somebody asked for a start, stop or restart",
+}
+
+
+def announce_labels() -> list[tuple[str, str]]:
+    """Every event kind with its label, in the order events.KINDS lists them.
+
+    Driven off ``KINDS`` rather than off the dictionary above so that a new
+    event kind appears on the page as soon as it exists -- with its bare name
+    if nobody has written a label yet, which is ugly and visible rather than
+    missing and silent. The test suite checks that none of them is bare.
+    """
+    return [(kind, ANNOUNCE_TEXT.get(kind, kind)) for kind in KINDS]
 
 
 def _render(request: Request, template: str, **context: Any) -> HTMLResponse:
@@ -141,6 +181,8 @@ async def instance_detail(request: Request, instance_id: str):
         modifier_keys=MODIFIER_KEYS,
         address=manager.address_for(record),
         hostname=manager.hostname,
+        discord=_discord(request).status(),
+        discord_default=_discord(request).config.default_channel_id,
     )
 
 
@@ -241,6 +283,67 @@ async def run_mod_check(request: Request, instance_id: str) -> HTMLResponse:
     if run.error:
         return _mod_schedule(request, instance_id, error=run.summary(), ran=True)
     return _mod_schedule(request, instance_id, message=run.summary(), ran=True)
+
+
+# --------------------------------------------------------------------------- #
+# per-instance Discord routing
+#
+# Registered above the lifecycle catch-all below, which would otherwise read
+# "discord" as the name of an action.
+# --------------------------------------------------------------------------- #
+def _instance_discord(
+    request: Request, instance_id: str, message: str = "", error: str = ""
+) -> HTMLResponse:
+    record = _manager(request).get(instance_id)
+    bot = _discord(request)
+    return _render(
+        request,
+        "partials/instance_discord.html",
+        record=record,
+        config=record.config,
+        discord=bot.status(),
+        discord_default=bot.config.default_channel_id,
+        message=message,
+        error=error,
+    )
+
+
+@router.post("/instances/{instance_id}/discord", response_class=HTMLResponse)
+async def save_instance_discord(
+    request: Request,
+    instance_id: str,
+    enabled: str = Form(default=""),
+    channel_id: str = Form(default=""),
+) -> HTMLResponse:
+    """Choose whether, and where, this instance announces.
+
+    Takes effect on the next event with no reconnection: the channel is read
+    per announcement rather than held by the connection.
+    """
+    manager = _manager(request)
+    try:
+        manager.update(
+            instance_id,
+            {
+                "discord_enabled": bool(enabled),
+                "discord_channel_id": str(channel_id or "").strip(),
+            },
+        )
+    except ValidationError as exc:
+        return _instance_discord(request, instance_id, error=str(exc))
+
+    record = manager.get(instance_id)
+    if not record.config.discord_enabled:
+        return _instance_discord(
+            request, instance_id, message="This server will not announce to Discord."
+        )
+    where = (
+        f"channel {record.config.discord_channel_id}"
+        if record.config.discord_channel_id else "the default channel"
+    )
+    return _instance_discord(
+        request, instance_id, message=f"Announcing to {where}."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -349,6 +452,7 @@ async def settings_page(request: Request):
         build=await manager.check_update(),
         net_available=manager.net.per_instance_available,
         net_reason=manager.net.per_instance_reason,
+        **_discord_context(request),
     )
 
 
@@ -428,6 +532,118 @@ async def save_hostname(request: Request, hostname: str = Form(default="")) -> H
     manager.save_state()
     shown = cleaned or f"{manager.hostname} (detected)"
     return HTMLResponse(f'<div class="alert ok">Server address set to {shown}.</div>')
+
+
+# --------------------------------------------------------------------------- #
+# Discord bot
+# --------------------------------------------------------------------------- #
+def _discord_context(request: Request) -> dict[str, Any]:
+    bot = _discord(request)
+    return {
+        "discord": bot.status(),
+        "config": bot.config,
+        "announce_labels": announce_labels(),
+    }
+
+
+def _discord_panel(request: Request, message: str = "", error: str = "") -> HTMLResponse:
+    """Re-render the whole panel, so every endpoint reports in one place."""
+    return _render(
+        request, "partials/discord.html",
+        message=message, error=error, **_discord_context(request),
+    )
+
+
+@router.get("/settings/discord", response_class=HTMLResponse)
+async def discord_panel(request: Request) -> HTMLResponse:
+    return _discord_panel(request)
+
+
+@router.post("/settings/discord", response_class=HTMLResponse)
+async def save_discord(request: Request) -> HTMLResponse:
+    """Save the bot's configuration, reconnecting only if it has to."""
+    bot = _discord(request)
+    form = await request.form()
+    config = discord_config.DiscordConfig.from_dict(bot.config.to_dict())
+
+    config.enabled = form.get("enabled") is not None
+    config.commands_enabled = form.get("commands_enabled") is not None
+    config.show_address = form.get("show_address") is not None
+    config.guild_id = str(form.get("guild_id") or "")
+    config.default_channel_id = str(form.get("default_channel_id") or "")
+    config.command_channel_ids = str(form.get("command_channel_ids") or "")
+    config.read_role_ids = str(form.get("read_role_ids") or "")
+    # An unchecked box submits nothing, so the switched-on kinds are exactly
+    # the ones present -- rather than the ones whose value happens to be "1",
+    # which is how a cleared checkbox stays set.
+    chosen = set(form.getlist("announce"))
+    config.announce = {kind: kind in chosen for kind in KINDS}
+
+    try:
+        config.validate()
+    except discord_config.DiscordConfigError as exc:
+        # 200, not 400: htmx swaps successful responses only, so a refusal
+        # sent as an error status is a form that silently does nothing.
+        return _discord_panel(request, error=str(exc))
+
+    await bot.reload(config)
+    if not config.enabled:
+        return _discord_panel(request, message="Discord bot off.")
+    status = bot.status()
+    if status["last_error"]:
+        return _discord_panel(request, error=status["last_error"])
+    return _discord_panel(request, message="Discord settings saved.")
+
+
+@router.post("/settings/discord/token", response_class=HTMLResponse)
+async def save_discord_token(
+    request: Request,
+    token: str = Form(default=""),
+    clear: str = Form(default=""),
+) -> HTMLResponse:
+    """Store or remove the bot token.
+
+    The field is write-only: it is never rendered back, so an empty submission
+    means "leave it alone" rather than "clear it". Clearing is its own button.
+    """
+    bot = _discord(request)
+    root = _settings(request).data_root
+    if clear:
+        discord_config.clear_token(root)
+        await bot.reload_token()
+        return _discord_panel(request, message="Bot token removed.")
+    if not token.strip():
+        return _discord_panel(request, error="Paste a token, or use Clear token.")
+    try:
+        discord_config.write_token(root, token)
+    except discord_config.DiscordConfigError as exc:
+        return _discord_panel(request, error=str(exc))
+    await bot.reload_token()
+    status = bot.status()
+    if status["last_error"]:
+        return _discord_panel(request, error=status["last_error"])
+    if not status["enabled"]:
+        return _discord_panel(
+            request, message="Token saved. Switch the bot on to connect."
+        )
+    return _discord_panel(request, message="Token saved.")
+
+
+@router.post("/settings/discord/test", response_class=HTMLResponse)
+async def test_discord(request: Request) -> HTMLResponse:
+    """Post one message, so "is it actually wired up" has a real answer."""
+    bot = _discord(request)
+    channel = bot.config.default_channel_id
+    if not channel:
+        return _discord_panel(request, error="Set a default channel first.")
+    try:
+        await bot.say(
+            channel,
+            "Valheim Server Manager is connected and will announce here.",
+        )
+    except DiscordAPIError as exc:
+        return _discord_panel(request, error=exc.explain())
+    return _discord_panel(request, message=f"Test message sent to {channel}.")
 
 
 @router.post("/settings/check-update", response_class=HTMLResponse)

@@ -80,6 +80,19 @@ class Settings:
     fake_server: bool = field(
         default_factory=lambda: os.environ.get("VHSM_FAKE_SERVER", "") not in ("", "0")
     )
+    #: Where the Discord bot talks to. Overridable so the test suite can point
+    #: the whole integration at a local stand-in and stay offline, the same
+    #: reason ``fake_server`` exists -- not something a deployment should set.
+    discord_api_base: str = field(
+        default_factory=lambda: os.environ.get(
+            "VHSM_DISCORD_API_BASE", "https://discord.com/api/v10"
+        )
+    )
+    #: Gateway URL, when it should not be asked for. Blank means ask Discord,
+    #: which is what every real deployment does.
+    discord_gateway_url: str = field(
+        default_factory=lambda: os.environ.get("VHSM_DISCORD_GATEWAY_URL", "")
+    )
 
     @property
     def steamcmd_dir(self) -> Path:

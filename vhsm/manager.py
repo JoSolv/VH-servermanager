@@ -20,6 +20,8 @@ from . import backups as backups_mod
 from . import worlds as worlds_mod
 from .config import Settings, settings as default_settings
 from .diagnostics import check_libraries
+from .events import EventBus, Event
+from . import events as ev
 from .instance import InstanceConfig, InstanceLayout, ValidationError
 from .mods.profile import ModError, ModProfile
 from .mods.thunderstore import ThunderstoreError, ThunderstoreIndex
@@ -27,7 +29,7 @@ from .monitor.a2s import A2SError, query as a2s_query
 from .monitor.metrics import ProcMetrics, ProcessSampler, host_metrics
 from .monitor.net import NetworkMonitor, NetSample
 from .monitor.ports import Endpoint, bound_udp_sockets, primary_host_ip, query_candidates
-from .monitor.players import PlayerTracker
+from .monitor.players import LogEvent, PlayerTracker
 from .playerlists import PlayerLists
 from .roster import Roster
 from .steam import (
@@ -390,6 +392,11 @@ class InstanceRecord:
             "version": self.version,
             "reachable": self.reachable,
             "listening": self.listening,
+            # Whether the Steam query socket has answered for this process.
+            # Like `listening` it is evidence the server is actually up, but
+            # it is refreshed every few seconds rather than every half minute,
+            # so it is the signal worth acting on promptly.
+            "query_answered": self.query_endpoint is not None,
             "reachable_at": self.reachable_at,
             "reachable_detail": self.reachable_detail,
             "players": self.players.to_dict(self.lists),
@@ -463,6 +470,14 @@ class InstanceManager:
         self.settings.ensure_dirs()
         self.index = ThunderstoreIndex(self.settings.cache_dir, self.settings.index_ttl)
         self.hub = Hub()
+        #: Things that happened, for anything that wants telling. The Hub
+        #: above carries *state* for a browser to render; this carries
+        #: *changes*, which is the shape a notifier needs. Nothing here
+        #: knows what subscribes -- today it is the optional Discord bot.
+        self.events = EventBus()
+        #: Optional: something that diffs each sample and publishes what
+        #: moved. None until a subscriber attaches one.
+        self._watcher: Any = None
         self.net = NetworkMonitor()
         self.job = JobLog(self.settings.data_root / "steamcmd.log")
         self._proc_sampler = ProcessSampler()
@@ -536,12 +551,61 @@ class InstanceManager:
         )
         # The tracker is the only place a character name can be paired with the
         # id that connected, so the roster is fed from its resolved events
-        # rather than by parsing the log a second time.
-        record.players = PlayerTracker(on_event=roster.observe)
+        # rather than by parsing the log a second time. Two things want them
+        # now, so they fan out here: the roster, which is the record of who
+        # was here, and the bus, for whoever wants telling as it happens.
+        record.players = PlayerTracker(
+            on_event=lambda event: self._player_event(record, event)
+        )
         supervisor.add_log_hook(record.players.observe_log)
         self._records[config.id] = record
         self.net.watch(config.port)
         return record
+
+    def _player_event(self, record: InstanceRecord, event: LogEvent) -> None:
+        """One resolved player event: to the roster, then onto the bus.
+
+        The roster comes first and its failure is not allowed to cost the
+        announcement, or the other way round: these are two independent
+        consumers of one event, not a chain.
+        """
+        try:
+            record.roster.observe(event)
+        except Exception:  # noqa: BLE001 - a listener must never break log reading
+            log.exception("roster could not record a player event")
+
+        name = event.name or event.player_id or "Someone"
+        server = record.config.name
+        if event.kind == "named":
+            self.events.publish(Event(
+                kind=ev.PLAYER_JOIN,
+                instance_id=record.config.id, instance_name=server,
+                title=f"**{name}** joined {server}.",
+                level="good",
+                data={"player": name, "player_id": event.player_id},
+            ))
+        elif event.kind == "disconnect":
+            # A session that never got as far as a character name was somebody
+            # connecting and failing, which is not a player leaving.
+            if not event.name:
+                return
+            played = f" after {int((event.count or 0) / 60)}m" if event.count else ""
+            self.events.publish(Event(
+                kind=ev.PLAYER_LEAVE,
+                instance_id=record.config.id, instance_name=server,
+                title=f"**{name}** left {server}{played}.",
+                level="info",
+                data={"player": name, "player_id": event.player_id,
+                      "playtime": event.count},
+            ))
+        elif event.kind == "died":
+            self.events.publish(Event(
+                kind=ev.PLAYER_DEATH,
+                instance_id=record.config.id, instance_name=server,
+                title=f"\U0001F480 **{name}** died on {server}.",
+                level="important",
+                data={"player": name, "player_id": event.player_id},
+            ))
 
     @property
     def records(self) -> list[InstanceRecord]:
@@ -714,8 +778,16 @@ class InstanceManager:
         await self.stop(instance_id)
         await self.start(instance_id)
 
-    def submit(self, instance_id: str, action: str) -> InstanceRecord:
+    def submit(
+        self, instance_id: str, action: str, *, actor: str = "web"
+    ) -> InstanceRecord:
         """Run a lifecycle action as a manager-owned background task.
+
+        *actor* is who asked -- ``web`` for a button in the GUI, or
+        ``discord:<name>`` for a command. It rides into the log and onto the
+        event bus so that "who restarted the server" has an answer, which is
+        the first thing anyone asks once something other than the GUI can do
+        it.
 
         Stopping a real server takes as long as saving the world does, which
         is far longer than a browser will hold a request open. Tying the work
@@ -757,6 +829,15 @@ class InstanceManager:
 
         record.operation_name = action + "ing" if action != "stop" else "stopping"
         record.operation = asyncio.create_task(run())
+        log.info("%s: %s requested by %s", record.config.name, action, actor)
+        self.events.publish(Event(
+            kind=ev.LIFECYCLE,
+            instance_id=record.config.id,
+            instance_name=record.config.name,
+            title=f"{record.config.name}: {action} requested by {actor}.",
+            level="info",
+            data={"action": action, "actor": actor},
+        ))
         return record
 
     async def _cancel_operation(self, record: InstanceRecord) -> None:
@@ -952,6 +1033,11 @@ class InstanceManager:
         config.name = self._unique_name((name or info.name).strip() or "Imported server")
         config.port = self._free_port(config.port)
         config.created_at = time.time()
+        # The archive names a channel in the exporting operator's Discord,
+        # which this one can neither see nor be assumed to want posted to.
+        # Identity and port are already reassigned for the same reason.
+        config.discord_channel_id = ""
+        config.discord_enabled = False
         config.validate()
 
         layout = InstanceLayout.for_instance(self.settings, config.id)
@@ -1163,13 +1249,18 @@ class InstanceManager:
             except SteamError as exc:
                 log.warning("build check failed: %s", exc)
 
-        return {
+        build = {
             "installed": installed,
             "latest": self._latest_build,
             "checked_at": self._latest_checked,
             # Only claim an update when both ids are known and differ.
             "available": bool(installed and self._latest_build and installed != self._latest_build),
         }
+        if self._watcher is not None:
+            # Every page that shows the build badge calls this, so the watcher
+            # hears about a new build without a timer of its own.
+            self._watcher.observe_build(build)
+        return build
 
     async def run_update(self, *, validate: bool = True, restart: bool = True) -> None:
         """Install or update server files, restarting instances around it."""
@@ -1214,7 +1305,28 @@ class InstanceManager:
                     except Exception as exc:  # noqa: BLE001
                         job.log(f"[error] could not restart {record.config.name}: {exc}")
 
-        await job.run("update", body)
+        before = installed_build_id(self.settings)
+        ok = await job.run("update", body)
+        after = installed_build_id(self.settings)
+        if ok and after and after != before:
+            self.events.publish(Event(
+                kind=ev.SERVER_UPDATED,
+                title="The Valheim dedicated server was updated.",
+                detail=(
+                    f"Build `{before or 'unknown'}` \u2192 `{after}`."
+                    + (" Running servers were restarted." if restart else "")
+                ),
+                level="good",
+                key=f"server-updated:{after}",
+            ))
+        elif not ok:
+            self.events.publish(Event(
+                kind=ev.SERVER_UPDATED,
+                title="The Valheim dedicated server update failed.",
+                detail="The steamcmd transcript is in Settings.",
+                level="bad",
+                key=f"server-update-failed:{int(time.time())}",
+            ))
 
     async def maybe_run_scheduled_update(self, now: datetime | None = None) -> bool:
         """Run the daily server update if it is due. Says whether it ran.
@@ -1269,9 +1381,14 @@ class InstanceManager:
         run.checked = sum(1 for mod in profile.mods if mod.enabled)
         record.mod_check_busy = True
         try:
-            return await self._run_mod_update(record, profile, run, install, restart)
+            result = await self._run_mod_update(record, profile, run, install, restart)
         finally:
             record.mod_check_busy = False
+        # Announced here rather than inside the run, so a check asked for by
+        # hand and the nightly one report identically.
+        if not result.retry:
+            self._announce_mod_check(record, result)
+        return result
 
     async def _run_mod_update(
         self,
@@ -1344,6 +1461,22 @@ class InstanceManager:
         log.info("mod check for %s: %s", config.name, run.summary())
         return run
 
+    def _announce_mod_check(self, record: InstanceRecord, run: "ModUpdateRun") -> None:
+        """Report what a mod check did, in the words the GUI already uses."""
+        self.events.publish(Event(
+            kind=ev.MOD_CHECK,
+            instance_id=record.config.id,
+            instance_name=record.config.name,
+            title=f"{record.config.name}: mod check",
+            detail=run.summary(),
+            level="bad" if run.error else ("good" if run.updated else "info"),
+            # Keyed by the run, not by its outcome: two checks that found the
+            # same thing are two pieces of news, because the second one means
+            # it is still true a day later.
+            key=f"mod-check:{record.config.id}:{int(run.at)}",
+            data={"run": run.to_dict()},
+        ))
+
     async def _auto_mod_updates(self) -> None:
         """Run the per-instance mod checks that have come due."""
         now = datetime.now()
@@ -1397,6 +1530,16 @@ class InstanceManager:
                     "auto snapshot %s for %s (pruned %d)",
                     made.key, record.config.name, len(dropped),
                 )
+                self.events.publish(Event(
+                    kind=ev.SNAPSHOT,
+                    instance_id=record.config.id,
+                    instance_name=record.config.name,
+                    title=f"{record.config.name}: world snapshot taken.",
+                    detail=f"{made.key}"
+                           + (f", {len(dropped)} pruned" if dropped else ""),
+                    level="info",
+                    key=f"snapshot:{record.config.id}:{made.key}",
+                ))
             except backups_mod.BackupError as exc:
                 # Usually "no world yet"; retry on the next pass rather than
                 # spinning on it every few seconds.
@@ -1573,11 +1716,25 @@ class InstanceManager:
             try:
                 payload = await self.sample_once()
                 self.hub.publish(payload)
+                if self._watcher is not None:
+                    # Diffing is a dictionary comparison per instance; it runs
+                    # here rather than in the notifier so that every notifier
+                    # sees the same events from the same samples.
+                    self._watcher.observe(payload)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("sampler tick failed")
             await asyncio.sleep(interval)
+
+    def attach_watcher(self, watcher: Any) -> None:
+        """Have *watcher* see every sample, so it can publish what changed.
+
+        Kept as an attachment rather than built in because deriving events
+        from the snapshot stream is only worth doing when something is
+        listening for them.
+        """
+        self._watcher = watcher
 
     def start_background(self) -> None:
         if self._sampler_task is None or self._sampler_task.done():

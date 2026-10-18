@@ -73,6 +73,15 @@ class InstanceConfig:
     #: ``YYYY-MM-DD`` of the last scheduled check, so restarting the manager
     #: cannot make the day's check run twice.
     mod_update_last_run: str = ""
+    #: Announce this instance's events to Discord. Off by default, and off is
+    #: silent even when a default channel is configured: an instance that was
+    #: never opted in should not start talking because another one did.
+    discord_enabled: bool = False
+    #: Channel these announcements go to. Blank falls back to the manager's
+    #: default channel. Cleared when an instance is imported from an archive:
+    #: it names a channel on whoever exported it, which the importing operator
+    #: can neither see nor be expected to want.
+    discord_channel_id: str = ""
     created_at: float = field(default_factory=time.time)
 
     # ------------------------------------------------------------------ #
@@ -130,6 +139,11 @@ class InstanceConfig:
             raise ValidationError(
                 "The mod update check needs a time of day like 05:00."
             ) from None
+        if self.discord_channel_id and not self.discord_channel_id.isdigit():
+            raise ValidationError(
+                "A Discord channel ID is digits only. Turn on Developer Mode "
+                "in Discord, then right-click the channel and Copy Channel ID."
+            )
         for key, value in self.modifiers.items():
             if key not in MODIFIER_KEYS:
                 raise ValidationError(f"Unknown modifier {key!r}.")
