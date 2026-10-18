@@ -4,7 +4,7 @@ Runs entirely against the simulated server, so it needs no Steam download and
 no network access. Usage:  python tests/smoke_test.py
 """
 
-import io, json, os, shutil, sys, tempfile, time, zipfile
+import io, json, os, random, shutil, sys, tempfile, time, zipfile
 from pathlib import Path
 
 import yaml
@@ -16,6 +16,17 @@ os.environ["VHSM_FAKE_SERVER"] = "1"
 ROOT = Path(tempfile.mkdtemp(prefix="vhsm-smoke-"))
 os.environ["VHSM_DATA_ROOT"] = str(ROOT)
 
+# Discord, stood in for locally. Started before Settings() exists because the
+# API base is read from the environment, the same way the fake Valheim server
+# is selected -- so the whole integration is exercised with no network.
+from fake_discord import APPLICATION_ID, GOOD_TOKEN, FakeDiscord
+FAKE_DISCORD = FakeDiscord().start()
+os.environ["VHSM_DISCORD_API_BASE"] = FAKE_DISCORD.api_base
+# Belt and braces on a machine whose proxy settings would otherwise capture a
+# request to loopback.
+os.environ["NO_PROXY"] = os.environ.get("NO_PROXY", "") + ",127.0.0.1,localhost"
+
+import httpx
 from fastapi.testclient import TestClient
 from vhsm.config import Settings
 from vhsm.web.app import create_app
@@ -88,6 +99,72 @@ def wait_status(c, iid, want, timeout=25):
             return snap
         time.sleep(0.25)
     return c.get(f"/api/instances/{iid}").json()
+
+
+DISCORD_BASE = f"http://127.0.0.1:{FAKE_DISCORD.port}"
+GUILD, CHANNEL, OTHER_CHANNEL = "222222222222222222", "333333333333333333", "344444444444444444"
+READ_ROLE, CONTROL_ROLE = "555555555555555555", "666666666666666666"
+USER = "444444444444444444"
+
+
+def discord_state():
+    return httpx.get(DISCORD_BASE + "/_test/state", trust_env=False).json()
+
+
+def discord_reset():
+    httpx.post(DISCORD_BASE + "/_test/reset", trust_env=False)
+
+
+def discord_dispatch(name, data):
+    httpx.post(DISCORD_BASE + "/_test/dispatch",
+               json={"t": name, "d": data}, trust_env=False)
+
+
+def discord_wait(predicate, timeout=15, label=""):
+    """Poll until *predicate*, since the bot acts in the app's own loop."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def interaction(sub, options=None, *, guild=GUILD, channel=CHANNEL,
+                roles=(), user=USER, itype=2, focused=""):
+    """One slash-command interaction, shaped the way Discord sends them."""
+    opts = [
+        {"name": k, "value": v, "type": 3,
+         **({"focused": True} if k == focused else {})}
+        for k, v in (options or {}).items()
+    ]
+    return {
+        "id": str(random.randrange(10 ** 11, 10 ** 12)),
+        "token": "itoken-" + sub + str(random.randrange(1000)),
+        "type": itype,
+        "guild_id": guild,
+        "channel_id": channel,
+        "member": {"roles": list(roles), "user": {"id": user, "username": "tester"}},
+        "data": {"name": "vh", "options": [{"name": sub, "type": 1, "options": opts}]},
+    }
+
+
+def ask(sub, options=None, **kwargs):
+    """Run a command and return the reply payload the bot sent back."""
+    discord_reset()
+    discord_dispatch("INTERACTION_CREATE", interaction(sub, options, **kwargs))
+    if not discord_wait(lambda: discord_state()["responses"], label=f"/vh {sub}"):
+        return {}
+    payload = discord_state()["responses"][-1]["payload"]
+    if payload.get("type") == 5:                 # deferred; the text follows
+        if discord_wait(lambda: discord_state()["followups"], label="followup"):
+            return {"type": 4, "data": discord_state()["followups"][-1]["payload"]}
+    return payload
+
+
+def said(payload):
+    """Everything the bot put in one reply, as searchable text."""
+    return json.dumps(payload)
 
 
 print("\n[static]")
@@ -1548,7 +1625,6 @@ with TestClient(app) as c:
     print("\n[catalogue refresh]")
     r = c.get(f"/instances/{iid}/mods")
     check("the mods page says how old the catalogue is", "packages, fetched just now" in r.text)
-    import httpx
     real_get = httpx.AsyncClient.get
     async def offline(self, *args, **kwargs):
         raise httpx.ConnectError("offline")
@@ -1915,6 +1991,439 @@ with TestClient(app) as c:
     check("refusals left the mods alone", set(mods_on(vprof)) == {bep, "ValheimModding-Jotunn"})
     c.post(f"/instances/{vid}/delete", data={"remove_files": "on"})
 
+    # ===================================================================== #
+    print("\n[discord: configuration and the token]")
+    from vhsm.discord import config as dconfig
+    from vhsm.discord.commands import COMMANDS, Cooldowns, Denied, check_allowed, definitions
+    from vhsm.discord.announce import StateWatcher
+    from vhsm.events import DEFAULT_ANNOUNCE, KINDS, Event, EventBus
+    from vhsm.web.routes import announce_labels
+
+    check("every event kind has a label on the settings page",
+          all(label != kind for kind, label in announce_labels())
+          and len(announce_labels()) == len(KINDS))
+    check("noisy announcements are off by default",
+          not DEFAULT_ANNOUNCE["player_join"] and not DEFAULT_ANNOUNCE["player_death"]
+          and DEFAULT_ANNOUNCE["crash"])
+
+    for bad in ("not-a-number", "12345678901234567890123", "123 456", "<#123>"):
+        try:
+            dconfig.normalise_id(bad, "Channel")
+            check(f"refused a bad id: {bad!r}", False)
+        except dconfig.DiscordConfigError:
+            check(f"refused a bad id: {bad!r}", True)
+    check("ids are read from a mixed separator list",
+          dconfig.normalise_ids("111111111111111111, 222222222222222222\n111111111111111111")
+          == ["111111111111111111", "222222222222222222"])
+
+    cfg = dconfig.DiscordConfig(enabled=True, guild_id="")
+    try:
+        cfg.validate(); check("enabled without a guild is refused", False)
+    except dconfig.DiscordConfigError:
+        check("enabled without a guild is refused", True)
+    cfg = dconfig.DiscordConfig.from_dict({"announce": {"made_up_kind": True}, "guild_id": GUILD})
+    check("an unknown announce switch is dropped", "made_up_kind" not in cfg.announce)
+    check("...and the known ones keep their defaults", cfg.announces("crash"))
+
+    dconfig.write_token(ROOT, f'  "bot {GOOD_TOKEN}"  ')
+    check("a token pasted with quotes and a prefix is cleaned",
+          dconfig.read_token(ROOT) == GOOD_TOKEN, dconfig.read_token(ROOT))
+    check("the token file is private",
+          oct(dconfig.token_path(ROOT).stat().st_mode & 0o777) == "0o600")
+    check("the token is not in discord.json",
+          GOOD_TOKEN not in (dconfig.config_path(ROOT).read_text()
+                             if dconfig.config_path(ROOT).exists() else ""))
+    os.environ["VHSM_DISCORD_TOKEN"] = "from-the-environment"
+    check("the environment wins over the file",
+          dconfig.read_token(ROOT) == "from-the-environment"
+          and dconfig.token_source(ROOT) == "env")
+    del os.environ["VHSM_DISCORD_TOKEN"]
+    check("...and the file is used again once it is gone",
+          dconfig.token_source(ROOT) == "file")
+    check("the invite link asks for three permissions and the commands scope",
+          "permissions=19456" in dconfig.invite_url("1")
+          and "applications.commands" in dconfig.invite_url("1"))
+
+    print("\n[discord: who may run what]")
+    gate = dconfig.DiscordConfig(enabled=True, guild_id=GUILD, commands_enabled=True)
+    read_cmd, ctrl_cmd = COMMANDS["status"], COMMANDS["status"].__class__(
+        name="restart", description="x", tier="control", handler=COMMANDS["status"].handler)
+
+    def denied(config, command, **kwargs):
+        try:
+            check_allowed(config, command, interaction("status", **kwargs))
+            return ""
+        except Denied as exc:
+            return str(exc)
+
+    check("a read command is allowed by default", not denied(gate, read_cmd))
+    check("a DM is refused", "not in a DM" in denied(gate, read_cmd, guild=None))
+    check("another guild is refused",
+          "not configured for this Discord server" in denied(gate, read_cmd, guild="999999999999999999"))
+    off = dconfig.DiscordConfig.from_dict({**gate.to_dict(), "commands_enabled": False})
+    check("commands switched off are refused", "switched off" in denied(off, read_cmd))
+    scoped = dconfig.DiscordConfig.from_dict({**gate.to_dict(), "command_channel_ids": [CHANNEL]})
+    check("a channel outside the list is refused",
+          "not answered in this channel" in denied(scoped, read_cmd, channel=OTHER_CHANNEL))
+    check("...and one inside it is allowed", not denied(scoped, read_cmd, channel=CHANNEL))
+    gated = dconfig.DiscordConfig.from_dict({**gate.to_dict(), "read_role_ids": [READ_ROLE]})
+    check("without the read role, refused", "not allowed to use" in denied(gated, read_cmd))
+    check("with the read role, allowed", not denied(gated, read_cmd, roles=[READ_ROLE]))
+
+    # The tier that is not shipped yet, but is enforced now.
+    check("control is refused while it is switched off",
+          "Control commands are switched off" in denied(gate, ctrl_cmd, roles=[CONTROL_ROLE]))
+    armed = dconfig.DiscordConfig.from_dict({**gate.to_dict(), "control_enabled": True})
+    check("control with an empty allowlist means nobody, not everybody",
+          "not allowed to control" in denied(armed, ctrl_cmd))
+    by_role = dconfig.DiscordConfig.from_dict(
+        {**armed.to_dict(), "control_role_ids": [CONTROL_ROLE]})
+    check("control allows a named role", not denied(by_role, ctrl_cmd, roles=[CONTROL_ROLE]))
+    check("...and still refuses another role",
+          "not allowed to control" in denied(by_role, ctrl_cmd, roles=[READ_ROLE]))
+    by_user = dconfig.DiscordConfig.from_dict(
+        {**armed.to_dict(), "control_user_ids": [USER]})
+    check("control allows a named user", not denied(by_user, ctrl_cmd, user=USER))
+    check("...and refuses anybody else",
+          "not allowed to control" in denied(by_user, ctrl_cmd, user="777777777777777777"))
+
+    cool = Cooldowns()
+    cool.check(USER, "restart", "Midgard", 60)
+    try:
+        cool.check(USER, "restart", "Midgard", 60)
+        check("a cooldown holds the second attempt", False)
+    except Denied as exc:
+        check("a cooldown holds the second attempt", "Give that another" in str(exc))
+    check("...per server", (cool.check(USER, "restart", "Asgard", 60), True)[1])
+    check("...and not at all when it is zero",
+          (cool.check(USER, "restart", "Midgard", 0), True)[1])
+
+    check("control commands are not registered while they are off",
+          [o["name"] for o in definitions(gate)[0]["options"]]
+          == ["servers", "status", "players", "mods", "player", "version"])
+
+    print("\n[discord: deriving events from samples]")
+    bus = EventBus()
+    queue = bus.subscribe()
+    watcher = StateWatcher(bus)
+
+    def drain():
+        out = []
+        while not queue.empty():
+            out.append(queue.get_nowait())
+        return out
+
+    def sample(**overrides):
+        payload = {"id": "i1", "name": "Midgard", "status": "stopped", "world": "Midgard",
+                   "listening": False, "query_answered": False, "version": "",
+                   "reachable": None, "notices": [], "uptime": 0, "exit_code": None,
+                   "players": {"count": 0, "max": 10, "players": []},
+                   "mods": {"installed": 0, "enabled": 0, "updates_active": [],
+                            "restart_pending": False}}
+        payload.update(overrides)
+        watcher.observe({"instances": [payload]})
+
+    sample()
+    check("nothing is announced on first sight", not drain())
+    sample(status="running")
+    check("...nor while still settling after start-up", not drain())
+    watcher._started_at -= 120                    # out of the quiet period
+    sample(status="stopped")
+    events = drain()
+    check("a status change is one event",
+          len(events) == 1 and events[0].kind == "status" and "has stopped" in events[0].title,
+          [e.title for e in events])
+    sample(status="running")
+    sample(status="running", listening=True, version="0.217.46")
+    events = drain()
+    check("running, then ready", [e.kind for e in events] == ["status", "ready"],
+          [e.kind for e in events])
+    check("ready says what players care about", "accepting players" in events[1].title)
+    sample(status="running", listening=True, version="0.217.46")
+    check("ready is announced once per run", not drain())
+    sample(status="crashed", exit_code=139, listening=False)
+    events = drain()
+    check("a crash is its own event with the exit code",
+          len(events) == 1 and events[0].kind == "crash" and events[0].level == "bad"
+          and "139" in events[0].detail, [e.to_dict() for e in events])
+
+    # Reachability must not flap: one lost packet is not an outage.
+    sample(status="running", listening=True, reachable=True)
+    sample(status="running", listening=True, reachable=True)
+    sample(status="running", listening=True, reachable=True)
+    drain()
+    sample(status="running", listening=True, reachable=False)
+    check("one failed probe says nothing", not drain())
+    sample(status="running", listening=True, reachable=False)
+    check("two still say nothing", not drain())
+    sample(status="running", listening=True, reachable=False)
+    events = drain()
+    check("three agreeing probes are an outage",
+          len(events) == 1 and events[0].kind == "reachability"
+          and "not answering" in events[0].title, [e.title for e in events])
+
+    updates = [{"package_full_name": "A-B", "name": "B", "current": "1.0.0", "latest": "1.1.0"}]
+    sample(status="running", listening=True, reachable=False,
+           mods={"installed": 1, "enabled": 1, "updates_active": updates,
+                 "restart_pending": False})
+    events = drain()
+    check("a mod release is announced with the versions",
+          len(events) == 1 and events[0].kind == "mod_update"
+          and "1.0.0 → 1.1.0" in events[0].detail, [e.to_dict() for e in events])
+    sample(status="running", listening=True, reachable=False,
+           mods={"installed": 1, "enabled": 1, "updates_active": updates,
+                 "restart_pending": False})
+    check("...and not again for the same release", not drain())
+    sample(status="running", listening=True, reachable=False,
+           mods={"installed": 1, "enabled": 1, "updates_active": updates,
+                 "restart_pending": True})
+    events = drain()
+    check("mods changed but not loaded is its own notice",
+          len(events) == 1 and events[0].kind == "mod_restart_pending", [e.kind for e in events])
+
+    sample(status="running", listening=True, reachable=False,
+           notices=[{"key": "no-user-account", "level": "error",
+                     "title": "The server has no user account.", "detail": "..."}])
+    events = drain()
+    check("a console failure is announced once",
+          len(events) == 1 and events[0].kind == "notice", [e.kind for e in events])
+    sample(status="running", listening=True, reachable=False,
+           notices=[{"key": "no-user-account", "level": "error",
+                     "title": "The server has no user account.", "detail": "..."}])
+    check("...and not repeated every tick", not drain())
+
+    watcher.observe_build({"available": True, "installed": "100", "latest": "200"})
+    events = drain()
+    check("a new Valheim build is announced",
+          len(events) == 1 and events[0].kind == "server_update" and "200" in events[0].detail)
+    watcher.observe_build({"available": True, "installed": "100", "latest": "200"})
+    check("...once per build", not drain())
+
+    print("\n[discord: connecting]")
+    bot = app.state.discord
+    check("the bot is off until it is configured",
+          not bot.status()["enabled"] and not bot.status()["connected"])
+    r = c.get("/settings")
+    check("settings has the Discord panel", "Discord bot" in r.text and "Bot token" in r.text)
+    check("...and offers the announcement switches", 'name="announce"' in r.text)
+
+    r = c.post("/settings/discord", data={"enabled": "1", "guild_id": "nonsense"})
+    check("a bad guild id is refused in the form",
+          "must be a Discord id" in r.text and not bot.status()["enabled"], r.text[:300])
+
+    r = c.post("/settings/discord/token", data={"token": GOOD_TOKEN})
+    check("the token is accepted", "Token saved" in r.text, r.text[:300])
+    check("...and never rendered back", GOOD_TOKEN not in r.text)
+
+    r = c.post("/settings/discord", data={
+        "enabled": "1", "guild_id": GUILD, "default_channel_id": CHANNEL,
+        "commands_enabled": "1", "show_address": "1",
+        "announce": ["status", "ready", "crash", "player_join", "player_leave",
+                     "mod_update", "server_update"]})
+    check("the bot is configured", "Discord settings saved" in r.text, r.text[:400])
+    check("it connects", discord_wait(lambda: bot.status()["connected"], 20, "connect"),
+          bot.status())
+    check("it identified once", discord_state()["identifies"] == 1)
+    check("it registered its commands",
+          discord_wait(lambda: discord_state()["registered"], 10, "registration"))
+    offered = [o["name"] for o in discord_state()["registered"][-1]["commands"][0]["options"]]
+    check("only read commands are offered",
+          offered == ["servers", "status", "players", "mods", "player", "version"], offered)
+    check("the invite link is built from the application id",
+          APPLICATION_ID in bot.status()["invite_url"], bot.status()["invite_url"])
+
+    print("\n[discord: read commands]")
+    check("/vh servers lists the server",
+          "Midgard" in said(ask("servers")))
+    reply = ask("status", {"server": "Midgard"})
+    check("/vh status answers for one server", "Midgard" in said(reply), said(reply)[:300])
+    check("...with the join address", "2456" in said(reply))
+    check("/vh status names the servers when it is ambiguous",
+          "Which server" in said(ask("status")) or len(app.state.manager.records) == 1)
+    # A name no instance in this suite uses: "Asgard" is one of them.
+    check("an unknown server is refused by name",
+          "No server called" in said(ask("status", {"server": "Jotunheim"})))
+    # Derived from what is actually configured at this point, rather than a
+    # name an earlier section may have created and deleted.
+    whole = app.state.manager.records[0].config.name
+    check("a partial name that matches one server is accepted",
+          whole in said(ask("status", {"server": whole[:4].lower()})), whole)
+    reply = ask("players", {"server": "Midgard"})
+    check("/vh players answers", "Midgard" in said(reply), said(reply)[:200])
+    reply = ask("version")
+    check("/vh version defers and then answers", "vhsm" in said(reply), said(reply)[:300])
+    reply = ask("player", {"name": "Nobody At All"})
+    check("an unknown player is said plainly", "has joined any of these servers" in said(reply))
+    reply = ask("mods", {"server": "Midgard"})
+    # Whether this server has the mod loader switched on depends on what the
+    # sections above left behind, so the check follows the configuration
+    # rather than assuming one of the two answers.
+    if app.state.manager.get(iid).config.mods_enabled:
+        check("/vh mods lists what a modded server runs",
+              "mods" in said(reply).lower(), said(reply)[:200])
+    else:
+        check("/vh mods says so when a server runs none",
+              "does not run mods" in said(reply), said(reply)[:200])
+
+    discord_reset()
+    discord_dispatch("INTERACTION_CREATE",
+                     interaction("status", {"server": "Mid"}, itype=4, focused="server"))
+    check("the server argument autocompletes",
+          discord_wait(lambda: discord_state()["responses"], 10, "autocomplete")
+          and discord_state()["responses"][-1]["payload"]["data"]["choices"][0]["value"] == "Midgard",
+          discord_state()["responses"][-1:])
+
+    reply = ask("servers", guild="999999999999999999")
+    check("a command from another guild is refused",
+          "not configured for this Discord server" in said(reply))
+    check("...only to the person who ran it", reply["data"].get("flags") == 64)
+    check("an unknown subcommand does not go unanswered",
+          "do not know that command" in said(ask("nonsense")))
+
+    print("\n[discord: announcements]")
+    discord_reset()
+    bus_events = app.state.manager.events
+    bus_events.publish(Event(kind="server_update", title="A new build is out.",
+                             detail="123 -> 456", key="t1"))
+    check("a manager-wide event goes to the default channel",
+          discord_wait(lambda: discord_state()["messages"], 10, "default channel")
+          and discord_state()["messages"][0]["channel_id"] == CHANNEL,
+          discord_state()["messages"])
+    check("...rendered as an embed",
+          "A new build is out." in said(discord_state()["messages"][0]["payload"]))
+
+    discord_reset()
+    bus_events.publish(Event(kind="server_update", title="A new build is out.",
+                             detail="123 -> 456", key="t1"))
+    check("the same news is not announced twice",
+          not discord_wait(lambda: discord_state()["messages"], 2, ""))
+
+    discord_reset()
+    bus_events.publish(Event(kind="snapshot", title="Snapshot taken.", key="t2"))
+    check("an event whose switch is off is not announced",
+          not discord_wait(lambda: discord_state()["messages"], 2, ""))
+
+    discord_reset()
+    bus_events.publish(Event(kind="status", instance_id=iid, instance_name="Midgard",
+                             title="Midgard has stopped.", key="t3"))
+    check("an instance that has not opted in stays silent",
+          not discord_wait(lambda: discord_state()["messages"], 2, ""))
+
+    r = c.post(f"/instances/{iid}/discord", data={"enabled": "1", "channel_id": OTHER_CHANNEL})
+    check("an instance can choose its own channel",
+          "Announcing to channel" in r.text, r.text[:300])
+    discord_reset()
+    bus_events.publish(Event(kind="status", instance_id=iid, instance_name="Midgard",
+                             title="Midgard has stopped.", key="t4"))
+    check("...and its events go there, not to the default",
+          discord_wait(lambda: discord_state()["messages"], 10, "instance channel")
+          and discord_state()["messages"][0]["channel_id"] == OTHER_CHANNEL,
+          discord_state()["messages"])
+
+    r = c.post(f"/instances/{iid}/discord", data={"enabled": "1", "channel_id": ""})
+    discord_reset()
+    bus_events.publish(Event(kind="status", instance_id=iid, instance_name="Midgard",
+                             title="Midgard is starting.", key="t5"))
+    check("a blank channel falls back to the default",
+          discord_wait(lambda: discord_state()["messages"], 10, "fallback")
+          and discord_state()["messages"][0]["channel_id"] == CHANNEL)
+
+    r = c.post(f"/instances/{iid}/discord", data={"enabled": "1", "channel_id": "not-a-channel"})
+    check("a bad channel id is refused on the instance page",
+          "digits only" in r.text, r.text[:300])
+
+    print("\n[discord: player traffic]")
+    # The simulated server has a player-churn thread of its own, so these
+    # assertions name our own test player rather than looking at whatever
+    # happens to have been announced last.
+    record = app.state.manager.get(iid)
+    NAMED, UNNAMED = "76561198000000042", "76561198000000043"
+
+    def announced(fragment):
+        """Any announcement mentioning *fragment*, and the payload if so."""
+        for message in discord_state()["messages"]:
+            if fragment in json.dumps(message["payload"]):
+                return message["payload"]
+        return None
+
+    discord_reset()
+    record.players.observe_log(f"Got connection SteamID {NAMED}")
+    record.players.observe_log("Got character ZDOID from Freyja : 12345:1")
+    check("a player joining is announced once they have a name",
+          discord_wait(lambda: announced("Freyja"), 10, "join"),
+          discord_state()["messages"])
+    joined = announced("Freyja") or {}
+    check("...as a line rather than an embed", "content" in joined, joined)
+    check("...and the roster recorded it too", record.roster.get(NAMED) is not None)
+
+    discord_reset()
+    record.players.observe_log(f"Closing socket {NAMED}")
+    check("a player leaving is announced",
+          discord_wait(lambda: announced("Freyja"), 10, "leave"))
+    check("...saying they left", "left" in said(announced("Freyja") or {}))
+
+    discord_reset()
+    record.players.observe_log(f"Got connection SteamID {UNNAMED}")
+    record.players.observe_log(f"Closing socket {UNNAMED}")
+    check("a connection that never named anybody is not a player leaving",
+          not discord_wait(lambda: announced(UNNAMED), 3, ""),
+          announced(UNNAMED))
+
+    print("\n[discord: when Discord says no]")
+    c.post("/settings/discord", data={
+        "enabled": "1", "guild_id": GUILD, "default_channel_id": "999000000000000000",
+        "commands_enabled": "1", "announce": ["server_update"]})
+    discord_reset()
+    bus_events.publish(Event(kind="server_update", title="Another build.", key="t6"))
+    check("a channel it cannot post to is reported, not crashed out",
+          discord_wait(lambda: "not allowed to do that" in (bot.status()["last_error"] or ""),
+                       10, "forbidden"),
+          bot.status()["last_error"])
+    check("...and the bot stays connected", bot.status()["connected"])
+
+    print("\n[discord: the test button and switching off]")
+    c.post("/settings/discord", data={
+        "enabled": "1", "guild_id": GUILD, "default_channel_id": CHANNEL,
+        "commands_enabled": "1", "announce": ["status"]})
+    discord_reset()
+    r = c.post("/settings/discord/test")
+    check("the test button posts a message",
+          "Test message sent" in r.text
+          and discord_wait(lambda: discord_state()["messages"], 10, "test message"),
+          r.text[:300])
+
+    before = discord_state()["identifies"] + discord_state()["resumes"]
+    httpx.post(DISCORD_BASE + "/_test/drop", trust_env=False)
+    check("a dropped socket reconnects by itself",
+          discord_wait(lambda: discord_state()["identifies"] + discord_state()["resumes"] > before,
+                       40, "reconnect"))
+
+    print("\n[discord: a token revoked under a running bot]")
+    # The failure that matters most: Discord closes the gateway with 4004 and
+    # the answer is to stop and say so, not to reconnect forever.
+    httpx.post(DISCORD_BASE + "/_test/reject-gateway", json={"reject": True}, trust_env=False)
+    httpx.post(DISCORD_BASE + "/_test/drop", trust_env=False)
+    check("a rejected token stops the gateway",
+          discord_wait(lambda: bot.status()["state"] == "stopped", 40, "give up"),
+          bot.status())
+    check("...saying the token was rejected",
+          "rejected the bot token" in (bot.status()["last_error"] or ""),
+          bot.status()["last_error"])
+    check("...and it is not reported as connected", not bot.status()["connected"])
+    attempts = discord_state()["rejected"]
+    check("...and it does not keep hammering Discord",
+          not discord_wait(lambda: discord_state()["rejected"] > attempts, 5, ""),
+          discord_state()["rejected"])
+    check("the manager is unaffected by all of that", c.get("/").status_code == 200)
+    httpx.post(DISCORD_BASE + "/_test/reject-gateway", json={"reject": False}, trust_env=False)
+
+    r = c.post("/settings/discord/token", data={"clear": "1"})
+    check("the token can be removed", "Bot token removed" in r.text, r.text[:200])
+    check("...and the bot stays down", not bot.status()["connected"])
+    r = c.post("/settings/discord", data={"guild_id": GUILD})
+    check("the bot can be switched off", "Discord bot off" in r.text, r.text[:200])
+    check("...and the manager carries on", c.get("/").status_code == 200)
+
     print("\n[teardown]")
     c.post(f"/instances/{iid}/stop")
     snap = wait_status(c, iid, "stopped")
@@ -1925,5 +2434,6 @@ with TestClient(app) as c:
     check("404 after delete", c.get(f"/api/instances/{iid}").status_code == 404)
 
 print(f"\n=== {ok} passed, {fail} failed ===")
+FAKE_DISCORD.stop()
 shutil.rmtree(ROOT, ignore_errors=True)
 raise SystemExit(1 if fail else 0)

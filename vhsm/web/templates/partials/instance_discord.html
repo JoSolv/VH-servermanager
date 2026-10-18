@@ -1,0 +1,48 @@
+{# Where this instance's announcements go.
+
+   Only the routing lives here. Which *kinds* of event are announced is a
+   manager-wide choice on the Settings page: it is a matter of taste rather
+   than a per-server fact, and repeating sixteen checkboxes per instance would
+   be a worse answer than one place to set them. #}
+<div id="instance-discord" hx-target="this" hx-swap="outerHTML">
+  {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  {% if not discord.enabled %}
+    <p class="subtle">
+      The Discord bot is switched off. Turn it on in
+      <a href="/settings">Settings</a> and this instance can announce there.
+    </p>
+  {% elif not discord.connected %}
+    <div class="alert error">
+      The bot is configured but not connected{% if discord.last_error %}: {{ discord.last_error }}{% endif %}.
+      Announcements are queued nowhere — they are dropped while it is down.
+    </div>
+  {% endif %}
+
+  <form hx-post="/instances/{{ config.id }}/discord">
+    <div class="check">
+      <input type="checkbox" id="discord_on" name="enabled" value="1"
+             {{ 'checked' if config.discord_enabled }}>
+      <label for="discord_on">Announce this server's events to Discord</label>
+    </div>
+    <div class="form-grid">
+      <div class="field">
+        <label for="discord_channel_id">Channel ID</label>
+        <input type="text" id="discord_channel_id" name="channel_id"
+               value="{{ config.discord_channel_id }}" inputmode="numeric"
+               placeholder="{{ discord_default or 'the default channel' }}">
+        <div class="hint">
+          Right-click the channel in Discord with Developer Mode on and Copy
+          Channel ID. Blank uses the manager's default channel.
+        </div>
+      </div>
+    </div>
+    <button class="primary" type="submit">Save</button>
+  </form>
+
+  <p class="hint" style="margin-bottom:0">
+    Which events are announced is set once for every server, under
+    <a href="/settings">Settings &rarr; Discord bot</a>.
+  </p>
+</div>

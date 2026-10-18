@@ -3,5 +3,9 @@ uvicorn[standard]>=0.30
 jinja2>=3.1
 psutil>=5.9
 httpx>=0.27
+# The Discord bot's gateway connection. Already present as part of
+# uvicorn[standard]; named here so it is a dependency rather than an
+# accident of another package's extras.
+websockets>=14
 python-multipart>=0.0.9
 pyyaml>=5.1

@@ -1,7 +1,13 @@
 # Design note: a built-in Discord bot
 
-Status: **proposal, nothing implemented.** This is the design to argue with
-before any code is written.
+Status: **phases 1 and 2 implemented** (announcements and read-only commands).
+Phase 3, control commands, is deliberately not: the permission tier it needs is
+built, enforced and tested, but no command uses it yet. See
+[Phases](#phases) at the end for what landed and what did not.
+
+This note is the design, kept as the record of *why* it is shaped this way.
+Where the implementation settled somewhere different from the proposal, the
+text says so rather than being quietly corrected.
 
 ## What it is for
 
@@ -93,7 +99,7 @@ an email sink later would be another.
 | Announcement | Where it comes from today |
 |---|---|
 | starting / running / stopped / crashed | `Supervisor.status` transitions |
-| "ready", as opposed to "the process exists" | `record.listening` plus `record.version` |
+| "ready", as opposed to "the process exists" | `record.listening` **or** `record.query_answered` |
 | crash detail | `supervisor.exit_code`, `supervisor.last_error` |
 | recognised failures (missing libraries, no user account) | `supervisor.notices`, already keyed for change detection |
 | player joined, by character name | `PlayerTracker` `named` event |
@@ -107,6 +113,15 @@ an email sink later would be another.
 | reachable / unreachable from outside | `record.reachable` (tri-state) |
 | automatic snapshot taken | `_auto_snapshot()` |
 | the manager itself started or stopped | app lifespan |
+
+That "or" is a correction to the original proposal, which said `listening`
+alone. `listening` is the stronger fact -- the kernel saying the process holds
+its game port -- but it is only recomputed on the external reachability pass,
+every fifteen sampling ticks, so a "your server is up" gated on it alone lands
+up to half a minute late. Whether the Steam query socket has answered says the
+same thing for a player's purposes and is refreshed every three ticks, so
+either will do and the sooner one usually wins. `query_answered` was added to
+the instance snapshot for this, and is a useful fact in its own right.
 
 Two things are worth getting right rather than shipping naively:
 
@@ -173,30 +188,37 @@ convenience. Letting "members of the channel" run `stop` means letting anyone
 who can get into that channel — including anyone an admin invites next month —
 stop the server.
 
-So, in order:
+So, in order. Each item is marked with where it stands, since the control
+commands themselves are not shipped:
 
-- **Control is off by default.** Reads and announcements work with control
-  disabled, and that is the configuration most people should run.
-- **Pinned to one guild.** The bot ignores everything outside the configured
-  guild id, so a token that leaks or an install into a second server cannot
-  reach the host.
-- **Channel allowlist.** Commands are only honoured in the channels listed.
-  Discord's own channel permissions are the first gate; this is the second,
-  because the bot's permissions are managed by Discord admins and this list is
-  managed by the operator.
-- **Role and user allowlists, separately for read and control.** By role id and
-  user id, not "whoever can see the channel". An empty read allowlist means
-  anyone in an allowed channel; an empty *control* allowlist means nobody, and
-  control stays off.
-- **Confirmation on `stop`** when players are online, and the button only
-  answers the user who ran the command.
+- **Control is off by default.** *Built.* Reads and announcements work with
+  control disabled, and that is the configuration most people should run --
+  and today the only one, since no control command exists.
+- **Pinned to one guild.** *Built.* The bot ignores everything outside the
+  configured guild id, so a token that leaks or an install into a second
+  server cannot reach the host.
+- **Channel allowlist.** *Built.* Commands are only honoured in the channels
+  listed. Discord's own channel permissions are the first gate; this is the
+  second, because the bot's permissions are managed by Discord admins and this
+  list is managed by the operator.
+- **Role and user allowlists, separately for read and control.** *Built.* By
+  role id and user id, not "whoever can see the channel". An empty read
+  allowlist means anyone in an allowed channel; an empty *control* allowlist
+  means nobody, which is the asymmetry that matters and is tested as such.
 - **A cooldown per user and per instance**, so `restart` cannot be held down.
-- **An audit trail.** Every control command recorded with the Discord user id
-  and name, into the manager log and into the instance's own log, and shown in
-  the UI. If it can take the server down, there should be a record of who did.
-- **Ephemeral replies** for anything that is nobody else's business, and the
-  server password never appears in any reply or embed. The join address is
-  posted only if *Show join address* is on.
+  *Built* (`Cooldowns`), unused until there is a control command to limit.
+- **An audit trail.** *Half built.* `submit()` takes an `actor`, so every
+  lifecycle action names who asked in the manager log and in a `LIFECYCLE`
+  event. Nothing renders it in the GUI yet, which it should before a control
+  command ships: if it can take the server down, there should be a record of
+  who did that somewhere better than `grep`.
+- **Confirmation on `stop`** when players are online, with the button only
+  answering the user who ran the command. *Not built* -- it needs a message
+  component and a second interaction handler, and it is one of the two reasons
+  phase 3 is held back.
+- **Ephemeral replies** for anything that is nobody else's business. *Built*:
+  every refusal is ephemeral. The server password appears in no reply or
+  embed, and the join address only if *Show join address* is on.
 
 ### The token
 
@@ -257,21 +279,41 @@ Discord forever.
 
 ## Testing it offline
 
-The smoke suite needs no network and no Steam download, and this must not
-change that. The gateway and API base URLs become settings, and
-`tools/fake_discord.py` serves a stub gateway and REST surface locally, exactly
-as `tools/fake_valheim_server.py` stands in for the real binary. Then the
-checks are ordinary:
+The smoke suite needs no network and no Steam download, and that did not
+change. `VHSM_DISCORD_API_BASE` points the whole integration at
+`tools/fake_discord.py`, which serves a stub gateway and REST surface on
+loopback -- exactly as `tools/fake_valheim_server.py` stands in for the real
+binary. It records what the bot said and gives the suite a door of its own
+(`/_test/dispatch`, `/_test/drop`, `/_test/reject-gateway`) to put events and
+failures in front of it.
 
-- identify, heartbeat, resume after a dropped socket, and stop on `4004`
-- commands registered once on READY
-- `/vh status` returns the state the manager is actually in
-- a control command from a user not on the allowlist is refused, and refused
-  the same way when the allowlist is empty
-- an allowlisted user's `/vh restart` reaches `manager.submit` with the actor
-  recorded
-- a status transition produces exactly one message, to the right channel
-- a manager restart does not re-announce what it merely re-observed
+What is covered:
+
+- identify, command registration on READY, reconnect after a dropped socket,
+  and stopping rather than retrying on `4004` -- including a token revoked
+  while the bot is running, which is the failure most likely to happen for
+  real
+- every read command, its refusals, and the `server` argument's autocomplete
+- the gate at each of its gates: guild, channel, read role, and the control
+  tier -- including that an empty control allowlist means nobody while an
+  empty *read* allowlist means anyone, which is the asymmetry worth a test
+- cooldowns, per user and per server
+- token handling: environment over file, `0600`, a pasted `Bot "..."` cleaned
+  up, and never echoed back
+- event derivation from synthetic samples, which is where the conservatism
+  gets checked: first sight and the start-up window are silent, reachability
+  must agree three times, and each notice, release and restart-pending state
+  is announced once
+- channel routing: the instance's own channel, the fallback to the default,
+  and silence for an instance that never opted in
+- a channel Discord refuses, reported on the Settings page rather than
+  crashing the bot or stopping the manager
+
+One seam is deliberately tested by hand rather than in the suite: driving a
+real server start through to a real "ready" announcement. The suite asserts the
+watcher's logic against synthetic snapshots instead, because a real start/stop
+cycle is twenty-odd seconds of test time for one assertion the unit checks
+already make.
 
 ## What it will not do, and why
 
@@ -292,17 +334,60 @@ ask for:
 
 ## Phases
 
-1. **Transport.** Config, token storage, gateway + REST, connection status and
-   the invite link in Settings, and `/vh servers` / `/vh status` / `/vh players`.
-   Read-only, no announcements. Proves the socket and the test stub.
-2. **Announcements.** The event bus, per-instance channel, global toggles,
-   status and player and mod and update events, with the flapping and
-   boot-burst rules above.
-3. **Control.** `start` / `stop` / `restart` behind the full gate: guild,
-   channel, role, cooldown, confirmation, audit trail.
-4. **Extras.** `/vh mods`, `/vh player`, autocomplete, death announcements, the
-   sticky status message, per-instance event overrides.
+1. **Transport** -- *done.* Config, token storage, the gateway and REST
+   clients, connection state and the invite link in Settings, and the read
+   commands. The hand-rolled gateway was the open question and it came out
+   fine: identify, resume, heartbeat-ack timeouts, backoff and the final close
+   codes are about 350 lines, and `tools/fake_discord.py` exercises all of it
+   offline.
+2. **Announcements** -- *done.* The event bus, the snapshot watcher, the
+   per-instance channel with a default-channel fallback, the per-kind
+   switches, and the flapping and boot-burst rules above.
+3. **Control** -- *not done, on purpose.* The `control` tier exists in the
+   command table, `check_allowed` enforces it (guild, then channel, then role
+   or user, with an empty allowlist meaning nobody), `Cooldowns` is written,
+   `submit()` takes an `actor` that reaches the log and the bus, and
+   `definitions()` leaves control commands unregistered while they are
+   switched off -- so they do not appear in Discord's menu until they can
+   actually be used. All of that is covered by tests. What is missing is the
+   handlers and the confirmation button.
+4. **Extras** -- partly done. `/vh mods`, `/vh player`, autocomplete and death
+   announcements landed with phases 1-2. The sticky status message and
+   per-instance event overrides did not.
 
-Each phase is useful shipped alone, and phase 1 is where the uncertainty is —
-if the hand-rolled gateway is going to be a mistake, it will be obvious there,
-before anything depends on it.
+### Adding a control command
+
+The extension point is deliberate. One entry in `COMMANDS`:
+
+```python
+"restart": Command(
+    name="restart", description="Restart a server", tier="control",
+    handler=_restart, takes_server=True, defer=True,
+),
+```
+
+and a handler that resolves the instance and hands it to the manager with the
+caller's name attached:
+
+```python
+async def _restart(ctx: CommandContext) -> dict[str, Any]:
+    record = _resolve(ctx)
+    ctx.manager.submit(record.config.id, "restart", actor=ctx.actor())
+    return _message(f"Restarting **{record.config.name}**...")
+```
+
+The gate, the cooldown and the audit entry all happen before the handler is
+reached, because the command's tier is `"control"`. The completion needs no
+polling either: the status transition is already announced.
+
+Two things still to build for it, and the reason it is not done yet:
+
+- **Confirmation when players are online.** A `stop` that disconnects six
+  people should ask first. That is a message carrying a button, and a
+  `MESSAGE_COMPONENT` interaction coming back, whose handler has to re-check
+  that the clicking user is the one who ran the command *and* still passes the
+  gate. Neither the component nor that second check exists yet.
+- **Showing the audit trail in the GUI.** The `LIFECYCLE` events carry the
+  actor and reach the log, but nothing renders them. Once something other than
+  the GUI can stop a server, "who stopped it" deserves a better answer than
+  `grep`.

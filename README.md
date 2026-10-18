@@ -164,6 +164,41 @@ tested end to end, and the structure is meant to be built on.
   though a router that will not loop traffic back to itself can report a working
   server as unreachable, and the UI says so.
 
+**Discord bot (optional)**
+- One bot for the manager, with **announcements routed per instance**: each
+  instance has its own channel and its own on/off switch, so one server can
+  post to `#midgard`, another to `#modded-test`, and a third stay silent. An
+  instance that has not been opted in says nothing even when a default channel
+  is set.
+- It announces what the manager already knows: a server starting, up and
+  accepting players, stopping or crashing (with the exit code); players joining,
+  leaving and dying; a mod with a newer version; mods changed but not loaded
+  yet; what the scheduled mod check found; a new Valheim build published or
+  installed; and a server that has stopped answering from its public address.
+  Each kind is a switch on the Settings page, and the noisy ones — joins,
+  leaves, deaths, snapshots — are off until you turn them on.
+- Announcements are *changes*, not state. A manager restart does not re-announce
+  the world it just re-read, a flapping reachability probe is held until three
+  samples agree, and the same news is never posted twice.
+- Read-only slash commands: `/vh servers`, `/vh status`, `/vh players`,
+  `/vh mods`, `/vh player <name>` (from the roster, so it works for somebody who
+  left an hour ago) and `/vh version`. The server argument autocompletes from
+  your instance names and can be left out when you only run one.
+- **It opens no port.** Commands arrive over a websocket the manager dials out
+  on, not over an HTTP endpoint Discord posts to, so there is nothing to forward
+  and no certificate to get — which is what makes it work on a box behind NAT
+  with the GUI still bound to localhost.
+- Slash commands need no privileged intents, so there is nothing to justify to
+  Discord and nothing that can be switched off underneath a working install.
+- The token lives in its own `0600` file, or in `VHSM_DISCORD_TOKEN` so a
+  container can keep it in a secret and never write it to the data volume. It is
+  never rendered back into the GUI and never travels in an instance export.
+- Settings builds the invite link for you from the application id once the bot
+  connects, asking for View Channel, Send Messages and Embed Links and nothing
+  else.
+- Starting and stopping servers from Discord is **not implemented yet**, on
+  purpose — see *Known gaps*.
+
 **Interface**
 - The instance page's sections (backups, transfer world, players,
   configuration, danger zone) collapse, start collapsed, and remember what you
@@ -322,6 +357,7 @@ suite runnable — without downloading the game.
 | `VHSM_SAMPLE_INTERVAL` | `2.0` | Seconds between metric samples |
 | `VHSM_INDEX_TTL` | `3600` | Thunderstore catalogue cache lifetime |
 | `VHSM_FAKE_SERVER` | unset | Use the simulated server |
+| `VHSM_DISCORD_TOKEN` | unset | Discord bot token; wins over the stored file |
 | `PUID` / `PGID` | `0` | Container only: own `/data` as this user |
 | `TZ` | UTC | Container only: local time for schedules and timestamps |
 
@@ -339,6 +375,8 @@ has nobody to do that.
 
 ```
 data/
+  discord.json            Discord bot settings (never the token)
+  discord_token           the bot token, mode 0600, if not set by environment
   steam/                  steamcmd
   valheim/                shared dedicated-server install (app 896660)
   cache/                  Thunderstore packages + catalogue, shared
@@ -363,7 +401,7 @@ paths, so a modded and an unmodded instance differ only by what is on disk.
 .venv/bin/python tests/smoke_test.py
 ```
 
-393 checks covering page rendering, instance creation and validation, the
+586 checks covering page rendering, instance creation and validation, the
 start/stop/restart lifecycle, the live-metrics and console websockets, CPU
 normalisation, version reporting, player detail, every moderation path, query
 socket discovery (including a socket bound to a single interface), the
@@ -384,8 +422,20 @@ installed library, and r2modman profile export and import: exact versions,
 removal of unlisted mods, config unpacking, disabled mods, and refusal of
 traversing, hostile or unreadable archives) and the config editor (parsing,
 typed validation, per-setting and whole-file resets, and the path guards on
-every file it touches). Runs against the simulated server, so it needs no
-network and no Steam download.
+every file it touches), and the whole Discord integration: the gateway
+handshake and its reconnect, command registration, every read command and its
+autocomplete, the permission gate at each of its gates (guild, channel, read
+role, and the control tier that is not shipped yet, including that an empty
+control allowlist means nobody), cooldowns, token handling (environment over
+file, `0600`, never echoed), event derivation from samples (first sight and
+start-up are silent, reachability must agree three times, each notice and mod
+release announced once), channel routing and its fallback, and a channel
+Discord refuses being reported rather than crashing the bot.
+
+Runs against the simulated server and a local stand-in for Discord
+(`tools/fake_discord.py`, which speaks both the REST API and a gateway
+websocket), so it needs no network, no Steam download and no Discord
+application.
 
 The suite opens with a pyflakes pass over the whole tree, because compiling a
 module only proves it parses: a name referenced inside a rarely-taken branch
@@ -402,6 +452,30 @@ Binding to anything else logs a warning and shows one in Settings. Server
 passwords are stored in plain text in `instance.json` and rendered into the
 edit form, as the server needs them on its command line.
 
+**The Discord bot is the one thing that reaches in from outside**, so it is
+built to be the narrow end of that. It only ever dials out — there is no
+inbound endpoint — and what it will do for somebody in a channel is limited on
+purpose:
+
+- It answers in **one guild**, the one configured. A token that leaks, or an
+  invite into somebody else's server, is not a way to reach this host.
+- Commands can be restricted to named channels and named roles. Empty means
+  "whatever Discord already allows in that channel", which is the sensible
+  default for read-only questions.
+- The commands that exist today only *read*. Nothing in Discord can start,
+  stop or reconfigure a server.
+- The bot token is kept in its own `0600` file (or `VHSM_DISCORD_TOKEN`), is
+  never rendered back into the GUI, and is not included in an instance export.
+- An instance's channel id is cleared when it is imported from an archive: it
+  names a channel in the exporting operator's Discord, which the importing one
+  can neither see nor be assumed to want posted to.
+
+When control commands are added they will be off by default, limited to named
+roles or users, cooled down per user, confirmed when players are online, and
+logged with the Discord account that asked. An empty control allowlist will mean
+*nobody* rather than everybody — the gate is already written and tested that
+way.
+
 ## Known gaps / next steps
 
 - No authentication or multi-user roles.
@@ -410,6 +484,18 @@ edit form, as the server needs them on its command line.
   duration (which is shown). A per-player ping would have to be invented, so
   the field is reported as `null` rather than filled with a guess.
 - No RCON-style console input — commands would need a server-side mod.
+- **Starting and stopping servers from Discord is not implemented.** The
+  permission tier, the allowlists, the cooldown and the audit trail are in place
+  and tested; the commands themselves are deliberately not, because a command
+  that can stop a server is a way into this host and it wanted settling
+  separately from the read-only half.
+- **No Discord chat relay, and there cannot be one on a stock server.** Valheim
+  sends chat as an RPC between clients that the dedicated server only forwards;
+  it never reaches the console, which is the manager's only window into the
+  game. Relaying chat either way needs a server-side mod.
+- The Discord bot holds no outbox: an announcement that happens while the
+  gateway is reconnecting, or while Discord is refusing the channel, is dropped
+  rather than queued. The Settings page says when posting last failed.
 - No scheduled *restarts* for their own sake, and no crash auto-restart.
   Restarts happen around a scheduled server update, and around a scheduled mod
   update that installed something, but there is no "restart nightly at 05:00"

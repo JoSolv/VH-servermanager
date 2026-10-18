@@ -149,6 +149,21 @@
   </div>
 </details>
 
+<details class="section" data-remember="discord">
+  <summary>
+    <span class="sec-title">Discord</span>
+    <span class="sec-note">
+      {%- if not discord.enabled %}bot off
+      {%- elif not config.discord_enabled %}not announcing
+      {%- elif config.discord_channel_id %}announcing to a channel
+      {%- else %}announcing to the default channel{% endif -%}
+    </span>
+  </summary>
+  <div class="section-body">
+    {% include "partials/instance_discord.html" %}
+  </div>
+</details>
+
 <details class="section" data-remember="danger">
   <summary><span class="sec-title">Danger zone</span></summary>
   <div class="section-body">
