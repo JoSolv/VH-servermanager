@@ -1,9 +1,14 @@
-{# The Discord bot's settings and its connection state.
+{# The bot's connection, its token, and nothing else.
 
-   Every endpoint below re-renders this whole block, so saving, connecting and
-   the test message all report in the same place -- and the connection state
-   underneath is then the answer to "did that work", which is the only thing
-   anybody wants to know after pasting a token. #}
+   Everything about *what* is said, *where*, and *by whom* belongs to an
+   instance and lives on that instance's page -- which is what lets two
+   servers be tied to two unrelated Discords. What is left here is the bot
+   account itself, which there is one of.
+
+   Every endpoint below re-renders this whole block, so saving and connecting
+   report in the same place -- and the connection state underneath is then the
+   answer to "did that work", which is the only thing anybody wants to know
+   after pasting a token. #}
 <div id="discord-panel" hx-target="this" hx-swap="outerHTML">
   {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
   {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
@@ -34,7 +39,9 @@
       </td>
     </tr>
     <tr><th>Commands</th><td>
-      {%- if discord.commands_registered %}<span class="tag ok-tag">registered</span>
+      {%- if discord.registered_guilds %}
+        <span class="tag ok-tag">registered</span>
+        <span class="muted">in {{ discord.registered_guilds | length }} Discord server(s)</span>
       {%- else %}<span class="muted">not registered</span>{% endif -%}
     </td></tr>
     <tr><th>Announcements sent</th><td>{{ discord.announcements_sent }}</td></tr>
@@ -50,6 +57,8 @@
         Invite this bot to a server
       </a>
       It asks for View Channel, Send Messages and Embed Links, and nothing else.
+      One bot account can be invited to as many Discord servers as you have
+      instances &mdash; use this link once per server.
     </p>
   {% endif %}
 
@@ -90,96 +99,56 @@
     <div class="check">
       <input type="checkbox" id="discord_enabled" name="enabled" value="1"
              {{ 'checked' if config.enabled }}>
-      <label for="discord_enabled">Run the Discord bot</label>
-    </div>
-    <div class="form-grid">
-      <div class="field">
-        <label for="discord_guild">Discord server (guild) ID</label>
-        <input type="text" id="discord_guild" name="guild_id" value="{{ config.guild_id }}"
-               inputmode="numeric" placeholder="e.g. 123456789012345678">
-        <div class="hint">
-          The bot answers only here. Turn on Developer Mode in Discord, then
-          right-click the server and Copy Server ID.
-        </div>
-      </div>
-      <div class="field">
-        <label for="discord_channel">Default channel ID</label>
-        <input type="text" id="discord_channel" name="default_channel_id"
-               value="{{ config.default_channel_id }}" inputmode="numeric">
-        <div class="hint">
-          Where manager-wide news goes, and the fallback for an instance with
-          announcements on but no channel of its own.
-        </div>
-      </div>
-    </div>
-
-    <div class="check stacked">
-      <input type="checkbox" id="discord_commands" name="commands_enabled" value="1"
-             {{ 'checked' if config.commands_enabled }}>
-      <label for="discord_commands">
-        Answer slash commands
+      <label for="discord_enabled">
+        Run the Discord bot
         <span class="hint">
-          Read-only: status, players, mods, versions and player stats.
+          One bot account for this manager. Which Discord server each instance
+          belongs to is set per instance, below.
         </span>
       </label>
     </div>
-    <div class="check stacked">
-      <input type="checkbox" id="discord_address" name="show_address" value="1"
-             {{ 'checked' if config.show_address }}>
-      <label for="discord_address">
-        Include the join address
-        <span class="hint">
-          On a public server it is already in the server browser; on a private
-          one, posting it to a channel is a decision rather than a detail.
-        </span>
-      </label>
-    </div>
-
-    <div class="form-grid">
-      <div class="field">
-        <label for="discord_cmd_channels">Command channels</label>
-        <textarea id="discord_cmd_channels" name="command_channel_ids" rows="2"
-                  placeholder="one ID per line; blank means any channel"
-        >{{ config.command_channel_ids | join('\n') }}</textarea>
-        <div class="hint">Commands are only answered in these channels.</div>
-      </div>
-      <div class="field">
-        <label for="discord_read_roles">Roles allowed to ask</label>
-        <textarea id="discord_read_roles" name="read_role_ids" rows="2"
-                  placeholder="one role ID per line; blank means anyone who can see the channel"
-        >{{ config.read_role_ids | join('\n') }}</textarea>
-        <div class="hint">Blank leaves it to Discord's own channel permissions.</div>
-      </div>
-    </div>
-
-    <h4>Announce</h4>
-    <p class="hint" style="margin-top:0">
-      Which events are posted. An instance says <em>where</em> its own events
-      go, on its page; this says <em>what</em> is worth saying.
-    </p>
-    <div class="form-grid">
-      {% for kind, label in announce_labels %}
-        <div class="check stacked">
-          <input type="checkbox" id="ann_{{ kind }}" name="announce" value="{{ kind }}"
-                 {{ 'checked' if config.announces(kind) }}>
-          <label for="ann_{{ kind }}">{{ label }}</label>
-        </div>
-      {% endfor %}
-    </div>
-
-    <button class="primary" type="submit">Save Discord settings</button>
+    <button class="primary" type="submit">Save</button>
   </form>
 
-  {% if discord.connected and config.default_channel_id %}
-    <div class="row" style="margin-top:10px">
-      <button class="small" hx-post="/settings/discord/test">Send a test message</button>
-    </div>
+  {# ------------------------------------------------------------------ #}
+  <h3>Per-server settings</h3>
+  <p class="subtle" style="margin-top:0">
+    Each instance has its own Discord server, channel, announcements and
+    permissions, on its own page. They need share nothing but this bot account.
+  </p>
+  {% if discord.instances %}
+    <table>
+      <tr><th>Server</th><th>Discord</th><th>Announces</th><th>Commands</th></tr>
+      {% for row in discord.instances %}
+        <tr>
+          <td><a href="/instances/{{ row.id }}">{{ row.name }}</a></td>
+          <td>
+            {%- if not row.enabled %}<span class="muted">not used</span>
+            {%- elif row.guild_id %}
+              <code>{{ row.guild_id }}</code>
+              {%- if row.channel_id %} &rarr; <code>{{ row.channel_id }}</code>{% endif -%}
+            {%- else %}<span class="tag upd">no Discord server set</span>{% endif -%}
+          </td>
+          <td>
+            {%- if not row.enabled %}<span class="muted">&mdash;</span>
+            {%- elif row.announcing %}{{ row.announcing }} type(s)
+            {%- else %}<span class="muted">nothing</span>{% endif -%}
+          </td>
+          <td>
+            {%- if row.commands %}<span class="tag ok-tag">yes</span>
+            {%- else %}<span class="muted">no</span>{% endif -%}
+          </td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="subtle">No instances yet.</p>
   {% endif %}
 
   <p class="hint" style="margin-bottom:0">
     Starting and stopping servers from Discord is not available yet. When it is,
-    it will be off by default and limited to named roles — a command that can
-    stop a server is a way into this host, and the manager binds to localhost
-    precisely to avoid having one.
+    it will be off by default and limited to named roles, per server &mdash; a
+    command that can stop a server is a way into this host, and the manager
+    binds to localhost precisely to avoid having one.
   </p>
 </div>

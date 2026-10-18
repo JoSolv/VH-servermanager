@@ -28,7 +28,6 @@ from typing import Any
 from .. import events as ev
 from ..events import Event
 from . import render
-from .config import DiscordConfig
 
 log = logging.getLogger("vhsm.discord.announce")
 
@@ -356,37 +355,56 @@ class StateWatcher:
 class Announcer:
     """Routes events to channels and renders them.
 
-    Routing is the per-instance channel if the instance has one, otherwise the
-    default channel; an event about no particular instance always goes to the
-    default. An instance with announcements switched off is silent even if a
-    default channel exists, because "off" has to mean off.
+    Every destination belongs to an instance. An event about one instance goes
+    to that instance's channel, and only if that instance announces that kind
+    of thing; an instance with Discord switched off is silent whatever anybody
+    else is set to.
+
+    An event about *no* instance -- a new Valheim build, the manager starting
+    -- has no single home now that there is no manager-wide channel, so it
+    fans out to each distinct channel among the instances that want to hear
+    about it. Two servers sharing a channel get one message; two servers in
+    two different Discords each get their own.
     """
 
-    def __init__(self, manager: Any, rest: Any, config: Any) -> None:
+    def __init__(self, manager: Any, rest: Any) -> None:
         self.manager = manager
         self._rest = rest
-        self._config = config
         #: Keys already announced, so a repeated event is dropped even if two
         #: sources report it.
         self._seen: dict[str, float] = {}
         self.sent = 0
         self.last_error = ""
 
-    @property
-    def config(self) -> DiscordConfig:
-        return self._config()
+    def channels_for(self, event: Event) -> list[str]:
+        """Every channel this event should be posted to, without repeats."""
+        if event.instance_id:
+            try:
+                record = self.manager.get(event.instance_id)
+            except Exception:  # noqa: BLE001 - a deleted instance is not an error
+                return []
+            settings = record.config.discord
+            if not settings.announces(event.kind) or not settings.channel_id:
+                return []
+            return [settings.channel_id]
 
-    def channel_for(self, event: Event) -> str:
-        config = self.config
+        channels: list[str] = []
+        for record in self.manager.records:
+            settings = record.config.discord
+            if not settings.announces(event.kind) or not settings.channel_id:
+                continue
+            if settings.channel_id not in channels:
+                channels.append(settings.channel_id)
+        return channels
+
+    def show_address_for(self, event: Event) -> bool:
+        """Whether this event's instance wants its join address posted."""
         if not event.instance_id:
-            return config.default_channel_id
+            return False
         try:
-            record = self.manager.get(event.instance_id)
-        except Exception:  # noqa: BLE001 - a deleted instance is not an error
-            return config.default_channel_id
-        if not record.config.discord_enabled:
-            return ""
-        return record.config.discord_channel_id or config.default_channel_id
+            return bool(self.manager.get(event.instance_id).config.discord.show_address)
+        except Exception:  # noqa: BLE001
+            return False
 
     def _already_said(self, event: Event) -> bool:
         """Whether this exact state has already been announced.
@@ -410,28 +428,37 @@ class Announcer:
         return False
 
     async def handle(self, event: Event) -> bool:
-        """Announce *event* if it should be. Returns whether anything was sent."""
-        config = self.config
-        if not config.announces(event.kind):
-            return False
-        channel = self.channel_for(event)
-        if not channel:
+        """Announce *event* wherever it belongs. True if anything was sent.
+
+        One channel refusing the message does not stop the others: on a
+        manager-wide event the channels belong to different Discords, and one
+        of them having lost a permission is no reason for the rest to hear
+        nothing.
+        """
+        channels = self.channels_for(event)
+        if not channels:
             return False
         if self._already_said(event):
             return False
 
-        try:
-            await self._rest.create_message(channel, self.render(event))
-            self.sent += 1
+        payload = self.render(event)
+        sent_any = False
+        for channel in channels:
+            try:
+                await self._rest.create_message(channel, payload)
+                self.sent += 1
+                sent_any = True
+            except Exception as exc:  # noqa: BLE001 - a failed post is not fatal
+                # DiscordAPIError can say what to do about it; anything else
+                # only has its own text.
+                explain = getattr(exc, "explain", None)
+                self.last_error = explain() if callable(explain) else str(exc)
+                log.warning(
+                    "discord: could not announce to %s: %s", channel, self.last_error
+                )
+        if sent_any and len(channels) == 1:
             self.last_error = ""
-            return True
-        except Exception as exc:  # noqa: BLE001 - a failed post is not fatal
-            # DiscordAPIError can say what to do about it; anything else
-            # only has its own text.
-            explain = getattr(exc, "explain", None)
-            self.last_error = explain() if callable(explain) else str(exc)
-            log.warning("discord: could not announce to %s: %s", channel, self.last_error)
-            return False
+        return sent_any
 
     def render(self, event: Event) -> dict[str, Any]:
         """One event as a Discord message payload.
@@ -455,7 +482,7 @@ class Announcer:
                 )
             if snapshot.get("version"):
                 fields.append({"name": "Version", "value": snapshot["version"]})
-            if self.config.show_address and event.instance_id:
+            if self.show_address_for(event):
                 try:
                     record = self.manager.get(event.instance_id)
                     fields.append(

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .discord.config import DiscordConfigError, InstanceDiscord
 from .util import normalise_time_of_day, slugify
 
 #: Valheim world modifiers accepted by ``-modifier <key> <value>``.
@@ -73,15 +74,13 @@ class InstanceConfig:
     #: ``YYYY-MM-DD`` of the last scheduled check, so restarting the manager
     #: cannot make the day's check run twice.
     mod_update_last_run: str = ""
-    #: Announce this instance's events to Discord. Off by default, and off is
-    #: silent even when a default channel is configured: an instance that was
-    #: never opted in should not start talking because another one did.
-    discord_enabled: bool = False
-    #: Channel these announcements go to. Blank falls back to the manager's
-    #: default channel. Cleared when an instance is imported from an archive:
-    #: it names a channel on whoever exported it, which the importing operator
-    #: can neither see nor be expected to want.
-    discord_channel_id: str = ""
+    #: This instance's Discord settings: which Discord server and channel, what
+    #: it announces, who may ask about it. All of it per instance, so two
+    #: servers can live in two unrelated Discords. Off by default, and off is
+    #: silent: an instance that was never opted in does not start talking
+    #: because another one did. Cleared when an instance is imported from an
+    #: archive, since it names a Discord the importing operator cannot see.
+    discord: InstanceDiscord = field(default_factory=InstanceDiscord)
     created_at: float = field(default_factory=time.time)
 
     # ------------------------------------------------------------------ #
@@ -93,7 +92,18 @@ class InstanceConfig:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "InstanceConfig":
         known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in payload.items() if k in known})
+        config = cls(**{k: v for k, v in payload.items() if k in known})
+        # asdict() flattens the nested settings to a plain dict, so reading one
+        # back has to rebuild it.
+        config.discord = InstanceDiscord.from_dict(payload.get("discord"))
+        # An instance.json written before the settings moved per-instance has
+        # these two at the top level instead. The rest of what it needs -- the
+        # guild, which events to announce -- was manager-wide, and is pushed
+        # down from discord.json on the first start after the upgrade.
+        if "discord" not in payload:
+            config.discord.enabled = bool(payload.get("discord_enabled", False))
+            config.discord.channel_id = str(payload.get("discord_channel_id") or "")
+        return config
 
     # ------------------------------------------------------------------ #
     # derived values
@@ -139,11 +149,10 @@ class InstanceConfig:
             raise ValidationError(
                 "The mod update check needs a time of day like 05:00."
             ) from None
-        if self.discord_channel_id and not self.discord_channel_id.isdigit():
-            raise ValidationError(
-                "A Discord channel ID is digits only. Turn on Developer Mode "
-                "in Discord, then right-click the channel and Copy Channel ID."
-            )
+        try:
+            self.discord.validate()
+        except DiscordConfigError as exc:
+            raise ValidationError(str(exc)) from None
         for key, value in self.modifiers.items():
             if key not in MODIFIER_KEYS:
                 raise ValidationError(f"Unknown modifier {key!r}.")

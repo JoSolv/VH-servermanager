@@ -8,6 +8,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..discord import config as discord_config
+from ..discord.config import InstanceDiscord
 from ..discord.rest import DiscordAPIError
 from ..events import KINDS
 from ..instance import MODIFIER_KEYS, PRESETS, InstanceConfig, ValidationError
@@ -182,7 +183,7 @@ async def instance_detail(request: Request, instance_id: str):
         address=manager.address_for(record),
         hostname=manager.hostname,
         discord=_discord(request).status(),
-        discord_default=_discord(request).config.default_channel_id,
+        announce_labels=announce_labels(),
     )
 
 
@@ -295,54 +296,75 @@ def _instance_discord(
     request: Request, instance_id: str, message: str = "", error: str = ""
 ) -> HTMLResponse:
     record = _manager(request).get(instance_id)
-    bot = _discord(request)
     return _render(
         request,
         "partials/instance_discord.html",
         record=record,
         config=record.config,
-        discord=bot.status(),
-        discord_default=bot.config.default_channel_id,
+        discord=_discord(request).status(),
+        announce_labels=announce_labels(),
         message=message,
         error=error,
     )
 
 
 @router.post("/instances/{instance_id}/discord", response_class=HTMLResponse)
-async def save_instance_discord(
-    request: Request,
-    instance_id: str,
-    enabled: str = Form(default=""),
-    channel_id: str = Form(default=""),
-) -> HTMLResponse:
-    """Choose whether, and where, this instance announces.
+async def save_instance_discord(request: Request, instance_id: str) -> HTMLResponse:
+    """Save this instance's own Discord settings.
 
-    Takes effect on the next event with no reconnection: the channel is read
-    per announcement rather than held by the connection.
+    All of it lives here rather than in Settings: which Discord server and
+    channel, what is announced, who may ask. Two instances can therefore be
+    tied to two unrelated Discords with nothing shared but the bot account.
+
+    Announcement and channel changes take effect on the next event with no
+    reconnection. A change to the guild or to who may ask re-registers the
+    command sets, since a guild's menu depends on the instances mapped to it.
     """
-    manager = _manager(request)
+    manager, bot = _manager(request), _discord(request)
+    form = await request.form()
+    record = manager.get(instance_id)
+    before = record.config.discord.to_dict()
+
+    chosen = set(form.getlist("announce"))
+    changes = {
+        "discord": {
+            **before,
+            "enabled": form.get("enabled") is not None,
+            "guild_id": str(form.get("guild_id") or ""),
+            "channel_id": str(form.get("channel_id") or ""),
+            "show_address": form.get("show_address") is not None,
+            "commands_enabled": form.get("commands_enabled") is not None,
+            "command_channel_ids": str(form.get("command_channel_ids") or ""),
+            "read_role_ids": str(form.get("read_role_ids") or ""),
+            # An unchecked box submits nothing, so the switched-on kinds are
+            # exactly the ones present.
+            "announce": {kind: kind in chosen for kind in KINDS},
+        }
+    }
     try:
-        manager.update(
-            instance_id,
-            {
-                "discord_enabled": bool(enabled),
-                "discord_channel_id": str(channel_id or "").strip(),
-            },
-        )
+        manager.update(instance_id, changes)
     except ValidationError as exc:
         return _instance_discord(request, instance_id, error=str(exc))
 
-    record = manager.get(instance_id)
-    if not record.config.discord_enabled:
+    settings = manager.get(instance_id).config.discord
+    # The guild decides which command menus exist and what is in them, so a
+    # change to either has to reach Discord rather than waiting for a restart.
+    if (settings.guild_id != before["guild_id"]
+            or settings.answers_commands != InstanceDiscord.from_dict(before).answers_commands
+            or settings.control_enabled != before["control_enabled"]):
+        await bot.refresh_commands()
+
+    if not settings.enabled:
         return _instance_discord(
-            request, instance_id, message="This server will not announce to Discord."
+            request, instance_id, message="This server will not use Discord."
         )
-    where = (
-        f"channel {record.config.discord_channel_id}"
-        if record.config.discord_channel_id else "the default channel"
-    )
+    announcing = sum(1 for kind in KINDS if settings.announce.get(kind))
+    parts = [f"{announcing} announcement type(s) to channel {settings.channel_id}"
+             if announcing else "no announcements"]
+    parts.append("commands on" if settings.commands_enabled else "commands off")
     return _instance_discord(
-        request, instance_id, message=f"Announcing to {where}."
+        request, instance_id,
+        message=f"Saved: {', '.join(parts)}.",
     )
 
 
@@ -539,11 +561,7 @@ async def save_hostname(request: Request, hostname: str = Form(default="")) -> H
 # --------------------------------------------------------------------------- #
 def _discord_context(request: Request) -> dict[str, Any]:
     bot = _discord(request)
-    return {
-        "discord": bot.status(),
-        "config": bot.config,
-        "announce_labels": announce_labels(),
-    }
+    return {"discord": bot.status(), "config": bot.config}
 
 
 def _discord_panel(request: Request, message: str = "", error: str = "") -> HTMLResponse:
@@ -561,30 +579,16 @@ async def discord_panel(request: Request) -> HTMLResponse:
 
 @router.post("/settings/discord", response_class=HTMLResponse)
 async def save_discord(request: Request) -> HTMLResponse:
-    """Save the bot's configuration, reconnecting only if it has to."""
+    """Run the bot, or stop running it.
+
+    That is all there is at this level. Which Discord server, which channel,
+    what gets announced and who may ask are each instance's own business, on
+    its own page -- so one manager can serve several unrelated Discords.
+    """
     bot = _discord(request)
     form = await request.form()
     config = discord_config.DiscordConfig.from_dict(bot.config.to_dict())
-
     config.enabled = form.get("enabled") is not None
-    config.commands_enabled = form.get("commands_enabled") is not None
-    config.show_address = form.get("show_address") is not None
-    config.guild_id = str(form.get("guild_id") or "")
-    config.default_channel_id = str(form.get("default_channel_id") or "")
-    config.command_channel_ids = str(form.get("command_channel_ids") or "")
-    config.read_role_ids = str(form.get("read_role_ids") or "")
-    # An unchecked box submits nothing, so the switched-on kinds are exactly
-    # the ones present -- rather than the ones whose value happens to be "1",
-    # which is how a cleared checkbox stays set.
-    chosen = set(form.getlist("announce"))
-    config.announce = {kind: kind in chosen for kind in KINDS}
-
-    try:
-        config.validate()
-    except discord_config.DiscordConfigError as exc:
-        # 200, not 400: htmx swaps successful responses only, so a refusal
-        # sent as an error status is a form that silently does nothing.
-        return _discord_panel(request, error=str(exc))
 
     await bot.reload(config)
     if not config.enabled:
@@ -592,7 +596,13 @@ async def save_discord(request: Request) -> HTMLResponse:
     status = bot.status()
     if status["last_error"]:
         return _discord_panel(request, error=status["last_error"])
-    return _discord_panel(request, message="Discord settings saved.")
+    if not status["configured"]:
+        return _discord_panel(
+            request,
+            message="Bot running. Now set a Discord server on each instance "
+                    "that should use it, on the instance's own page.",
+        )
+    return _discord_panel(request, message="Discord bot running.")
 
 
 @router.post("/settings/discord/token", response_class=HTMLResponse)
@@ -629,21 +639,32 @@ async def save_discord_token(
     return _discord_panel(request, message="Token saved.")
 
 
-@router.post("/settings/discord/test", response_class=HTMLResponse)
-async def test_discord(request: Request) -> HTMLResponse:
-    """Post one message, so "is it actually wired up" has a real answer."""
-    bot = _discord(request)
-    channel = bot.config.default_channel_id
+@router.post("/instances/{instance_id}/discord/test", response_class=HTMLResponse)
+async def test_instance_discord(request: Request, instance_id: str) -> HTMLResponse:
+    """Post one message to this instance's channel.
+
+    Per instance rather than per manager, because the channel is: this is the
+    only way to prove *this* server's channel and the bot's permissions in
+    *its* Discord, which is the question somebody setting it up actually has.
+    """
+    manager, bot = _manager(request), _discord(request)
+    record = manager.get(instance_id)
+    channel = record.config.discord.channel_id
     if not channel:
-        return _discord_panel(request, error="Set a default channel first.")
+        return _instance_discord(
+            request, instance_id, error="Set a channel ID first."
+        )
     try:
         await bot.say(
             channel,
-            "Valheim Server Manager is connected and will announce here.",
+            f"Valheim Server Manager is connected and will announce "
+            f"**{record.config.name}** here.",
         )
     except DiscordAPIError as exc:
-        return _discord_panel(request, error=exc.explain())
-    return _discord_panel(request, message=f"Test message sent to {channel}.")
+        return _instance_discord(request, instance_id, error=exc.explain())
+    return _instance_discord(
+        request, instance_id, message=f"Test message sent to {channel}."
+    )
 
 
 @router.post("/settings/check-update", response_class=HTMLResponse)

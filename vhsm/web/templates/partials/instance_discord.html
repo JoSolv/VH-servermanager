@@ -1,48 +1,130 @@
-{# Where this instance's announcements go.
+{# This instance's own Discord settings: all of them.
 
-   Only the routing lives here. Which *kinds* of event are announced is a
-   manager-wide choice on the Settings page: it is a matter of taste rather
-   than a per-server fact, and repeating sixteen checkboxes per instance would
-   be a worse answer than one place to set them. #}
+   Which Discord server, which channel, what is announced, who may ask. Kept
+   here rather than in Settings because the thing people actually have is one
+   Discord per group of players -- a public server posting to a community
+   guild, a modded test server in a guild of three friends -- sharing nothing
+   but the bot account.
+
+   Every endpoint re-renders this whole block, so saving and the test message
+   report in the same place. #}
 <div id="instance-discord" hx-target="this" hx-swap="outerHTML">
   {% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
   {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
   {% if not discord.enabled %}
     <p class="subtle">
-      The Discord bot is switched off. Turn it on in
-      <a href="/settings">Settings</a> and this instance can announce there.
+      The Discord bot is switched off for the whole manager. Turn it on in
+      <a href="/settings">Settings</a> and this server can use it.
     </p>
   {% elif not discord.connected %}
     <div class="alert error">
-      The bot is configured but not connected{% if discord.last_error %}: {{ discord.last_error }}{% endif %}.
-      Announcements are queued nowhere — they are dropped while it is down.
+      The bot is not connected{% if discord.last_error %}: {{ discord.last_error }}{% endif %}.
+      Announcements made while it is down are dropped rather than queued.
     </div>
   {% endif %}
 
   <form hx-post="/instances/{{ config.id }}/discord">
     <div class="check">
       <input type="checkbox" id="discord_on" name="enabled" value="1"
-             {{ 'checked' if config.discord_enabled }}>
-      <label for="discord_on">Announce this server's events to Discord</label>
+             {{ 'checked' if config.discord.enabled }}>
+      <label for="discord_on">
+        Use Discord for this server
+        <span class="hint">Off means it is neither announced nor answerable.</span>
+      </label>
     </div>
+
     <div class="form-grid">
+      <div class="field">
+        <label for="discord_guild_id">Discord server (guild) ID</label>
+        <input type="text" id="discord_guild_id" name="guild_id"
+               value="{{ config.discord.guild_id }}" inputmode="numeric"
+               placeholder="e.g. 123456789012345678">
+        <div class="hint">
+          This server's own Discord. Commands are only answered there, and this
+          instance cannot be seen or named from any other Discord &mdash; which
+          is what lets each of your servers have its own.
+        </div>
+      </div>
       <div class="field">
         <label for="discord_channel_id">Channel ID</label>
         <input type="text" id="discord_channel_id" name="channel_id"
-               value="{{ config.discord_channel_id }}" inputmode="numeric"
-               placeholder="{{ discord_default or 'the default channel' }}">
+               value="{{ config.discord.channel_id }}" inputmode="numeric">
         <div class="hint">
-          Right-click the channel in Discord with Developer Mode on and Copy
-          Channel ID. Blank uses the manager's default channel.
+          Where this server's announcements go. Right-click the channel in
+          Discord with Developer Mode on and Copy Channel ID.
         </div>
       </div>
     </div>
-    <button class="primary" type="submit">Save</button>
+
+    <div class="check stacked">
+      <input type="checkbox" id="discord_commands" name="commands_enabled" value="1"
+             {{ 'checked' if config.discord.commands_enabled }}>
+      <label for="discord_commands">
+        Answer slash commands about this server
+        <span class="hint">
+          Read-only: status, players, mods and player stats.
+        </span>
+      </label>
+    </div>
+    <div class="check stacked">
+      <input type="checkbox" id="discord_address" name="show_address" value="1"
+             {{ 'checked' if config.discord.show_address }}>
+      <label for="discord_address">
+        Include this server's join address
+        <span class="hint">
+          On a public server it is already in the server browser; on a private
+          one, posting it to a channel is a decision rather than a detail.
+        </span>
+      </label>
+    </div>
+
+    <div class="form-grid">
+      <div class="field">
+        <label for="discord_cmd_channels">Command channels</label>
+        <textarea id="discord_cmd_channels" name="command_channel_ids" rows="2"
+                  placeholder="one ID per line; blank means any channel"
+        >{{ config.discord.command_channel_ids | join('\n') }}</textarea>
+        <div class="hint">
+          Commands about this server are only answered in these channels.
+        </div>
+      </div>
+      <div class="field">
+        <label for="discord_read_roles">Roles allowed to ask</label>
+        <textarea id="discord_read_roles" name="read_role_ids" rows="2"
+                  placeholder="one role ID per line; blank means anyone who can see the channel"
+        >{{ config.discord.read_role_ids | join('\n') }}</textarea>
+        <div class="hint">Blank leaves it to Discord's own channel permissions.</div>
+      </div>
+    </div>
+
+    <h4>Announce</h4>
+    <p class="hint" style="margin-top:0">
+      Which of this server's events are posted to its channel. Set per server,
+      so a busy public one can stay quiet about joins while a small one says
+      everything.
+    </p>
+    <div class="form-grid">
+      {% for kind, label in announce_labels %}
+        <div class="check stacked">
+          <input type="checkbox" id="ann_{{ kind }}" name="announce" value="{{ kind }}"
+                 {{ 'checked' if config.discord.announce.get(kind) }}>
+          <label for="ann_{{ kind }}">{{ label }}</label>
+        </div>
+      {% endfor %}
+    </div>
+
+    <button class="primary" type="submit">Save Discord settings</button>
   </form>
 
-  <p class="hint" style="margin-bottom:0">
-    Which events are announced is set once for every server, under
-    <a href="/settings">Settings &rarr; Discord bot</a>.
-  </p>
+  {% if discord.connected and config.discord.channel_id %}
+    <div class="row" style="margin-top:10px">
+      <button class="small" hx-post="/instances/{{ config.id }}/discord/test">
+        Send a test message
+      </button>
+    </div>
+    <p class="hint">
+      Proves this server's channel and the bot's permissions in its Discord.
+    </p>
+  {% endif %}
 </div>

@@ -44,12 +44,14 @@ class DiscordBot:
         self._pump_task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[Event] | None = None
 
-        self.router = cmd.CommandRouter(manager, lambda: self.config)
+        self.router = cmd.CommandRouter(manager)
         self.announcer: Announcer | None = None
         #: Set when the bot could not be started at all, for the GUI to show.
         self.last_error: str = ""
         self.started_at: float = 0.0
-        self._commands_registered = False
+        #: Guilds whose command set we have registered this run, so one that
+        #: stops being used can have its commands taken away again.
+        self._registered_guilds: set[str] = set()
 
     # ------------------------------------------------------------------ #
     # status, for the Settings page
@@ -59,7 +61,7 @@ class DiscordBot:
         user = (gateway.user if gateway else {}) or {}
         return {
             "enabled": self.config.enabled,
-            "configured": self.config.configured,
+            "configured": bool(self.guilds()),
             "token_source": config_mod.token_source(self.settings.data_root),
             "state": gateway.state if gateway else "stopped",
             "connected": bool(gateway and gateway.connected),
@@ -81,12 +83,42 @@ class DiscordBot:
                 or (gateway.last_error if gateway else "")
                 or (self.announcer.last_error if self.announcer else "")
             ),
-            "commands_registered": self._commands_registered,
+            "commands_registered": bool(self._registered_guilds),
+            "registered_guilds": sorted(self._registered_guilds),
+            # What is set up, and where, so Settings can show the whole
+            # picture without the operator opening every instance.
+            "instances": self.instance_summary(),
         }
 
     @property
     def running(self) -> bool:
         return self._gateway_task is not None and not self._gateway_task.done()
+
+    def guilds(self) -> set[str]:
+        """Every Discord server any instance is set up to use."""
+        return {
+            record.config.discord.guild_id
+            for record in self.manager.records
+            if record.config.discord.enabled and record.config.discord.guild_id
+        }
+
+    def instance_summary(self) -> list[dict[str, Any]]:
+        """One row per instance: where it posts and what it answers."""
+        rows = []
+        for record in self.manager.records:
+            settings = record.config.discord
+            rows.append({
+                "id": record.config.id,
+                "name": record.config.name,
+                "enabled": settings.enabled,
+                "guild_id": settings.guild_id,
+                "channel_id": settings.channel_id,
+                "commands": settings.answers_commands,
+                "announcing": sum(
+                    1 for kind in settings.announce if settings.announce[kind]
+                ) if settings.enabled else 0,
+            })
+        return rows
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -105,14 +137,17 @@ class DiscordBot:
         if not token:
             self.last_error = "No bot token is set."
             return
-        if not self.config.guild_id:
-            self.last_error = "No Discord server (guild) ID is set."
-            return
+        # Settings used to be manager-wide; move them onto the instances once,
+        # before anything reads them, so an upgrade does not silently stop a
+        # working bot.
+        self.migrate_legacy_settings()
 
-        self._rest = RestClient(
-            token, api_base=self.settings.discord_api_base
-        )
-        self.announcer = Announcer(self.manager, self._rest, lambda: self.config)
+        self._rest = RestClient(token, api_base=self.settings.discord_api_base)
+        self.announcer = Announcer(self.manager, self._rest)
+        if not self.guilds():
+            # Not an error: the bot connects anyway, so the Settings page can
+            # show the invite link and the operator has somewhere to start.
+            log.info("discord: no instance has a Discord server set yet")
 
         try:
             url = (
@@ -155,8 +190,76 @@ class DiscordBot:
         await self._close_rest()
         self._gateway = None
         self.announcer = None
-        self._commands_registered = False
+        self._registered_guilds = set()
         self.started_at = 0.0
+
+    def migrate_legacy_settings(self) -> None:
+        """Move the old manager-wide settings down onto the instances, once.
+
+        Before this, one guild, one default channel and one set of event
+        switches served every instance. An upgrade must not leave a working
+        bot silent, so the old values are copied onto every instance that
+        does not already have its own, and ``discord.json`` is marked done.
+
+        Instances that had announcements switched on keep them on. The rest
+        get the guild and the switches but stay off, which leaves them one
+        tick away from working rather than needing it all typed again.
+        """
+        if self.config.migrated:
+            return
+
+        legacy = config_mod.legacy_settings(self.settings.data_root)
+        guild_id = legacy["guild_id"]
+        if not guild_id:
+            # Nothing was ever configured, so there is nothing to move and
+            # the fresh defaults are already right.
+            self.config.migrated = True
+            config_mod.save(self.settings.data_root, self.config)
+            return
+
+        moved = 0
+        for record in self.manager.records:
+            settings = record.config.discord
+            if settings.guild_id:
+                continue                      # already has its own
+            settings.guild_id = guild_id
+            settings.channel_id = settings.channel_id or legacy["channel_id"]
+            if legacy["announce"]:
+                settings.announce = {
+                    kind: bool(legacy["announce"].get(kind, settings.announce.get(kind)))
+                    for kind in settings.announce
+                }
+            settings.show_address = legacy["show_address"]
+            settings.commands_enabled = legacy["commands_enabled"]
+            settings.command_channel_ids = list(legacy["command_channel_ids"])
+            settings.read_role_ids = list(legacy["read_role_ids"])
+            settings.control_enabled = legacy["control_enabled"]
+            settings.control_role_ids = list(legacy["control_role_ids"])
+            settings.control_user_ids = list(legacy["control_user_ids"])
+            settings.cooldown_seconds = legacy["cooldown_seconds"]
+            # An instance that was announcing with no channel of its own used
+            # the manager's default; now that there is none, it needs the
+            # value copied in above -- and if there was none to copy, it can
+            # no longer announce, so say so rather than failing validation
+            # the next time somebody saves the instance.
+            if settings.enabled and settings.announces_anything and not settings.channel_id:
+                settings.enabled = False
+                log.warning(
+                    "discord: %s was announcing with no channel of its own and "
+                    "there is no default any more; switched off",
+                    record.config.name,
+                )
+            self.manager.save(record.config.id)
+            moved += 1
+
+        self.config.migrated = True
+        config_mod.save(self.settings.data_root, self.config)
+        if moved:
+            log.info(
+                "discord: moved the manager-wide settings onto %d instance(s); "
+                "each one's Discord settings are now on its own page",
+                moved,
+            )
 
     async def _close_rest(self) -> None:
         if self._rest is not None:
@@ -175,12 +278,7 @@ class DiscordBot:
         self.config = config
         config_mod.save(self.settings.data_root, config)
 
-        needs_restart = (
-            config.enabled != previous.enabled
-            or config.guild_id != previous.guild_id
-            or not self.running
-        )
-        if needs_restart:
+        if config.enabled != previous.enabled or not self.running:
             await self.start()
             return
 
@@ -197,6 +295,16 @@ class DiscordBot:
         """Reconnect after the token itself changed."""
         await self.start()
 
+    async def refresh_commands(self) -> None:
+        """Re-register the command sets after an instance's settings changed.
+
+        Called when an instance's guild, command switch or control switch
+        moves, since each guild's menu is built from the instances mapped to
+        it. Safe to call when the bot is not connected: it does nothing, and
+        the next connection registers from scratch.
+        """
+        await self._register_commands()
+
     # ------------------------------------------------------------------ #
     # gateway callbacks
     # ------------------------------------------------------------------ #
@@ -204,28 +312,62 @@ class DiscordBot:
         await self._register_commands()
 
     async def _register_commands(self) -> None:
+        """Register the command set in every guild that needs one.
+
+        A guild's command set depends on the instances mapped to it, so this
+        walks them rather than registering one global set: two Discords get
+        two different menus, each listing only what is usable there.
+
+        A guild that no longer has any instance has its commands removed, so
+        unmapping an instance does not leave a `/vh` behind that answers "no
+        servers here" forever. That bookkeeping is only in memory, though: a
+        guild unmapped while the manager was *stopped* is not known about on
+        the next start, so its stale commands stay until something is mapped
+        to it again. They refuse safely -- the gate is per instance, not per
+        command -- so this is untidy rather than unsafe.
+        """
         gateway, rest = self._gateway, self._rest
         if gateway is None or rest is None or not gateway.application_id:
             return
-        if not self.config.guild_id:
-            return
-        try:
-            await rest.register_guild_commands(
-                gateway.application_id,
-                self.config.guild_id,
-                cmd.definitions(self.config),
-            )
-            self._commands_registered = True
-            log.info("discord: commands registered in guild %s", self.config.guild_id)
-        except DiscordAPIError as exc:
-            self._commands_registered = False
-            # Registration failing does not stop announcements working, so
-            # this is reported rather than fatal. The usual cause is the bot
-            # not having been invited to the guild yet.
-            self.last_error = (
-                f"Could not register commands: {exc.explain()}"
-            )
-            log.warning("discord: %s", self.last_error)
+
+        wanted = cmd.command_guilds(self.manager)
+        failures: list[str] = []
+
+        for guild_id in sorted(wanted):
+            try:
+                await rest.register_guild_commands(
+                    gateway.application_id, guild_id,
+                    cmd.definitions_for_guild(self.manager, guild_id),
+                )
+                self._registered_guilds.add(guild_id)
+                log.info("discord: commands registered in guild %s", guild_id)
+            except DiscordAPIError as exc:
+                self._registered_guilds.discard(guild_id)
+                failures.append(f"{guild_id}: {exc.explain()}")
+                log.warning(
+                    "discord: could not register commands in guild %s: %s",
+                    guild_id, exc,
+                )
+
+        for guild_id in sorted(self._registered_guilds - wanted):
+            try:
+                await rest.register_guild_commands(
+                    gateway.application_id, guild_id, []
+                )
+                log.info("discord: commands removed from guild %s", guild_id)
+            except DiscordAPIError as exc:
+                log.warning(
+                    "discord: could not remove commands from guild %s: %s",
+                    guild_id, exc,
+                )
+            self._registered_guilds.discard(guild_id)
+
+        # Registration failing does not stop announcements working, so this is
+        # reported rather than fatal. The usual cause is the bot not having
+        # been invited to that guild yet.
+        self.last_error = (
+            f"Could not register commands -- {'; '.join(failures)}" if failures else ""
+        )
 
     async def _on_dispatch(self, name: str, data: dict[str, Any]) -> None:
         if name != "INTERACTION_CREATE":

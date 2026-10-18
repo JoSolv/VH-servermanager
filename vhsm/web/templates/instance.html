@@ -154,9 +154,12 @@
     <span class="sec-title">Discord</span>
     <span class="sec-note">
       {%- if not discord.enabled %}bot off
-      {%- elif not config.discord_enabled %}not announcing
-      {%- elif config.discord_channel_id %}announcing to a channel
-      {%- else %}announcing to the default channel{% endif -%}
+      {%- elif not config.discord.enabled %}not used
+      {%- elif not config.discord.guild_id %}no Discord server set
+      {%- else %}
+        {{- config.discord.announce.values() | select | list | length }} announcement type(s)
+        {{- ', commands on' if config.discord.commands_enabled }}
+      {%- endif -%}
     </span>
   </summary>
   <div class="section-body">
