@@ -147,15 +147,17 @@ class StateWatcher:
                 self._publish(
                     ev.RESTARTING,
                     instance_id=instance_id, instance_name=name,
-                    title=f"\U0001F504 **{name}** is restarting.",
-                    level="info", key=f"restarting:{instance_id}:{snapshot.get('uptime')}",
+                    title=f"{render.MARK_BUSY} **{name}** is restarting.",
+                    level="important",
+                    key=f"restarting:{instance_id}:{snapshot.get('uptime')}",
                 )
             elif operation == "stopping" and not quiet and not maintenance:
                 self._publish(
                     ev.STOPPING,
                     instance_id=instance_id, instance_name=name,
-                    title=f"\u26AB **{name}** is shutting down.",
-                    level="info", key=f"stopping:{instance_id}:{snapshot.get('uptime')}",
+                    title=f"{render.MARK_DOWN} **{name}** is shutting down.",
+                    level="muted",
+                    key=f"stopping:{instance_id}:{snapshot.get('uptime')}",
                 )
 
         connectable = bool(
@@ -169,7 +171,9 @@ class StateWatcher:
                 self._publish(
                     ev.ONLINE,
                     instance_id=instance_id, instance_name=name,
-                    title=f"\U0001F7E2 **{name}** is online.",
+                    # No markdown: this becomes an embed title, which Discord
+                    # renders literally.
+                    title=f"{render.MARK_UP} {name} is online",
                     level="good",
                     key=f"online:{instance_id}:{snapshot.get('uptime')}",
                     data={"snapshot": snapshot},
@@ -526,13 +530,44 @@ class Announcer:
     )
 
     def render(self, event: Event) -> dict[str, Any]:
-        """One event as a Discord message payload."""
+        """One event as a Discord message payload.
+
+        Follows the rules in :mod:`vhsm.discord.render`: a one-line fact is a
+        message, a set of facts is an embed, the title is the subject and
+        carries no markdown.
+        """
         if event.kind in self.PLAIN:
             return {"content": event.title}
 
+        # "Online" is the same card /vh status answers with, so being told and
+        # asking look alike rather than merely covering the same ground.
+        if event.kind == ev.ONLINE:
+            snapshot = (event.data or {}).get("snapshot") or {}
+            address, show = "", False
+            if event.instance_id:
+                try:
+                    record = self.manager.get(event.instance_id)
+                    address = self.manager.address_for(record)
+                    show = record.config.discord.show_address
+                except Exception:  # noqa: BLE001 - a deleted instance is not an error
+                    pass
+            return {
+                "embeds": [
+                    render.embed(
+                        event.title,
+                        level=event.level,
+                        fields=render.server_fields(
+                            snapshot, address, show_address=show,
+                            # The title has already said it is online.
+                            include_status=False,
+                        ),
+                    )
+                ]
+            }
+
         fields: list[dict[str, Any]] = []
         snapshot = (event.data or {}).get("snapshot") or {}
-        if event.kind in (ev.STATUS, ev.READY, ev.CRASH, ev.ONLINE) and snapshot:
+        if event.kind in (ev.STATUS, ev.READY, ev.CRASH) and snapshot:
             players = snapshot.get("players") or {}
             if snapshot.get("status") == "running":
                 maximum = players.get("max") or 0
@@ -562,7 +597,9 @@ class Announcer:
                     description=event.detail,
                     level=event.level,
                     fields=fields,
-                    footer=event.instance_name if event.instance_id else "",
+                    # The title already names the server on an announcement,
+                    # so the footer would be saying it twice.
+                    footer="",
                 )
             ]
         }

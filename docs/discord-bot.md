@@ -199,6 +199,46 @@ quiet and says "online" when it comes back. That follows from the list above
 and is the right default -- a crash loop would otherwise spam the channel --
 but it is a real gap and worth revisiting if anybody misses it.
 
+## One voice
+
+Everything the bot says goes through `vhsm/discord/render.py`, which holds the
+rules rather than leaving each call site to decide. They exist because the
+first pass had the bot speaking four dialects at once: an embed title with
+`**bold**` in it (Discord renders that literally), a status field reading
+`running` next to an announcement reading "is online", the server named in both
+a title and a footer, and a different emoji per message.
+
+- **One mark vocabulary**, five glyphs with one meaning each: green for
+  up-or-here, black for gone, yellow for on-its-way, a package for mods, an
+  arrow for a version. Nothing else, so a glance down a channel is legible
+  without reading any of it.
+- **Title is the subject, footer is the context.** An announcement is about the
+  server, so the server is in its title. A command reply is about what was
+  asked -- the mods, the players, one player -- so that is the title, and the
+  server plus any count goes in the footer.
+- **Nothing is said twice.** The *online* announcement's title already says the
+  server is up, so its card omits the status row; `/vh status` has a neutral
+  title and keeps it.
+- **No markdown in embed titles**, because Discord shows the asterisks.
+- **Bold the subject of the sentence** in plain messages: *"**Freyja** joined
+  Midgard"*, *"**Midgard** is shutting down"*.
+- **One line is a message, a set of facts is an embed.** A channel of boxes for
+  joins and leaves reads like an alarm going off.
+- **Player words, not process words.** `status_label()` is the single place
+  where `running` becomes "Online" -- and it answers "Online" only when the
+  server is actually joinable, so a process that is up but still loading the
+  world reads "Starting up" rather than lying. A crash reads "Offline", because
+  to a player it is, and "crashed" in their channel invites questions nobody in
+  it can answer.
+- **No operator detail in a player reply.** `/vh status` used to carry the
+  console notices, the exit code and a mod-update count. All three are things
+  only the operator can act on, and all three are gone.
+
+The payoff beyond tidiness: the *online* announcement and `/vh status` are
+**the same card**, built by `render.server_fields()`. Being told and asking do
+not merely cover the same ground, they look alike -- and a change to one cannot
+drift from the other.
+
 ## Where the announcements come from
 
 The manager already produces nearly all of this; very little of it is new
