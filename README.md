@@ -209,6 +209,12 @@ tested end to end, and the structure is meant to be built on.
   install, nothing else) and `/vh player` — with a name for that player's
   stats, without one for everybody who has ever played here, online first.
   It reads the roster, so it answers for somebody who left an hour ago.
+- **It all reads as one voice.** Five status glyphs with one meaning each, the
+  subject in the title and the context in the footer, player words rather than
+  process words — "Online" only when the server is genuinely joinable, and
+  "Starting up" while it is still loading the world. The *server is online*
+  announcement and `/vh status` are literally the same card, so being told and
+  asking cannot drift apart.
 - **It opens no port.** Commands arrive over a websocket the manager dials out
   on, not over an HTTP endpoint Discord posts to, so there is nothing to forward
   and no certificate to get — which is what makes it work on a box behind NAT

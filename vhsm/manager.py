@@ -596,11 +596,13 @@ class InstanceManager:
 
         name = event.name or event.player_id or "Someone"
         server = record.config.name
+        # The marks and wording follow vhsm.discord.render's vocabulary, so a
+        # join reads the same as the roster row it will become.
         if event.kind == "named":
             self.events.publish(Event(
                 kind=ev.PLAYER_JOIN,
                 instance_id=record.config.id, instance_name=server,
-                title=f"**{name}** joined {server}.",
+                title=f"\U0001F7E2 **{name}** joined {server}.",
                 level="good",
                 data={"player": name, "player_id": event.player_id},
             ))
@@ -613,8 +615,8 @@ class InstanceManager:
             self.events.publish(Event(
                 kind=ev.PLAYER_LEAVE,
                 instance_id=record.config.id, instance_name=server,
-                title=f"**{name}** left {server}{played}.",
-                level="info",
+                title=f"\u26AB **{name}** left {server}{played}.",
+                level="muted",
                 data={"player": name, "player_id": event.player_id,
                       "playtime": event.count},
             ))
@@ -1823,16 +1825,18 @@ class InstanceManager:
         changed_at = record.mods.changed_at
         if record.announced_mods is None or changed_at != record.announced_mods_at:
             profile = ModProfile(record.layout, self.settings.cache_dir, self.index)
-            running = {
-                mod.package_full_name: mod.version
-                for mod in profile.mods
-                if mod.enabled
-            } if record.config.mods_enabled else {}
+            enabled = [m for m in profile.mods if m.enabled] \
+                if record.config.mods_enabled else []
+            running = {mod.package_full_name: mod.version for mod in enabled}
+            # The display name as the mod itself reports it, so an
+            # announcement names it exactly as /vh mods does rather than
+            # guessing from the package id.
+            names = {mod.package_full_name: mod.name for mod in enabled}
             previous = record.announced_mods
             record.announced_mods = running
             record.announced_mods_at = changed_at
             if previous is not None and running != previous:
-                self._announce_mod_diff(record, previous, running)
+                self._announce_mod_diff(record, previous, running, names)
 
         previous_build, record.announced_build = record.announced_build, build
         if build and previous_build is not None and build != previous_build:
@@ -1840,14 +1844,14 @@ class InstanceManager:
                 kind=ev.UPDATED,
                 instance_id=record.config.id,
                 instance_name=record.config.name,
-                title=f"{record.config.name} has been updated.",
+                title=f"\u2B06\uFE0F {record.config.name} has been updated",
                 # The Valheim version is what a player has to match to join;
                 # the Steam build id it came from is operator business.
                 detail=(
-                    f"Now running Valheim {record.version}."
+                    f"Now running Valheim `{record.version}`."
                     if record.version else "The server files were updated."
                 ),
-                level="good",
+                level="info",
                 key=f"updated:{record.config.id}:{build}",
                 data={"build": build, "version": record.version},
             ))
@@ -1857,19 +1861,26 @@ class InstanceManager:
         record: InstanceRecord,
         previous: dict[str, str],
         running: dict[str, str],
+        names: dict[str, str],
     ) -> None:
-        """One message naming what this server's mod set gained, lost or moved."""
+        """One message naming what this server's mod set gained, lost or moved.
+
+        Laid out like ``/vh mods``: a bullet and the mod's own name, with
+        versions in code. A mod that has gone has no name to look up any more,
+        so the package id is split as a last resort.
+        """
         def label(package: str) -> str:
-            # "Author-Mod" reads as the mod's name to a player, not the author's.
-            return package.split("-", 1)[-1]
+            # "Author-Mod" reads as the mod's name to a player, not the
+            # author's, which is the right fallback for one no longer here.
+            return names.get(package) or package.split("-", 1)[-1]
 
         lines = [
-            f"\u2022 {label(package)} {previous[package]} \u2192 {version}"
+            f"\u2022 {label(package)} `{previous[package]}` \u2192 `{version}`"
             for package, version in running.items()
             if package in previous and previous[package] != version
         ]
         lines += [
-            f"\u2022 {label(package)} {version} (new)"
+            f"\u2022 {label(package)} `{version}` (new)"
             for package, version in running.items()
             if package not in previous
         ]
@@ -1882,9 +1893,10 @@ class InstanceManager:
             kind=ev.MODS_CHANGED,
             instance_id=record.config.id,
             instance_name=record.config.name,
-            title=f"{record.config.name} is running updated mods.",
+            # The mods mark, and no markdown: this is an embed title.
+            title=f"\U0001F4E6 {record.config.name} is running updated mods",
             detail="\n".join(lines),
-            level="good",
+            level="info",
             key=f"mods-changed:{record.config.id}:{sorted(running.items())}",
             data={"mods": running},
         ))

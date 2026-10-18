@@ -151,6 +151,29 @@ than taking up to an hour the way global ones do. If `/vh` does not show up,
 press **Ctrl+R** (**Cmd+R** on a Mac) to reload the Discord client; it caches
 the list.
 
+### What the messages look like
+
+Five glyphs, one meaning each, so the channel is readable at a glance:
+
+| | Means |
+|---|---|
+| 🟢 | up, or here — the server is online, a player joined |
+| ⚫ | gone — the server is shutting down, a player left |
+| 🟡 | on its way — the server is restarting |
+| 📦 | about this server's mods |
+| ⬆️ | about this server's version |
+
+> 🟢 **Midgard is online**
+> Players 3/10 · Up for 2h 30m · Version 0.217.46 · Mods 7 mods active
+> Address `valheim.example.com:2456`
+
+> 🟡 **Midgard** is restarting.
+
+> 🟢 **Freyja** joined Midgard.
+
+That first one is the same card `/vh status` answers with, so being told and
+asking look alike.
+
 ## 5. Check that it works
 
 Two checks, in order:
@@ -193,12 +216,12 @@ telling them nothing they can act on.
 What they get instead is the part that matters, posted once the server is back
 up and actually running it:
 
-> **Midgard** is running updated mods.
-> • Jotunn 2.20.0 → 2.30.2
-> • EpicLoot 0.14.13 (new)
+> 📦 **Midgard is running updated mods**
+> • Jotunn `2.20.0` → `2.30.2`
+> • EpicLoot `0.14.13` (new)
 
-> **Midgard** has been updated.
-> Now running Valheim 0.217.46.
+> ⬆️ **Midgard has been updated**
+> Now running Valheim `0.217.46`.
 
 Both compare what the server is **running** against what it was running last
 time it came up — so a mod installed but not yet loaded is not announced until

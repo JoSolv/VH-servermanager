@@ -58,6 +58,10 @@ OPTION_STRING = 3
 #: one name in a guild that may well have several bots in it.
 ROOT = "vh"
 
+#: Roster rows in one reply. Four dozen is already a wall of text, and the
+#: embed description limit is the hard stop behind it.
+ROSTER_LIMIT = 40
+
 class Denied(RuntimeError):
     """The command was refused, with a reason that is safe to show.
 
@@ -196,68 +200,35 @@ def check_control(record: Any, interaction: dict[str, Any]) -> None:
 # handlers
 # --------------------------------------------------------------------------- #
 async def _status(ctx: CommandContext) -> dict[str, Any]:
+    """Is this server up, who is on it, where to join.
+
+    The same card the *online* announcement posts -- see
+    :func:`vhsm.discord.render.server_fields` -- so being told and asking look
+    alike rather than merely covering the same ground.
+    """
     record = ctx.record
     snapshot = record.snapshot()
-    status = str(snapshot["status"])
-    players = snapshot.get("players") or {}
-    mods = snapshot.get("mods") or {}
-
-    fields: list[dict[str, Any]] = [
-        {
-            "name": "Status",
-            "value": f"{render.STATUS_MARKS.get(status, '')} {status}"
-            + (f" ({snapshot['operation']})" if snapshot.get("operation") else ""),
-        },
-        {"name": "World", "value": snapshot.get("world") or "—"},
-    ]
-    if status == "running":
-        maximum = players.get("max") or 0
-        count = players.get("count") or 0
-        fields.append(
-            {
-                "name": "Players",
-                "value": f"{count}/{maximum}" if maximum else str(count),
-            }
-        )
-        if snapshot.get("uptime"):
-            fields.append({"name": "Uptime", "value": render.duration(snapshot["uptime"])})
-    if snapshot.get("version"):
-        fields.append({"name": "Version", "value": snapshot["version"]})
-    if record.config.discord.show_address:
-        fields.append(
-            {"name": "Address", "value": f"`{ctx.manager.address_for(record)}`", "inline": False}
-        )
-    if snapshot.get("mods_enabled"):
-        value = f"{mods.get('enabled', 0)} active of {mods.get('installed', 0)} installed"
-        if mods.get("updates_active"):
-            value += f", {len(mods['updates_active'])} with an update"
-        fields.append({"name": "Mods", "value": value, "inline": False})
-
-    # The notices are the manager's own words for what is wrong, already
-    # written for a person to read, so they are repeated rather than restated.
-    description = "\n".join(
-        f"⚠️ {notice['title']}" for notice in snapshot.get("notices") or []
-    )
-    if status == "crashed" and snapshot.get("exit_code") is not None:
-        description = (
-            f"Exited with code {snapshot['exit_code']}." + ("\n" + description if description else "")
-        )
-
+    _, level = render.status_label(snapshot)
     return _embed_message(
         render.embed(
-            snapshot["name"],
-            description=description,
-            level=render.STATUS_LEVELS.get(status, "info"),
-            fields=fields,
+            record.config.name,
+            level=level,
+            fields=render.server_fields(
+                snapshot,
+                ctx.manager.address_for(record),
+                show_address=record.config.discord.show_address,
+            ),
         )
     )
 
 
 async def _players(ctx: CommandContext) -> dict[str, Any]:
+    """Who is connected right now. Kept for the admin channel."""
     record = ctx.record
     snapshot = record.snapshot()
-    if not record.supervisor.status.is_active:
-        return _message(f"**{record.config.name}** is {snapshot['status']}.")
+    if not render.connectable(snapshot):
+        label, _ = render.status_label(snapshot)
+        return _message(f"**{record.config.name}** is not up. {label}")
 
     players = (snapshot.get("players") or {}).get("players") or []
     count = (snapshot.get("players") or {}).get("count") or 0
@@ -267,28 +238,28 @@ async def _players(ctx: CommandContext) -> dict[str, Any]:
         # the console has named anybody.
         if count:
             return _message(
-                f"**{record.config.name}**: {count} player(s) connected, "
-                "no names resolved yet."
+                f"{render.count_of(count, 'player')} connected to "
+                f"**{record.config.name}**, no names resolved yet."
             )
         return _message(f"Nobody is on **{record.config.name}**.")
 
     lines = []
     for player in players:
-        bits = [f"• **{player['name']}**"]
+        bits = [f"{render.MARK_UP} **{player['name']}**"]
         if player.get("in_world"):
-            bits.append(f"· {render.duration(player.get('playtime') or 0)}")
+            bits.append(f"\u00b7 {render.duration(player.get('playtime') or 0)}")
         else:
-            bits.append("· connecting")
+            bits.append("\u00b7 connecting")
         if player.get("platform") and player["platform"] != "unknown":
-            bits.append(f"· {player['platform']}")
+            bits.append(f"\u00b7 {player['platform']}")
         lines.append(" ".join(bits))
 
     return _embed_message(
         render.embed(
-            f"{record.config.name} — players",
+            "Connected",
             description="\n".join(lines),
             level="good",
-            footer=f"{count} connected",
+            footer=f"{record.config.name} \u00b7 {count} connected",
         )
     )
 
@@ -314,12 +285,14 @@ async def _mods(ctx: CommandContext) -> dict[str, Any]:
 
     return _embed_message(
         render.embed(
-            f"{record.config.name} \u2014 mods",
+            "Mods",
+            # A bullet, not a mark: the marks say *state*, and a list of
+            # twenty mods each carrying a package glyph is noise.
             description="\n".join(
                 f"\u2022 {mod.name} `{mod.version}`" for mod in active
             ),
             level="info",
-            footer=f"{len(active)} mod(s)",
+            footer=f"{record.config.name} \u00b7 {render.count_of(len(active), 'mod')}",
         )
     )
 
@@ -357,15 +330,14 @@ async def _player(ctx: CommandContext) -> dict[str, Any]:
             f"Nobody called **{wanted}** has played on **{record.config.name}**."
         )
 
-    here = (entry.display_name or "").lower() in online or any(
-        name.lower() in online for name in entry.names
-    )
+    here = any(name.lower() in online for name in entry.names)
     fields = [
         {"name": "Sessions", "value": str(entry.sessions)},
         {"name": "Time played", "value": render.duration(entry.playtime)},
         {
             "name": "Last seen",
-            "value": "**online now**" if here else render.timestamp(entry.last_seen),
+            "value": (f"{render.MARK_UP} online now" if here
+                      else render.timestamp(entry.last_seen)),
             "inline": False,
         },
     ]
@@ -395,30 +367,33 @@ def _roster(record: Any, online: set[str]) -> dict[str, Any]:
     def is_here(entry: Any) -> bool:
         return any(name.lower() in online for name in entry.names)
 
-    # Online first, then most recently seen -- which is what roster.entries()
-    # already gives, so only the online ones need lifting.
+    # Online first, then most recently seen -- which is the order
+    # roster.entries() already gives, so only the online ones need lifting.
     ordered = sorted(entries, key=lambda e: not is_here(e))
-    lines = []
-    for entry in ordered[:40]:
+    shown, lines = ordered[:ROSTER_LIMIT], []
+    for entry in shown:
         name = entry.display_name or "(unnamed)"
         if is_here(entry):
-            lines.append(f"\U0001F7E2 **{name}** \u00b7 online now")
+            lines.append(f"{render.MARK_UP} **{name}** \u00b7 online now")
         else:
             lines.append(
-                f"\u26AB {name} \u00b7 {render.duration(entry.playtime)} played "
-                f"\u00b7 {render.timestamp(entry.last_seen)}"
+                f"{render.MARK_DOWN} {name} \u00b7 "
+                f"{render.duration(entry.playtime)} played \u00b7 "
+                f"{render.timestamp(entry.last_seen)}"
             )
     here = sum(1 for entry in entries if is_here(entry))
-    footer = f"{len(entries)} player(s) ever, {here} online now"
-    if len(ordered) > 40:
-        footer += " \u00b7 showing the first 40"
+
+    context = f"{record.config.name} \u00b7 {render.count_of(len(entries), 'player')}"
+    context += f", {here} online" if here else ", none online"
+    if len(ordered) > len(shown):
+        context += f" \u00b7 showing {len(shown)}"
 
     return _embed_message(
         render.embed(
-            f"{record.config.name} \u2014 players",
+            "Players",
             description="\n".join(lines),
             level="good" if here else "info",
-            footer=footer,
+            footer=context,
         )
     )
 
